@@ -150,6 +150,12 @@ export const api = {
 
     getJob: (jobId: string) => req<{ job: Job }>(`/api/admin/jobs/${jobId}`),
 
+    getEvent: (eventId: string) =>
+      req<{ event: EventSummary }>(`/api/admin/events/${eventId}`),
+
+    reindexSource: (sourceId: string) =>
+      req<{ job_id: string }>(`/api/admin/sources/${sourceId}/reindex`, { method: 'POST' }),
+
     report: (eventId: string) =>
       req<{
         sources: { id: string; drive_folder_id: string; drive_url: string;

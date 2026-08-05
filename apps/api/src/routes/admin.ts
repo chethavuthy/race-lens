@@ -209,6 +209,47 @@ adminRoutes.get('/events/:id/report', async (c) => {
   });
 });
 
+/** Re-run one source: a fresh job over the same folder. Resume skips what exists. */
+adminRoutes.post('/sources/:id/reindex', async (c) => {
+  const sourceId = c.req.param('id');
+  const src = await c.env.DB.prepare('SELECT * FROM sources WHERE id = ?').bind(sourceId).first<any>();
+  if (!src) throw new HttpError(404, 'Source not found', 'no_source');
+
+  const jobId = newId();
+  await c.env.DB.prepare(
+    'INSERT INTO jobs (id, event_id, source_id, status, updated_at) VALUES (?, ?, ?, ?, ?)',
+  ).bind(jobId, src.event_id, sourceId, 'queued', nowIso()).run();
+
+  const res = await fetch(`https://api.github.com/repos/${c.env.GH_REPO}/dispatches`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${c.env.GH_DISPATCH_TOKEN}`,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'race-lens-worker', 'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      event_type: 'index-event',
+      client_payload: {
+        event_id: src.event_id, source_id: sourceId,
+        folder_id: src.drive_folder_id, job_id: jobId,
+      },
+    }),
+  });
+  if (!res.ok) {
+    await c.env.DB.prepare("UPDATE jobs SET status='failed', error=?, updated_at=? WHERE id=?")
+      .bind(`dispatch failed: ${res.status}`, nowIso(), jobId).run();
+    throw new HttpError(502, `Could not start the job (GitHub ${res.status})`, 'dispatch_failed');
+  }
+  return c.json({ job_id: jobId }, 202);
+});
+
+adminRoutes.get('/events/:id', async (c) => {
+  const row = await c.env.DB.prepare('SELECT * FROM events WHERE id = ?')
+    .bind(c.req.param('id')).first<EventRow>();
+  if (!row) throw new HttpError(404, 'Event not found', 'no_event');
+  return c.json({ event: { ...publicEvent(c.env, row), created_at: row.created_at } });
+});
+
 adminRoutes.get('/jobs/:id', async (c) => {
   const row = await c.env.DB.prepare('SELECT * FROM jobs WHERE id = ?').bind(c.req.param('id')).first<JobRow>();
   if (!row) throw new HttpError(404, 'Job not found', 'no_job');

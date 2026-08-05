@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { RouterLink } from 'vue-router';
 import { api, type EventSummary, type Job } from '../lib/api';
 
 type Inspection = Awaited<ReturnType<typeof api.admin.inspect>>;
@@ -131,30 +132,6 @@ async function onEventBanner(ev: EventSummary, e: Event) {
   }
 }
 
-type Report = Awaited<ReturnType<typeof api.admin.report>>;
-const openReport = ref<string | null>(null);
-const report = ref<Report | null>(null);
-const reportBusy = ref(false);
-
-async function toggleReport(ev: EventSummary) {
-  if (openReport.value === ev.id) { openReport.value = null; report.value = null; return; }
-  openReport.value = ev.id;
-  report.value = null;
-  reportBusy.value = true;
-  try {
-    report.value = await api.admin.report(ev.id);
-  } catch (e: any) {
-    bannerError.value = e.message;
-    openReport.value = null;
-  } finally {
-    reportBusy.value = false;
-  }
-}
-
-function shortFolder(url: string) {
-  return url.match(/\/folders\/([\w-]+)/)?.[1] ?? url;
-}
-
 async function publish(ev: EventSummary) {
   await api.admin.setStatus(ev.id, 'ready');
   await refreshEvents();
@@ -268,7 +245,9 @@ async function publish(ev: EventSummary) {
       v-for="e in events" :key="e.id"
       style="display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line)">
       <div style="flex: 1">
-        <div style="font-weight: 600">{{ e.name }}</div>
+        <RouterLink :to="`/admin/e/${e.id}`" style="font-weight: 600; text-decoration: underline">
+          {{ e.name }}
+        </RouterLink>
         <div class="muted small">
           /e/{{ e.slug }} · {{ e.status }} · {{ e.photo_count.toLocaleString() }} photos ·
           {{ e.face_count.toLocaleString() }} faces
@@ -279,9 +258,10 @@ async function publish(ev: EventSummary) {
            style="width: 96px; aspect-ratio: 16/9; flex: none" />
       <div v-else class="thumb" style="width: 96px; aspect-ratio: 16/9; flex: none" />
       <div class="btn-row" style="flex: none">
-        <button @click="toggleReport(e)">
-          {{ openReport === e.id ? 'Hide log' : 'Ingest log' }}
-        </button>
+        <RouterLink :to="`/admin/e/${e.id}`" class="btn"
+                    style="display: inline-flex; align-items: center; min-height: var(--tap)">
+          Open
+        </RouterLink>
         <label :for="`bn-${e.id}`" class="btn" style="margin: 0; display: inline-flex;
                align-items: center; min-height: var(--tap); cursor: pointer; color: var(--text)">
           {{ e.banner_url ? 'Replace banner' : 'Add banner' }}
