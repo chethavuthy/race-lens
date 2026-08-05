@@ -205,14 +205,20 @@ def run(args: argparse.Namespace) -> int:
                 )
                 embeddings.append(quantize(face.embedding))
 
-            if not faces:
-                # No face to anchor a torso crop to — fall back to a full-image
-                # pass so back-of-pack and finish-line-clock shots still index.
-                for hit in reader.read_full(bgr):
-                    bib_payload.append({"photo_id": photo_id, "bib": hit.bib, "bib_raw": hit.raw, "conf": hit.conf})
+            # Tiled whole-frame pass on EVERY photo, not just face-less ones.
+            #
+            # Torso crops can only find a bib belonging to a detected face, so a
+            # detection miss costs a bib as well. Measured union over 12 photos:
+            # 21 -> 27 distinct bibs. Tiling alone is a regression, so it runs
+            # alongside the torso pass rather than instead of it.
+            for hit in reader.read_tiles(bgr):
+                bib_payload.append({"photo_id": photo_id, "bib": hit.bib,
+                                    "bib_raw": hit.raw, "conf": hit.conf})
 
-        if bib_payload:
-            up.put_bibs(args.event_id, bib_payload)
+        # Every photo in this batch is authoritative for its own bibs, including
+        # ones that produced none.
+        if photo_ids:
+            up.put_bibs(args.event_id, bib_payload, replace_photos=list(photo_ids.values()))
 
         processed += len(local)
         up.progress(args.job_id, done=processed, total=total)

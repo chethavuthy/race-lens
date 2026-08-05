@@ -162,10 +162,25 @@ internalRoutes.get('/events/:id/indexed', async (c) => {
 
 internalRoutes.post('/events/:id/bibs', async (c) => {
   const eventId = c.req.param('id');
-  const { bibs } = await c.req.json<{
+  const { bibs, replace_photos } = await c.req.json<{
     bibs: { photo_id: string; bib: string; bib_raw?: string; conf?: number }[];
+    replace_photos?: string[];
   }>();
   if (!Array.isArray(bibs)) throw new HttpError(400, 'bibs is required', 'bad_request');
+
+  // Clear each photo's existing bibs first, so a re-read is AUTHORITATIVE.
+  //
+  // This endpoint only ever inserted/updated, so a number the old code misread
+  // survived every subsequent re-read. Tightening the rules could add correct
+  // bibs but never retract wrong ones — 250 stale rows, 57 of them fragments
+  // the current rules reject outright.
+  if (Array.isArray(replace_photos) && replace_photos.length) {
+    for (const part of chunk(replace_photos, D1_MAX_PARAMS - 1)) {
+      await c.env.DB.prepare(
+        `DELETE FROM bibs WHERE event_id = ? AND photo_id IN (${part.map(() => '?').join(',')})`,
+      ).bind(eventId, ...part).run();
+    }
+  }
 
   for (const part of chunk(bibs, 150)) {
     await c.env.DB.batch(

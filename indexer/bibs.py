@@ -49,6 +49,21 @@ MIN_CONF = 0.7
 # the text detector finds nothing usable, at 2400px it reads bibs reliably.
 FULL_OCR_MAX_EDGE = 2400
 
+# Minimum width of a detected text region, as a fraction of the FULL image
+# width, for it to be accepted as a bib.
+#
+# Confidence alone does not work. RapidOCR's score answers "am I reading these
+# glyphs correctly", not "is this a bib" — on a 22x17px smudge it returned
+# "420" at 0.91. Measured on a real frame (6000px wide):
+#   real bibs    140-190px   2.3-3.2% of width
+#   0703         76-84px     1.3-1.4%   (genuine, distant, digit misread)
+#   420 (noise)  22-43px     0.4-0.7%
+# 1.0% sits between the smallest genuine bib and the largest piece of noise.
+#
+# An invented bib is worse than a missing one: it puts a stranger's photo in a
+# runner's results and neither of them can tell.
+MIN_BIB_WIDTH_FRAC = 0.010
+
 # Torso box relative to the face box.
 #
 # The plan specified a 1.2h-3.2h window. Measured against real bibs from the
@@ -83,9 +98,24 @@ class BibHit:
     raw: str = ""   # exactly as printed on the bib, e.g. "0056"
 
 
-def _tokens_from_rapidocr(result) -> list[tuple[str, float]]:
-    """RapidOCR returns [[box, text, score], ...] or None."""
-    return [(str(item[1]), float(item[2])) for item in (result or []) if len(item) >= 3]
+def _tokens_from_rapidocr(result, min_width: float = 0.0) -> list[tuple[str, float]]:
+    """RapidOCR returns [[box, text, score], ...] or None.
+
+    Drops regions narrower than `min_width` — see MIN_BIB_WIDTH_FRAC.
+    """
+    out: list[tuple[str, float]] = []
+    for item in (result or []):
+        if len(item) < 3:
+            continue
+        box = item[0]
+        try:
+            width = max(p[0] for p in box) - min(p[0] for p in box)
+        except (TypeError, ValueError):
+            width = min_width  # unparseable box: do not silently drop the read
+        if width < min_width:
+            continue
+        out.append((str(item[1]), float(item[2])))
+    return out
 
 
 def _tokens_from_paddle(result) -> list[tuple[str, float]]:
@@ -144,13 +174,16 @@ class BibReader:
                 continue
         raise RuntimeError("No usable OCR engine (tried RapidOCR and PaddleOCR)")
 
-    def _read(self, image: np.ndarray) -> list[BibHit]:
+    def _read(self, image: np.ndarray, ref_width: int | None = None) -> list[BibHit]:
+        """OCR a region. `ref_width` is the FULL image width, used to reject
+        text far too small to be a bib."""
         if image.size == 0 or min(image.shape[:2]) < 12:
             return []
+        min_w = (ref_width or image.shape[1]) * MIN_BIB_WIDTH_FRAC
         try:
             if self.kind == "rapidocr":
                 result, _ = self.engine(image)
-                pairs = _tokens_from_rapidocr(result)
+                pairs = _tokens_from_rapidocr(result, min_w)
             else:
                 try:
                     result = self.engine.predict(image)
@@ -180,8 +213,37 @@ class BibReader:
         if x2 <= x1 or y2 <= y1:
             return None
 
-        hits = self._read(bgr[y1:y2, x1:x2])
+        hits = self._read(bgr[y1:y2, x1:x2], ref_width=w_img)
         return max(hits, key=lambda hit: hit.conf) if hits else None
+
+    def read_tiles(self, bgr: np.ndarray, cols: int = 2, rows: int = 2,
+                   overlap: float = 0.15) -> list[BibHit]:
+        """Whole-frame OCR over overlapping tiles, independent of face detection.
+
+        The torso path can only read a bib belonging to a face the detector
+        found. Tiling breaks that dependency, which matters because a single
+        detection miss otherwise silently costs a bib too.
+
+        Measured over 12 photos, union with the torso pass: 21 -> 27 distinct
+        bibs. Tiling ALONE is a regression (it loses 3 of the torso pass's 21),
+        so this supplements rather than replaces. 2x2 beats 3x2 and 4x3 — finer
+        grids cut through bibs at tile seams.
+        """
+        h, w = bgr.shape[:2]
+        tw, th = w // cols, h // rows
+        best: dict[str, BibHit] = {}
+        for r in range(rows):
+            for c in range(cols):
+                x1 = max(0, int(c * tw - tw * overlap))
+                x2 = min(w, int((c + 1) * tw + tw * overlap))
+                y1 = max(0, int(r * th - th * overlap))
+                y2 = min(h, int((r + 1) * th + th * overlap))
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                for hit in self._read(bgr[y1:y2, x1:x2], ref_width=w):
+                    if hit.bib not in best or hit.conf > best[hit.bib].conf:
+                        best[hit.bib] = hit
+        return list(best.values())
 
     def read_full(self, bgr: np.ndarray) -> list[BibHit]:
         """Whole-frame OCR, for photos where the detector found no face.
@@ -201,7 +263,7 @@ class BibReader:
         # Dedupe to the best confidence per number — one bib read twice in a
         # photo is one bib.
         best: dict[str, BibHit] = {}
-        for hit in self._read(bgr):
+        for hit in self._read(bgr, ref_width=bgr.shape[1]):
             if hit.bib not in best or hit.conf > best[hit.bib].conf:
                 best[hit.bib] = hit
         return list(best.values())

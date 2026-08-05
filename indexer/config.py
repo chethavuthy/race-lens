@@ -31,11 +31,13 @@ class Config:
         self.thumb_max_edge = int(os.environ.get("THUMB_MAX_EDGE", "1000"))
         self.thumb_quality = int(os.environ.get("THUMB_QUALITY", "80"))
         # 1280, not 640. Measured on a real race photo, faces found by detector size:
-        #   640 -> 4    1024 -> 5    1280 -> 6    1600 -> 7
+        #   640 -> 4   1024 -> 5   1280 -> 6   1600 -> 7   2048 -> 9
+        # 2048 also beats scrfd_34g (39 MB, 5 faces, 0.37s) at 0.19s, so the
+        # win is resolution, not a bigger model.
         # Race photos put runners at a distance, so the default was leaving
         # people undetectable by face search. 1280 is the knee: 1600 costs more
         # CPU per photo for one extra face.
-        self.det_size = int(os.environ.get("DET_SIZE", "1280"))
+        self.det_size = int(os.environ.get("DET_SIZE", "2048"))
         self.work_dir = os.environ.get("WORK_DIR", "/tmp/work")
 
     @property

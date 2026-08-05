@@ -101,9 +101,23 @@ class Uploader:
             log.warning("Could not fetch indexed ids (%s); processing everything", exc)
             return set()
 
-    def put_bibs(self, event_id: str, bibs: list[dict]) -> None:
+    def put_bibs(self, event_id: str, bibs: list[dict],
+                 replace_photos: list[str] | None = None) -> None:
+        """Write bibs. `replace_photos` clears those photos' existing bibs first,
+        so a re-read replaces rather than accumulates."""
+        first = True
         for part in chunked(bibs, 150):
-            self._post(f"/api/internal/events/{event_id}/bibs", {"bibs": part})
+            payload = {"bibs": part}
+            # Only the first chunk clears, or later chunks would delete what
+            # their predecessors just wrote.
+            if first and replace_photos:
+                payload["replace_photos"] = replace_photos
+                first = False
+            self._post(f"/api/internal/events/{event_id}/bibs", payload)
+        # Photos that yielded no bib at all still need their stale rows cleared.
+        if first and replace_photos:
+            self._post(f"/api/internal/events/{event_id}/bibs",
+                       {"bibs": [], "replace_photos": replace_photos})
 
     def reserve_rows(self, event_id: str, shard_key: str, count: int) -> int:
         """Ask the Worker for this shard's global row offset.
