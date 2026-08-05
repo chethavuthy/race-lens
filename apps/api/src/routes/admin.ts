@@ -198,10 +198,23 @@ adminRoutes.get('/events/:id/report', async (c) => {
        FROM sources s WHERE s.event_id = ? ORDER BY s.added_at`,
   ).bind(eventId).all<any>();
 
-  const { results: jobs } = await c.env.DB.prepare(
+  const { results: rawJobs } = await c.env.DB.prepare(
     `SELECT id, source_id, status, done, total, skipped, attempts, error, updated_at
        FROM jobs WHERE event_id = ? ORDER BY updated_at DESC`,
   ).bind(eventId).all<any>();
+
+  // A runner can vanish — GitHub cancels or reclaims it — and then nothing ever
+  // moves the row off 'queued'/'running'. The page then reports "a pass is
+  // running" forever, which is worse than reporting nothing: it hides the
+  // Re-index button behind a state that will never end. Anything untouched for
+  // 20 minutes is treated as stalled.
+  const STALE_MS = 20 * 60 * 1000;
+  const now = Date.now();
+  const jobs = rawJobs.map((j) => ({
+    ...j,
+    stale: ['queued', 'running'].includes(j.status) &&
+           now - Date.parse(j.updated_at) > STALE_MS,
+  }));
 
   const { results: log } = await c.env.DB.prepare(
     `SELECT level, code, message, drive_file_id, source_id, created_at

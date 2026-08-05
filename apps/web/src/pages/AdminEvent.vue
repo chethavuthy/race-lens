@@ -33,8 +33,13 @@ const totals = computed(() =>
   report.value?.totals ?? { links: 0, found: 0, found_known: true, indexed: 0, missing: 0 });
 const quality = computed(() => report.value?.quality ?? null);
 
+// A stalled job is NOT active: treating it as such would keep the spinner up
+// and the Re-index button disabled indefinitely.
 const activeJob = computed(() =>
-  (report.value?.jobs ?? []).find((j) => j.status === 'running' || j.status === 'queued') ?? null);
+  (report.value?.jobs ?? []).find(
+    (j) => (j.status === 'running' || j.status === 'queued') && !j.stale) ?? null);
+
+const stalledJob = computed(() => (report.value?.jobs ?? []).find((j) => j.stale) ?? null);
 
 const visibleLog = computed(() => {
   const log = report.value?.log ?? [];
@@ -126,6 +131,10 @@ const when = (iso: string) => new Date(iso).toLocaleString();
           <span class="spinner" /> A pass is running — {{ activeJob.done }} / {{ activeJob.total }}.
           Indexing continues automatically after a Drive rate limit.
         </p>
+        <p v-else-if="stalledJob" class="notice warn" style="margin-top: var(--s-4)">
+          A pass stopped without reporting back — the CI runner was cancelled or reclaimed.
+          Nothing is lost; press <strong>Re-index</strong> to pick up where it left off.
+        </p>
         <p v-else-if="totals.missing > 0" class="notice warn" style="margin-top: var(--s-4)">
           {{ plural(totals.missing, 'photo') }} not indexed. Press <strong>Re-index</strong> on the
           link below — photos already indexed are skipped.
@@ -203,7 +212,9 @@ const when = (iso: string) => new Date(iso).toLocaleString();
         <p v-if="!report?.jobs.length" class="muted" style="margin: 0">No indexing passes yet.</p>
         <div v-for="j in report?.jobs ?? []" :key="j.id" class="row row-tight">
           <div class="row-main small">
-            <span class="state" :class="jobState(j.status)">{{ j.status }}</span>
+            <span class="state" :class="j.stale ? 'err' : jobState(j.status)">
+              {{ j.stale ? 'stalled' : j.status }}
+            </span>
             · {{ j.done }} / {{ j.total }}
             <span v-if="j.skipped"> · {{ j.skipped }} could not be fetched</span>
             <span v-if="j.attempts"> · {{ j.attempts }} auto-continuation{{ j.attempts === 1 ? '' : 's' }}</span>

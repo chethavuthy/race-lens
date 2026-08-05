@@ -164,7 +164,8 @@ export const api = {
         totals: { links: number; found: number; found_known: boolean;
                   indexed: number; missing: number };
         jobs: { id: string; source_id: string | null; status: string; done: number; total: number;
-                skipped: number; attempts: number; error: string | null; updated_at: string }[];
+                skipped: number; attempts: number; error: string | null; updated_at: string;
+                stale: boolean }[];
         log: { level: string; code: string | null; message: string;
                drive_file_id: string | null; created_at: string }[];
         summary: { level: string; code: string | null; n: number }[];
