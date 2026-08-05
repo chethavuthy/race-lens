@@ -25,15 +25,11 @@ const notice = ref<string | null>(null);
 const levelFilter = ref<'all' | 'error' | 'warn'>('all');
 let poll: number | undefined;
 
-const totals = computed(() => {
-  const s = report.value?.sources ?? [];
-  return {
-    links: s.length,
-    found: s.reduce((n, x) => n + (x.discovered || 0), 0),
-    indexed: s.reduce((n, x) => n + (x.indexed || 0), 0),
-    missing: s.reduce((n, x) => n + (x.missing || 0), 0),
-  };
-});
+// Server-computed: indexed is a live COUNT over photos, not a sum of per-source
+// rows, and `found` excludes sources whose discovery count was never recorded.
+const totals = computed(() =>
+  report.value?.totals ?? { links: 0, found: 0, found_known: true, indexed: 0, missing: 0 },
+);
 
 const activeJob = computed(() =>
   (report.value?.jobs ?? []).find((j) => j.status === 'running' || j.status === 'queued') ?? null,
@@ -126,7 +122,7 @@ const folderUrl = (id: string) => `https://drive.google.com/drive/folders/${id}`
       <a :href="`/e/${event.slug}`" target="_blank" rel="noopener" style="text-decoration: underline">
         /e/{{ event.slug }}
       </a>
-      · {{ event.status }} · {{ plural(event.photo_count, 'photo') }} ·
+      · {{ event.status }} · {{ plural(totals.indexed || event.photo_count, 'photo') }} ·
       {{ plural(event.face_count, 'face') }}
     </p>
 
@@ -137,7 +133,12 @@ const folderUrl = (id: string) => `https://drive.google.com/drive/folders/${id}`
       <h2>Coverage</h2>
       <div style="display: flex; gap: var(--s-6); flex-wrap: wrap">
         <div><div class="muted small">Drive links</div><div style="font-size: var(--t-lg)">{{ totals.links }}</div></div>
-        <div><div class="muted small">Found on Drive</div><div style="font-size: var(--t-lg)">{{ totals.found }}</div></div>
+        <div>
+          <div class="muted small">Found on Drive</div>
+          <div style="font-size: var(--t-lg)">
+            {{ totals.found }}<span v-if="!totals.found_known" class="muted small">+</span>
+          </div>
+        </div>
         <div><div class="muted small">Indexed</div><div style="font-size: var(--t-lg)">{{ totals.indexed }}</div></div>
         <div>
           <div class="muted small">Still missing</div>
@@ -168,9 +169,10 @@ const folderUrl = (id: string) => `https://drive.google.com/drive/folders/${id}`
             {{ s.drive_folder_id }}
           </a>
           <span class="small">
-            <strong>{{ s.indexed }}</strong> / {{ s.discovered || '?' }} indexed
+            <strong>{{ s.indexed }}</strong> / {{ s.discovered_known ? s.discovered : '?' }} indexed
             <span v-if="s.missing > 0" style="color: var(--warn)"> · {{ s.missing }} missing</span>
-            <span v-else-if="s.discovered" style="color: var(--ok)"> · complete</span>
+            <span v-else-if="s.discovered_known" style="color: var(--ok)"> · complete</span>
+            <span v-else class="muted"> · total unknown until the next pass</span>
           </span>
           <button :disabled="busy === s.id || !!activeJob" @click="reindex(s.id)">
             <span v-if="busy === s.id" class="spinner" /> Re-index

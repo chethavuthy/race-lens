@@ -159,7 +159,10 @@ export const api = {
     report: (eventId: string) =>
       req<{
         sources: { id: string; drive_folder_id: string; drive_url: string;
-                   discovered: number; indexed: number; missing: number; added_at: string }[];
+                   discovered: number; discovered_known: boolean; indexed: number;
+                   missing: number; added_at: string }[];
+        totals: { links: number; found: number; found_known: boolean;
+                  indexed: number; missing: number };
         jobs: { id: string; source_id: string | null; status: string; done: number; total: number;
                 skipped: number; attempts: number; error: string | null; updated_at: string }[];
         log: { level: string; code: string | null; message: string;

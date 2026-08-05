@@ -123,13 +123,26 @@ adminRoutes.post('/ingest', async (c) => {
   if (!event) throw new HttpError(404, 'Event not found', 'no_event');
 
   const folderId = parseFolderId(drive_url);
-  const sourceId = newId();
-  const jobId = newId();
   const ts = nowIso();
+
+  // Re-use the source when this folder is already bound to this event.
+  //
+  // Every ingest used to insert a new row, so pasting the same link twice — or
+  // re-running after a rate limit — produced duplicate sources for one folder.
+  // The admin page then listed the same link several times, most with zero
+  // photos, and any per-source total became nonsense.
+  const existing = await c.env.DB.prepare(
+    'SELECT id FROM sources WHERE event_id = ? AND drive_folder_id = ?',
+  ).bind(event_id, folderId).first<{ id: string }>();
+
+  const sourceId = existing?.id ?? newId();
+  const jobId = newId();
 
   await c.env.DB.batch([
     c.env.DB.prepare(
-      'INSERT INTO sources (id, event_id, drive_folder_id, drive_url, added_at) VALUES (?, ?, ?, ?, ?)',
+      `INSERT INTO sources (id, event_id, drive_folder_id, drive_url, added_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (event_id, drive_folder_id) DO UPDATE SET drive_url = excluded.drive_url`,
     ).bind(sourceId, event_id, folderId, drive_url, ts),
     c.env.DB.prepare(
       'INSERT INTO jobs (id, event_id, source_id, status, updated_at) VALUES (?, ?, ?, ?, ?)',
@@ -200,11 +213,30 @@ adminRoutes.get('/events/:id/report', async (c) => {
       WHERE event_id = ? GROUP BY level, code ORDER BY n DESC`,
   ).bind(eventId).all<any>();
 
+  // Event-wide truth, not a sum of per-source rows: photo_count on events is
+  // only refreshed at the end of a pass, so it reads stale while one is running.
+  const live = await c.env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM photos WHERE event_id = ?',
+  ).bind(eventId).first<{ n: number }>();
+
+  const withMissing = sources.map((s) => ({
+    ...s,
+    // discovered is 0 for sources indexed before it was recorded. Zero is not
+    // "found nothing", it is "not known" — reporting it as a shortfall invented
+    // missing photos that did not exist.
+    discovered_known: (s.discovered ?? 0) > 0,
+    missing: (s.discovered ?? 0) > 0 ? Math.max(0, s.discovered - (s.indexed ?? 0)) : 0,
+  }));
+
   return c.json({
-    sources: sources.map((s) => ({
-      ...s,
-      missing: Math.max(0, (s.discovered ?? 0) - (s.indexed ?? 0)),
-    })),
+    sources: withMissing,
+    totals: {
+      links: withMissing.length,
+      found: withMissing.reduce((n, s) => n + (s.discovered_known ? s.discovered : 0), 0),
+      found_known: withMissing.every((s) => s.discovered_known),
+      indexed: live?.n ?? 0,
+      missing: withMissing.reduce((n, s) => n + s.missing, 0),
+    },
     jobs, log, summary: counts,
   });
 });
