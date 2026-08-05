@@ -89,11 +89,17 @@ class Uploader:
             ids.update(res.get("photo_ids", {}))
         return ids
 
-    def already_indexed(self, event_id: str) -> set[str]:
-        """drive_file_ids this event already has, so a re-run can skip them."""
+    def already_indexed(self, event_id: str, complete_only: bool = False) -> set[str]:
+        """drive_file_ids this event already has, so a re-run can skip them.
+
+        `complete_only` counts a photo as done when it HAS FACES, which is what
+        a rebuild needs: after wiping faces the photo rows still exist, so the
+        default key would skip everything.
+        """
         try:
             res = self.session.get(
-                f"{self.cfg.api_base_url}/api/internal/events/{event_id}/indexed", timeout=60
+                f"{self.cfg.api_base_url}/api/internal/events/{event_id}/indexed"
+                + ("?complete=1" if complete_only else ""), timeout=60
             )
             res.raise_for_status()
             return set(res.json().get("drive_file_ids", []))

@@ -17,6 +17,10 @@ on:
         description: Re-process photos already indexed (for a full rebuild)
         type: boolean
         default: false
+      rebuild:
+        description: Resume on photos that already have faces (use after wiping)
+        type: boolean
+        default: false
 
 # Two runs against the same event would race on row allocation and photo
 # upserts. Queue them instead of cancelling — a cancelled run leaves a job
@@ -82,7 +86,8 @@ jobs:
             --folder-id "${{ github.event.client_payload.folder_id || inputs.folder_id }}" \
             --job-id    "${{ github.event.client_payload.job_id    || inputs.job_id }}" \
             ${{ (github.event.client_payload.bibs_only || inputs.bibs_only) && '--bibs-only' || '' }} \
-            ${{ (github.event.client_payload.no_resume || inputs.no_resume) && '--no-resume' || '' }}
+            ${{ (github.event.client_payload.no_resume || inputs.no_resume) && '--no-resume' || '' }} \
+            ${{ (github.event.client_payload.rebuild || inputs.rebuild) && '--rebuild' || '' }}
 
       - name: Report failure
         # main.py reports its own exceptions, but this also catches the cases it

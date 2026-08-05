@@ -154,9 +154,18 @@ internalRoutes.post('/events/:id/photos', async (c) => {
  * because Drive rate-limits sustained bulk downloads.
  */
 internalRoutes.get('/events/:id/indexed', async (c) => {
-  const { results } = await c.env.DB.prepare(
-    'SELECT drive_file_id FROM photos WHERE event_id = ?',
-  ).bind(c.req.param('id')).all<{ drive_file_id: string }>();
+  // `?complete=1` means "photos that already have FACES", not merely "photos
+  // that exist". That is the correct resume key for a rebuild: after wiping
+  // faces, every photo still exists, so plain resume would skip everything and
+  // do nothing — while --no-resume would re-process photos already rebuilt in
+  // an earlier pass and duplicate their vectors.
+  const complete = c.req.query('complete') === '1';
+  const sql = complete
+    ? `SELECT p.drive_file_id FROM photos p
+        WHERE p.event_id = ? AND EXISTS (SELECT 1 FROM faces f WHERE f.photo_id = p.id)`
+    : 'SELECT drive_file_id FROM photos WHERE event_id = ?';
+  const { results } = await c.env.DB.prepare(sql)
+    .bind(c.req.param('id')).all<{ drive_file_id: string }>();
   return c.json({ drive_file_ids: results.map((r) => r.drive_file_id) });
 });
 

@@ -87,7 +87,9 @@ def run(args: argparse.Namespace) -> int:
     if args.bibs_only:
         args.no_resume = True
     if not args.no_resume:
-        have = up.already_indexed(args.event_id)
+        # --rebuild resumes on "has faces" so a wiped index refills without
+        # re-processing photos an earlier pass already rebuilt.
+        have = up.already_indexed(args.event_id, complete_only=args.rebuild)
         if have:
             images = [i for i in images if i.id not in have]
             log.info(
@@ -336,6 +338,11 @@ def main() -> int:
         help="Re-read bib numbers for photos already indexed and write only the "
              "bibs table. Leaves photos, faces and shards untouched — use after "
              "changing OCR tuning. Implies --no-resume.",
+    )
+    p.add_argument(
+        "--rebuild", action="store_true",
+        help="Resume on photos that already have faces, not merely photos that "
+             "exist. Use after wiping faces/bibs for a clean re-index.",
     )
     p.add_argument(
         "--no-resume", action="store_true",
