@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env } from '../types';
 import { HttpError, chunk, newId, nowIso, timingSafeEqual } from '../lib';
-import { invalidateIndex } from '../search';
+import { D1_MAX_PARAMS, invalidateIndex } from '../search';
 
 export const internalRoutes = new Hono<{ Bindings: Env }>();
 
@@ -70,7 +70,8 @@ internalRoutes.post('/events/:id/photos', async (c) => {
   }
 
   const ids: Record<string, string> = {};
-  for (const part of chunk(photos.map((p) => p.drive_file_id), 200)) {
+  // Same D1 100-parameter ceiling as the search join.
+  for (const part of chunk(photos.map((p) => p.drive_file_id), D1_MAX_PARAMS - 1)) {
     const { results } = await c.env.DB.prepare(
       `SELECT id, drive_file_id FROM photos
         WHERE event_id = ? AND drive_file_id IN (${part.map(() => '?').join(',')})`,

@@ -92,6 +92,7 @@ publicRoutes.post('/events/:slug/search/face', async (c) => {
   const threshold = Number(c.req.query('t') ?? 0.38);
   const matches = await searchFaces(c.env, event.id, vec as number[], {
     threshold: Number.isFinite(threshold) ? threshold : 0.38,
+    ctx: c.executionCtx,
   });
   return c.json({ event: publicEvent(c.env, event), matches });
 });

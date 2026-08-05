@@ -1,5 +1,5 @@
 import type { Env } from './types';
-import { publicPhoto } from './lib';
+import { chunk, publicPhoto } from './lib';
 
 /**
  * Vector format contract — must match indexer/faces.py exactly.
@@ -14,6 +14,12 @@ import { publicPhoto } from './lib';
  */
 export const DIM = 512;
 export const SCALE = 127;
+
+/** D1's hard cap on bound parameters per query. Not SQLite's 999. */
+export const D1_MAX_PARAMS = 100;
+
+/** Structural: Hono's executionCtx and workers-types' ExecutionContext differ. */
+type Waiter = { waitUntil(p: Promise<unknown>): void };
 
 export function quantize(vec: number[]): Int8Array {
   const out = new Int8Array(DIM);
@@ -42,7 +48,38 @@ interface CachedIndex {
 const memCache = new Map<string, CachedIndex>();
 const CACHE_TTL_MS = 10 * 60 * 1000;
 
-async function loadIndex(env: Env, eventId: string): Promise<CachedIndex | null> {
+/**
+ * Fetch one shard, preferring the colo's edge cache over R2.
+ *
+ * Module scope only helps when the same warm isolate serves the next request,
+ * which is far from guaranteed — measured cold, a 14.65 MB R2 read costs
+ * 400-1200 ms versus ~25 ms for the scan itself. The Cache API is shared by
+ * every isolate in the colo, so it turns most of those misses into local reads.
+ */
+async function fetchShard(env: Env, key: string, ctx?: Waiter): Promise<Int8Array | null> {
+  // Synthetic key: shards are not reachable over HTTP, we only need a stable URL.
+  const cacheKey = new Request(`https://shards.race-lens.internal/${encodeURIComponent(key)}`);
+  const cache = caches.default;
+
+  const hit = await cache.match(cacheKey);
+  if (hit) return new Int8Array(await hit.arrayBuffer());
+
+  const obj = await env.BUCKET.get(key);
+  if (!obj) return null;
+  const buf = await obj.arrayBuffer();
+
+  // Shards are immutable per (event, source): a re-index writes a new object or
+  // the same bytes, so a long TTL is safe.
+  const store = new Response(buf, {
+    headers: { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' },
+  });
+  if (ctx) ctx.waitUntil(cache.put(cacheKey, store));
+  else await cache.put(cacheKey, store);
+
+  return new Int8Array(buf);
+}
+
+async function loadIndex(env: Env, eventId: string, ctx?: Waiter): Promise<CachedIndex | null> {
   const hit = memCache.get(eventId);
   if (hit && Date.now() - hit.loadedAt < CACHE_TTL_MS) return hit;
 
@@ -57,8 +94,8 @@ async function loadIndex(env: Env, eventId: string): Promise<CachedIndex | null>
   // Parallel fetch: shard count is small (one per source folder).
   const bodies = await Promise.all(
     shards.map(async (s) => {
-      const obj = await env.BUCKET.get(s.shard_key);
-      return obj ? { s, buf: new Int8Array(await obj.arrayBuffer()) } : null;
+      const buf = await fetchShard(env, s.shard_key, ctx);
+      return buf ? { s, buf } : null;
     }),
   );
 
@@ -91,13 +128,13 @@ export async function searchFaces(
   env: Env,
   eventId: string,
   vec: number[],
-  opts: { threshold?: number; topFaces?: number; topPhotos?: number } = {},
+  opts: { threshold?: number; topFaces?: number; topPhotos?: number; ctx?: Waiter } = {},
 ): Promise<FaceMatch[]> {
   const threshold = opts.threshold ?? 0.38;
   const topFaces = opts.topFaces ?? 200;
   const topPhotos = opts.topPhotos ?? 60;
 
-  const index = await loadIndex(env, eventId);
+  const index = await loadIndex(env, eventId, opts.ctx);
   if (!index) return [];
 
   const q = quantize(vec);
@@ -120,12 +157,20 @@ export async function searchFaces(
   const top = candidates.slice(0, topFaces);
   if (!top.length) return [];
 
-  const placeholders = top.map(() => '?').join(',');
-  const { results } = await env.DB.prepare(
-    `SELECT f.row_idx, f.bbox, p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.taken_at
-       FROM faces f JOIN photos p ON p.id = f.photo_id
-      WHERE f.event_id = ? AND f.row_idx IN (${placeholders})`,
-  ).bind(eventId, ...top).all<any>();
+  // D1 allows at most 100 bound parameters per query — far below SQLite's 999.
+  // topFaces is 200, so this MUST be chunked; binding them in one statement
+  // throws "too many SQL variables" on every search with enough matches, which
+  // is exactly the case that matters.
+  const results: any[] = [];
+  for (const part of chunk(top, D1_MAX_PARAMS - 1)) {
+    const placeholders = part.map(() => '?').join(',');
+    const page = await env.DB.prepare(
+      `SELECT f.row_idx, f.bbox, p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.taken_at
+         FROM faces f JOIN photos p ON p.id = f.photo_id
+        WHERE f.event_id = ? AND f.row_idx IN (${placeholders})`,
+    ).bind(eventId, ...part).all<any>();
+    results.push(...page.results);
+  }
 
   // Collapse to the best-scoring face per photo — a runner appearing twice in
   // one frame should not produce two grid tiles.
