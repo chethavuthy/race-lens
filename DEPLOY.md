@@ -14,12 +14,63 @@ node tools/preflight.mjs
 things still needing you.
 
 
-## STATUS — deployed 2026-08-05
+## STATUS — 2026-08-05
 
-**Live now**
+**Live and working**
 
 | | |
 |---|---|
+| Site | <https://race-lens.pages.dev> |
+| API | <https://race-lens-api.jt7.workers.dev> |
+| Event | The 11th Angkor Empire Marathon 2026 — **151/151 photos, 380 faces, 144 bib numbers** |
+| Repo | <https://github.com/chethavuthy/race-lens> |
+
+Verified on production: bib search (exact + suffix), face search (self-match
+0.999 from a real runner), thumbnails decoding 60/60, admin 403s, internal API
+401s on a bad secret, preflight 0 blocking / 0 warnings.
+
+**Remaining: 2 items, both needing ONE Cloudflare API token**
+
+Nameservers are done — `dig NS runlytics.fit` returns Cloudflare. What is
+missing is smaller than it looked:
+
+1. **CNAME records do not exist.** Both Pages custom domains are attached and
+   stuck at `status=pending` because nothing points at them:
+
+   ```
+   racelens.runlytics.fit    (no record)   ->  needs CNAME race-lens.pages.dev
+   race-lens.runlytics.fit   (no record)   ->  needs CNAME race-lens.pages.dev
+   ```
+
+2. **Cloudflare Access is unconfigured**, so `/admin` 403s for everyone
+   including you.
+
+Neither can be automated with `wrangler login`. That OAuth grant carries
+`zone:read` but not `dns_records:write` and has no Access scope at all — both
+endpoints return `10000 Authentication error`, verified directly. Re-adding the
+Pages custom domains does not make Pages provision the DNS either; that was
+tried and the records still do not appear.
+
+**The fix is one token, then one command:**
+
+<https://dash.cloudflare.com/profile/api-tokens> → Create Token → Custom:
+
+| Scope | Permission |
+|---|---|
+| Zone · DNS | Edit (`runlytics.fit`) |
+| Zone · Zone | Read (`runlytics.fit`) |
+| Account · Access: Apps and Policies | Edit |
+| Account · Cloudflare Pages | Read |
+
+```bash
+# paste into .env.deploy as CLOUDFLARE_API_TOKEN=
+./tools/finish-deploy.sh
+```
+
+It creates both CNAMEs, creates the four Access apps (`/admin` and `/api/admin`
+on each hostname) with an allow policy for your email, and verifies. Idempotent.
+
+---|---|
 | Site | <https://race-lens.pages.dev> |
 | API | <https://race-lens-api.jt7.workers.dev> |
 | D1 | `race-lens` · `b2201d61-8877-4c6f-bf73-64b848c89db7` (APAC) |
