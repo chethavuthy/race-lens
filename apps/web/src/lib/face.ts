@@ -10,7 +10,11 @@
  *
  * Verified by tools/golden. Change nothing here without re-running that.
  */
-import * as ort from 'onnxruntime-web';
+// Import the WASM-only build, not the default barrel. The default pulls in the
+// JSEP/WebGPU binary (25.6 MB) which exceeds Cloudflare Pages' 25 MB per-file
+// limit — and we pin executionProviders to 'wasm' anyway, so none of it is
+// reachable. This build is 12.9 MB.
+import * as ort from 'onnxruntime-web/wasm';
 
 export const DET_MODEL = '/models/det_500m.onnx';
 export const REC_MODEL = '/models/w600k_mbf.onnx';

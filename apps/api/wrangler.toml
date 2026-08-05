@@ -3,9 +3,21 @@ main = "src/index.ts"
 compatibility_date = "2024-11-27"
 compatibility_flags = ["nodejs_compat"]
 
+# /api/* on the custom domains is served by this Worker, everything else by
+# Pages. Same-origin is required for Cloudflare Access: its cookie is scoped to
+# the host, so a cross-origin admin fetch would never send it.
+# Declaring `routes` turns the workers.dev subdomain OFF by default. Keep it on:
+# it is the API origin for *.pages.dev until the custom domain's DNS is live.
+workers_dev = true
+
+routes = [
+  { pattern = "racelens.runlytics.fit/api/*",  zone_name = "runlytics.fit" },
+  { pattern = "race-lens.runlytics.fit/api/*", zone_name = "runlytics.fit" },
+]
+
 # Public origin of the Pages frontend. Used for CORS.
 [vars]
-WEB_ORIGIN = "https://race-lens.pages.dev"
+WEB_ORIGIN = "https://racelens.runlytics.fit,https://race-lens.runlytics.fit,https://race-lens.pages.dev"
 # Public base for thumbnails/banners. Point this at a custom domain bound to the
 # R2 bucket, or leave empty to serve bytes through the Worker at /r2/*.
 R2_PUBLIC_BASE = ""
@@ -15,7 +27,7 @@ DEV_ADMIN_BYPASS = "0"
 [[d1_databases]]
 binding = "DB"
 database_name = "race-lens"
-database_id = "REPLACE_WITH_D1_ID"
+database_id = "b2201d61-8877-4c6f-bf73-64b848c89db7"
 
 [[r2_buckets]]
 binding = "BUCKET"

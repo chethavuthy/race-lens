@@ -11,7 +11,12 @@ const app = new Hono<{ Bindings: Env }>();
 app.use('/api/*', (c, next) =>
   cors({
     origin: (origin) => {
-      const allowed = [c.env.WEB_ORIGIN, 'http://localhost:5173'];
+      // WEB_ORIGIN is a comma-separated allowlist: the site runs on a custom
+      // domain and on *.pages.dev during rollout, and both must pass CORS.
+      const allowed = [
+        ...c.env.WEB_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean),
+        'http://localhost:5173',
+      ];
       return allowed.includes(origin) ? origin : allowed[0];
     },
     allowHeaders: ['Content-Type', 'X-Ingest-Secret'],

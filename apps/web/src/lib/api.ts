@@ -41,7 +41,29 @@ export class ApiError extends Error {
   }
 }
 
-const BASE = import.meta.env.VITE_API_BASE ?? '';
+/**
+ * Where the API lives, resolved at runtime because one build serves several
+ * hostnames.
+ *
+ * On the custom domains a Worker route claims /api/*, so a relative path keeps
+ * the API same-origin. That is not a style preference: Cloudflare Access sets a
+ * host-scoped cookie, and a cross-origin admin fetch would never carry it, so
+ * /admin would be permanently broken.
+ *
+ * *.pages.dev has no Worker route, so it falls back to the Worker's own origin
+ * and relies on CORS. Public browsing works there; admin does not.
+ */
+function resolveApiBase(): string {
+  const forced = import.meta.env.VITE_API_BASE;
+  if (forced) return String(forced).replace(/\/+$/, '');
+  const fallback = import.meta.env.VITE_API_FALLBACK_BASE;
+  if (fallback && typeof location !== 'undefined' && location.hostname.endsWith('.pages.dev')) {
+    return String(fallback).replace(/\/+$/, '');
+  }
+  return '';
+}
+
+const BASE = resolveApiBase();
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, init);
