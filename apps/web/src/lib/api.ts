@@ -168,6 +168,10 @@ export const api = {
         log: { level: string; code: string | null; message: string;
                drive_file_id: string | null; created_at: string }[];
         summary: { level: string; code: string | null; n: number }[];
+        quality: { photos: number; faces: number; photos_with_face: number;
+                   photos_with_bib: number; distinct_bibs: number;
+                   photos_without_face: number; photos_without_bib: number };
+        top_bibs: { bib: string; n: number }[];
       }>(`/api/admin/events/${eventId}/report`),
   },
 };

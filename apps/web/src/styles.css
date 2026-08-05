@@ -244,6 +244,57 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
   font-size: var(--t-xs); font-variant-numeric: tabular-nums;
 }
 
+/* ------------------------------------------------------------- admin layout */
+/* Extracted from Admin/AdminEvent, which had accumulated 60+ inline styles and
+   raw px/hex values. Inline styles are invisible to the token system: a spacing
+   or colour change has to be hunted through templates instead of changed once. */
+
+.stack > * + * { margin-top: var(--s-4); }
+
+/* A row of figures: "Drive links 7 · Found 295 · Indexed 293 · Missing 2". */
+.stats { display: flex; gap: var(--s-6); flex-wrap: wrap; }
+.stat-label { color: var(--muted); font-size: var(--t-sm); }
+.stat-value { font-size: var(--t-lg); font-variant-numeric: tabular-nums; }
+.stat-value.warn { color: var(--warn); }
+.stat-value.ok { color: var(--ok); }
+
+/* Repeated list rows inside a card. */
+.row {
+  display: flex; align-items: center; gap: var(--s-4); flex-wrap: wrap;
+  padding: var(--s-3) 0; border-bottom: 1px solid var(--line);
+}
+.row:last-child { border-bottom: 0; }
+.row-main { flex: 1; min-width: 220px; }
+.row-actions { flex: none; display: flex; gap: var(--s-3); align-items: center; }
+.row-tight { padding: var(--s-2) 0; }
+
+.mono-id {
+  font-size: var(--t-sm); word-break: break-all;
+  text-decoration: underline; text-underline-offset: 2px;
+}
+
+/* Status words in job/log lists. Colour carries meaning here, so each state is
+   named rather than styled ad hoc at every call site. */
+.state { font-weight: 600; }
+.state.ok   { color: var(--ok); }
+.state.warn { color: var(--warn); }
+.state.err  { color: var(--err); }
+.state.idle { color: var(--text); }
+
+.banner-preview {
+  width: 240px; aspect-ratio: 16 / 9; object-fit: cover; display: block;
+  border-radius: var(--radius-sm); background: var(--surface-2);
+  margin-top: var(--s-3);
+}
+.banner-thumb {
+  width: 96px; aspect-ratio: 16 / 9; object-fit: cover; display: block;
+  border-radius: var(--radius-sm); background: var(--surface-2); flex: none;
+}
+
+/* A file input styled as a button: the native control cannot be restyled, so
+   the label is the affordance and the input is visually hidden but focusable. */
+.file-btn { display: inline-flex; align-items: center; gap: var(--s-2); min-height: var(--tap); margin: 0; cursor: pointer; color: var(--text); }
+
 /* ------------------------------------------------------------------ loading */
 /* Skeletons, not a spinner parked in the middle of the content area. */
 .skeleton {

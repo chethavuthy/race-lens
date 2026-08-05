@@ -213,6 +213,23 @@ adminRoutes.get('/events/:id/report', async (c) => {
       WHERE event_id = ? GROUP BY level, code ORDER BY n DESC`,
   ).bind(eventId).all<any>();
 
+  // Quality stats. Coverage alone does not tell the organizer whether SEARCH
+  // works — an album can be 100% indexed and still be unusable if OCR read no
+  // bibs or the detector found no faces.
+  const q = await c.env.DB.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM photos WHERE event_id = ?1) AS photos,
+       (SELECT COUNT(*) FROM faces  WHERE event_id = ?1) AS faces,
+       (SELECT COUNT(DISTINCT photo_id) FROM faces WHERE event_id = ?1) AS photos_with_face,
+       (SELECT COUNT(DISTINCT photo_id) FROM bibs  WHERE event_id = ?1) AS photos_with_bib,
+       (SELECT COUNT(DISTINCT bib) FROM bibs WHERE event_id = ?1) AS distinct_bibs`,
+  ).bind(eventId).first<any>();
+
+  const { results: topBibs } = await c.env.DB.prepare(
+    `SELECT COALESCE(bib_raw, bib) AS bib, COUNT(*) AS n FROM bibs
+      WHERE event_id = ? GROUP BY bib ORDER BY n DESC LIMIT 12`,
+  ).bind(eventId).all<any>();
+
   // Event-wide truth, not a sum of per-source rows: photo_count on events is
   // only refreshed at the end of a pass, so it reads stale while one is running.
   const live = await c.env.DB.prepare(
@@ -237,6 +254,16 @@ adminRoutes.get('/events/:id/report', async (c) => {
       indexed: live?.n ?? 0,
       missing: withMissing.reduce((n, s) => n + s.missing, 0),
     },
+    quality: {
+      photos: q?.photos ?? 0,
+      faces: q?.faces ?? 0,
+      photos_with_face: q?.photos_with_face ?? 0,
+      photos_with_bib: q?.photos_with_bib ?? 0,
+      distinct_bibs: q?.distinct_bibs ?? 0,
+      photos_without_face: Math.max(0, (q?.photos ?? 0) - (q?.photos_with_face ?? 0)),
+      photos_without_bib: Math.max(0, (q?.photos ?? 0) - (q?.photos_with_bib ?? 0)),
+    },
+    top_bibs: topBibs,
     jobs, log, summary: counts,
   });
 });

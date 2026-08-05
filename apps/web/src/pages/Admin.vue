@@ -241,11 +241,9 @@ async function publish(ev: EventSummary) {
   <p v-if="bannerError" class="notice err" style="margin-bottom: var(--s-3)">{{ bannerError }}</p>
   <div class="card">
     <p v-if="!events.length" class="muted" style="margin: 0">No events yet.</p>
-    <div
-      v-for="e in events" :key="e.id"
-      style="display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line)">
-      <div style="flex: 1">
-        <RouterLink :to="`/admin/e/${e.id}`" style="font-weight: 600; text-decoration: underline">
+    <div v-for="e in events" :key="e.id" class="row">
+      <div class="row-main">
+        <RouterLink :to="`/admin/e/${e.id}`" class="mono-id" style="font-weight: 600">
           {{ e.name }}
         </RouterLink>
         <div class="muted small">
@@ -254,16 +252,11 @@ async function publish(ev: EventSummary) {
           <span v-if="bannerBusy === e.id"> · <span class="spinner" /> uploading banner…</span>
         </div>
       </div>
-      <img v-if="e.banner_url" class="thumb" :src="e.banner_url" alt=""
-           style="width: 96px; aspect-ratio: 16/9; flex: none" />
-      <div v-else class="thumb" style="width: 96px; aspect-ratio: 16/9; flex: none" />
-      <div class="btn-row" style="flex: none">
-        <RouterLink :to="`/admin/e/${e.id}`" class="btn"
-                    style="display: inline-flex; align-items: center; min-height: var(--tap)">
-          Open
-        </RouterLink>
-        <label :for="`bn-${e.id}`" class="btn" style="margin: 0; display: inline-flex;
-               align-items: center; min-height: var(--tap); cursor: pointer; color: var(--text)">
+      <img v-if="e.banner_url" class="banner-thumb" :src="e.banner_url" alt="" />
+      <div v-else class="banner-thumb" />
+      <div class="row-actions">
+        <RouterLink :to="`/admin/e/${e.id}`" class="btn file-btn">Open</RouterLink>
+        <label :for="`bn-${e.id}`" class="btn file-btn">
           {{ e.banner_url ? 'Replace banner' : 'Add banner' }}
         </label>
         <input :id="`bn-${e.id}`" type="file" accept="image/*" class="sr-only"
