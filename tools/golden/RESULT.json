@@ -1,0 +1,13 @@
+{
+  "gate": "phase-5-embedding-parity",
+  "verdict": "PASS",
+  "cosine": 0.9999238806432847,
+  "threshold": 0.99,
+  "landmarkErrPx": 0.08169673805982128,
+  "cropMae": 0.06754889455782313,
+  "detScore": 0.8728315830230713,
+  "source": "t1.jpg (bundled insightface sample — no personal photos used)",
+  "python": { "insightface": "1.0.1", "onnxruntime": "1.19.2", "numpy": "1.26.4" },
+  "models": { "det": "det_500m.onnx", "rec": "w600k_mbf.onnx", "pack": "buffalo_s" },
+  "note": "Regenerate with: python tools/golden/make_golden.py <face.jpg> then open /golden"
+}

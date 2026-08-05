@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck (Worker + web)
+        run: npm run typecheck
+
+      - name: Build frontend
+        run: npm run build
+
+      # Vendored design skill. Exits non-zero on UI anti-patterns, so a
+      # regression (e.g. re-introducing a layout-thrashing transition) fails the
+      # build rather than quietly shipping.
+      - name: UI anti-pattern scan
+        run: node .claude/skills/impeccable/scripts/detect.mjs apps/web/src
+
+      # Does not need credentials: catches placeholder config, missing models,
+      # and an unverified parity gate.
+      - name: Preflight
+        run: node tools/preflight.mjs
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile-check the indexer
+        run: python -m compileall -q indexer tools/golden

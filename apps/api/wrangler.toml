@@ -1,0 +1,28 @@
+name = "race-lens-api"
+main = "src/index.ts"
+compatibility_date = "2024-11-27"
+compatibility_flags = ["nodejs_compat"]
+
+# Public origin of the Pages frontend. Used for CORS.
+[vars]
+WEB_ORIGIN = "https://race-lens.pages.dev"
+# Public base for thumbnails/banners. Point this at a custom domain bound to the
+# R2 bucket, or leave empty to serve bytes through the Worker at /r2/*.
+R2_PUBLIC_BASE = ""
+# Set to "1" ONLY in .dev.vars for local work. Never in a deployed environment.
+DEV_ADMIN_BYPASS = "0"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "race-lens"
+database_id = "REPLACE_WITH_D1_ID"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "race-lens"
+
+# Secrets (set with `wrangler secret put <NAME>`):
+#   GOOGLE_API_KEY    — Drive API key, used by /api/admin/drive/inspect
+#   INGEST_SECRET     — shared with the CI runner, checked on /api/internal/*
+#   GH_DISPATCH_TOKEN — fine-grained PAT, Contents: read/write on this repo only
+#   GH_REPO           — "owner/race-lens"

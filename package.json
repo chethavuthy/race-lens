@@ -1,0 +1,18 @@
+{
+  "name": "race-lens",
+  "private": true,
+  "type": "module",
+  "workspaces": ["apps/api", "apps/web"],
+  "scripts": {
+    "dev:api": "npm --workspace apps/api run dev",
+    "dev:web": "npm --workspace apps/web run dev",
+    "build": "npm --workspace apps/web run build",
+    "typecheck": "npm --workspace apps/api run typecheck && npm --workspace apps/web run typecheck",
+    "db:local": "wrangler d1 execute race-lens --local --file=./schema.sql --config apps/api/wrangler.toml",
+    "db:remote": "wrangler d1 execute race-lens --remote --file=./schema.sql --config apps/api/wrangler.toml"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0",
+    "typescript": "^5.6.3"
+  }
+}

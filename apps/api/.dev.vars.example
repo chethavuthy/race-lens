@@ -1,0 +1,6 @@
+# Copy to apps/api/.dev.vars for local `wrangler dev`. Never commit the real file.
+DEV_ADMIN_BYPASS=1
+GOOGLE_API_KEY=
+INGEST_SECRET=local-dev-secret
+GH_DISPATCH_TOKEN=
+GH_REPO=your-org/race-lens

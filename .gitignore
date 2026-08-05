@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+__pycache__/
+*.pyc
+.venv/
+apps/web/public/models/*.onnx
+apps/web/public/golden/
+.DS_Store
+.venv-golden/
+.venv-check/
