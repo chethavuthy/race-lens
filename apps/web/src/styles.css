@@ -211,9 +211,10 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
   grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
 }
 .photo-grid figure { margin: 0; position: relative; min-width: 0; }
-/* Safety net: any image in the grid is contained even if it is not a
-   .photo-tile. Admin's sample strip used bare <img> and rendered at natural
-   size — 6000px wide — blowing the card open and off-screen. */
+/* Safety net: any image in the grid stays contained even when it is not a
+   .photo-tile. Admin's sample strip used unwrapped image tags, which had no
+   size constraint and painted at natural resolution — around 6000px wide —
+   bursting the card and running off-screen. */
 .photo-grid img { max-width: 100%; display: block; }
 
 /* Static thumbnail: same framing as .photo-tile but no fade-in, for previews

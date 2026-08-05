@@ -20,6 +20,10 @@ const loaded = ref(new Set<string>());
 // all: it is a cross-origin link we never fetch.
 const failed = ref(new Set<string>());
 
+// A photo row with no thumb key never renders an image element, so no error
+// event ever fires — mark it up front or its tile sits on the skeleton forever.
+props.items.forEach((it) => { if (!it.photo.thumb_url) failed.value.add(it.photo.id); });
+
 function label(item: { photo: Photo; score?: number }, i: number) {
   const n = `Photo ${i + 1} of ${props.items.length}`;
   return failed.value.has(item.photo.id)
@@ -40,8 +44,12 @@ function label(item: { photo: Photo; score?: number }, i: number) {
         <!-- Skeleton sits underneath and is revealed by the image's own
              transparency until it decodes, so tiles never flash empty. -->
         <div v-if="!loaded.has(item.photo.id)" class="skeleton" style="position: absolute; inset: 0" />
+        <!-- Rendered only when there is a real URL. An empty src re-requests
+             the current page in some browsers and always paints a broken-image
+             box; a thumb we do not have is a failed tile, not a blank one. -->
         <img
-          :src="item.photo.thumb_url ?? ''"
+          v-if="item.photo.thumb_url"
+          :src="item.photo.thumb_url"
           :class="{ loaded: loaded.has(item.photo.id) }"
           alt=""
           loading="lazy"
