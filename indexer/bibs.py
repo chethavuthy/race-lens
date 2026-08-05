@@ -31,6 +31,7 @@ import logging
 import re
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 
 log = logging.getLogger(__name__)
@@ -43,6 +44,10 @@ BIB_RE = re.compile(r"^\d{3,5}$")
 # 0.6 admitted reads the engine itself was unsure of. Every correct bib observed
 # on real photos scored 0.88-1.00, so this costs nothing and drops guesses.
 MIN_CONF = 0.7
+
+# Longest edge for the whole-frame pass. Chosen by measurement: at native 6000px
+# the text detector finds nothing usable, at 2400px it reads bibs reliably.
+FULL_OCR_MAX_EDGE = 2400
 
 # Torso box relative to the face box.
 #
@@ -170,6 +175,20 @@ class BibReader:
         return max(hits, key=lambda hit: hit.conf) if hits else None
 
     def read_full(self, bgr: np.ndarray) -> list[BibHit]:
+        """Whole-frame OCR, for photos where the detector found no face.
+
+        The image MUST be downscaled first. A 6000x4000 original handed straight
+        to the detector gets internally resized so far that bib digits stop being
+        legible, and this path returned nothing — 46 photos of a 295-photo album
+        ended up with no face AND no bib, invisible to both searches. At ~2400px
+        the same photos read cleanly.
+        """
+        h, w = bgr.shape[:2]
+        longest = max(h, w)
+        if longest > FULL_OCR_MAX_EDGE:
+            scale = FULL_OCR_MAX_EDGE / longest
+            bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
         # Dedupe to the best confidence per number — one bib read twice in a
         # photo is one bib.
         best: dict[str, BibHit] = {}

@@ -221,6 +221,24 @@ def run(args: argparse.Namespace) -> int:
             batch_no + 1, len(local), len(embeddings), processed, total,
         )
 
+        # Flush vectors per batch.
+        #
+        # These used to accumulate in memory and be written once, at the very
+        # end. Three runs were cancelled mid-pass — GitHub reclaims runners —
+        # and every embedding they had computed was discarded while their photos
+        # and bibs, which ARE written per batch, survived. That left 51 photos
+        # permanently faceless: present in the album, invisible to face search,
+        # and indistinguishable from photos that genuinely contain no one.
+        if embeddings:
+            shard_key = f"index/{args.event_id}/{args.source_id}-{args.run_id}-b{batch_no}.bin"
+            row_base = up.reserve_rows(args.event_id, shard_key, len(embeddings))
+            buf = np.stack(embeddings).astype(np.int8)
+            up.put_bytes(shard_key, buf.tobytes(order="C"), "application/octet-stream")
+            for row in face_rows:
+                row["row_idx"] += row_base
+            up.put_faces(args.event_id, shard_key, row_base, face_rows)
+            embeddings, face_rows = [], []
+
         if journal:
             up.log(args.event_id, journal)
             journal = []
@@ -229,7 +247,9 @@ def run(args: argparse.Namespace) -> int:
         if quota_hit:
             break
 
-    # One shard per RUN, not per source.
+    # Whatever the last batch left unflushed.
+    #
+    # One shard per BATCH, not per run.
     #
     # Per-source was correct only while a source was always indexed in a single
     # pass. With resume, a second run carries only the photos the first one
@@ -240,7 +260,7 @@ def run(args: argparse.Namespace) -> int:
     #
     # Distinct keys make every run purely additive; search already concatenates
     # all of an event's shards by row_base.
-    shard_key = f"index/{args.event_id}/{args.source_id}-{args.run_id}.bin"
+    shard_key = f"index/{args.event_id}/{args.source_id}-{args.run_id}-final.bin"
     if embeddings:
         row_base = up.reserve_rows(args.event_id, shard_key, len(embeddings))
         buffer = np.stack(embeddings).astype(np.int8)
