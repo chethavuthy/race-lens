@@ -13,6 +13,10 @@ on:
         description: Re-read bibs only (leaves faces/shards untouched)
         type: boolean
         default: false
+      no_resume:
+        description: Re-process photos already indexed (for a full rebuild)
+        type: boolean
+        default: false
 
 # Two runs against the same event would race on row allocation and photo
 # upserts. Queue them instead of cancelling — a cancelled run leaves a job
