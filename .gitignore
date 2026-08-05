@@ -10,3 +10,4 @@ apps/web/public/golden/
 .DS_Store
 .venv-golden/
 .venv-check/
+.env.deploy
