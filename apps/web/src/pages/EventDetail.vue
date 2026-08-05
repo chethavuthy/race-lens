@@ -31,6 +31,10 @@ const searchError = ref<string | null>(null);
 const searchNote = ref<string | null>(null);
 
 const bib = ref('');
+// Set when an exact search found nothing but a looser one might. Widening is
+// offered as a labelled choice, never done silently: a suffix match can return
+// a different runner's photos and the runner has no way to tell.
+const fuzzyOffered = ref(false);
 
 const video = ref<HTMLVideoElement | null>(null);
 const stream = ref<MediaStream | null>(null);
@@ -70,6 +74,7 @@ async function loadMore() {
 }
 
 function resetSearch() {
+  fuzzyOffered.value = false;
   results.value = null;
   searchedBy.value = null;
   searchError.value = null;
@@ -100,17 +105,20 @@ function onTabKey(e: KeyboardEvent, i: number) {
   tabRefs.value[next]?.focus();
 }
 
-async function searchBib() {
+async function searchBib(fuzzy = false) {
   const value = bib.value.trim();
   if (!value) return;
   resetSearch();
   searching.value = true;
   try {
-    const r = await api.searchBib(props.slug, value);
+    const r = await api.searchBib(props.slug, value, fuzzy);
     results.value = r.photos.map((photo) => ({ photo }));
     searchedBy.value = 'bib';
+    fuzzyOffered.value = r.fuzzy_available;
     if (r.matched === 'suffix') {
-      searchNote.value = `No exact match for ${value}. These bibs end in ${value} — the first digit may not have been readable.`;
+      searchNote.value =
+        `No photo of bib ${value} was found. These bibs merely END in ${value}, so they may be ` +
+        `other runners — check the photo before assuming it is you.`;
     }
   } catch (e: any) {
     searchError.value = e.message;
@@ -222,7 +230,7 @@ async function onFile(e: Event) {
       tabindex="-1">
       <template v-if="tab === 'bib'">
         <label for="bib-input">Search by the number on your race bib</label>
-        <form style="display: flex; gap: var(--s-3)" @submit.prevent="searchBib">
+        <form style="display: flex; gap: var(--s-3)" @submit.prevent="searchBib()">
           <input
             id="bib-input" v-model="bib" inputmode="numeric" pattern="[0-9]*"
             autocomplete="off" placeholder="e.g. 1274" />
@@ -302,6 +310,7 @@ async function onFile(e: Event) {
           <p class="muted small">Try finding yourself by face instead — it works even when your bib is hidden.</p>
           <div class="btn-row">
             <button class="primary" @click="selectTab('selfie')">Take a selfie</button>
+            <button v-if="fuzzyOffered" @click="searchBib(true)">Try similar numbers</button>
             <button @click="selectTab('upload')">Upload a photo</button>
             <button @click="resetSearch">Show all photos</button>
           </div>

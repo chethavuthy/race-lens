@@ -103,10 +103,13 @@ export const api = {
       `/api/events/${slug}/photos?limit=${limit}&cursor=${encodeURIComponent(cursor ?? '')}`,
     ),
 
-  searchBib: (slug: string, bib: string) =>
-    req<{ matched: 'exact' | 'suffix' | null; photos: Photo[] }>(
-      `/api/events/${slug}/bib/${encodeURIComponent(bib)}`,
-    ),
+  searchBib: (slug: string, bib: string, fuzzy = false) =>
+    req<{
+      matched: 'exact' | 'suffix' | null;
+      bib_read: string | null;
+      photos: Photo[];
+      fuzzy_available: boolean;
+    }>(`/api/events/${slug}/bib/${encodeURIComponent(bib)}${fuzzy ? '?fuzzy=1' : ''}`),
 
   searchFace: (slug: string, vec: number[], threshold?: number) =>
     req<{ matches: FaceMatch[] }>(
