@@ -4,6 +4,7 @@ import { api, ApiError, type EventSummary, type Photo } from '../lib/api';
 import { embedLargestFace, loadModels, NoFaceError, type LoadPhase } from '../lib/face';
 import PhotoGrid from '../components/PhotoGrid.vue';
 import PhotoGridSkeleton from '../components/PhotoGridSkeleton.vue';
+import { plural } from '../lib/format';
 
 const props = defineProps<{ slug: string }>();
 
@@ -191,7 +192,7 @@ async function onFile(e: Event) {
   <template v-else-if="event">
     <h1>{{ event.name }}</h1>
     <p class="muted" style="margin: 0 0 var(--s-5)">
-      {{ event.photo_count.toLocaleString() }} photos
+      {{ plural(event.photo_count, 'photo') }}
       <template v-if="event.status === 'partial'">
         · <span>some photos are still missing from the photographer</span>
       </template>
@@ -263,7 +264,7 @@ async function onFile(e: Event) {
 
     <!-- results ------------------------------------------------------- -->
     <template v-if="searching">
-      <h2 style="margin-top: var(--s-6)"><span class="spinner" /> Searching {{ event.photo_count.toLocaleString() }} photos…</h2>
+      <h2 style="margin-top: var(--s-6)"><span class="spinner" /> Searching {{ plural(event.photo_count, 'photo') }}…</h2>
       <PhotoGridSkeleton :count="8" />
     </template>
 
@@ -275,7 +276,7 @@ async function onFile(e: Event) {
         style="display: flex; align-items: baseline; justify-content: space-between;
                gap: var(--s-4); margin-top: var(--s-6); flex-wrap: wrap">
         <h2 style="margin: 0">
-          {{ results.length }} {{ results.length === 1 ? 'photo' : 'photos' }} found
+          {{ plural(results.length, 'photo') }} found
         </h2>
         <button @click="resetSearch">Show all photos</button>
       </div>

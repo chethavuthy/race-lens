@@ -2,18 +2,11 @@
 import { onMounted, ref } from 'vue';
 import { RouterLink } from 'vue-router';
 import { api, type EventSummary } from '../lib/api';
+import { formatDate, plural } from '../lib/format';
 
 const events = ref<EventSummary[]>([]);
 const loading = ref(true);
 const error = ref<string | null>(null);
-
-function formatDate(iso: string | null) {
-  if (!iso) return '';
-  const d = new Date(`${iso}T00:00:00`);
-  return Number.isNaN(d.getTime())
-    ? iso
-    : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-}
 
 onMounted(async () => {
   try {
@@ -65,7 +58,7 @@ onMounted(async () => {
         <div class="name">{{ e.name }}</div>
         <div class="muted small">
           <span v-if="e.event_date">{{ formatDate(e.event_date) }} · </span>
-          {{ e.photo_count.toLocaleString() }} photos
+          {{ plural(e.photo_count, 'photo') }}
           <span v-if="e.status === 'partial'"> · still growing</span>
         </div>
       </div>
