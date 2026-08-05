@@ -10,10 +10,80 @@ Track progress with:
 node tools/preflight.mjs
 ```
 
-**Current state:** 1 blocking item (D1 id), 1 warning (WEB_ORIGIN). Everything
-else is green.
+**Current state:** deployed. See STATUS below for what is live and the four
+things still needing you.
+
+
+## STATUS — deployed 2026-08-05
+
+**Live now**
+
+| | |
+|---|---|
+| Site | <https://race-lens.pages.dev> |
+| API | <https://race-lens-api.jt7.workers.dev> |
+| D1 | `race-lens` · `b2201d61-8877-4c6f-bf73-64b848c89db7` (APAC) |
+| R2 | `race-lens` bucket |
+| Repo | <https://github.com/chethavuthy/race-lens> |
+
+Verified against production: public API returns `200`, CORS passes for all three
+origins, `/api/admin/*` returns **403** (fails closed — no Access policy yet),
+`/api/internal/*` returns **401** on a bad ingest secret, SPA deep links work,
+and the Phase 5 fixtures are absent from the deployed bundle.
+
+**Pending — 4 things, all needing you**
+
+1. **Nameservers.** `runlytics.fit` is registered at Namecheap and still points
+   there, so all four custom URLs are dead until you switch it. At Namecheap →
+   Domain List → Manage → Nameservers → *Custom DNS*:
+
+   ```
+   grannbo.ns.cloudflare.com
+   lou.ns.cloudflare.com
+   ```
+
+   Both hostnames are already attached to the Pages project and both Worker
+   routes are deployed, so `racelens.runlytics.fit` and
+   `race-lens.runlytics.fit` (plus `/admin` on each) start working on their own
+   once the zone goes active. Usually under an hour, occasionally 24.
+
+2. **`GOOGLE_API_KEY`.** Nothing can be indexed without it. Set in both places:
+
+   ```bash
+   cd apps/api && npx wrangler secret put GOOGLE_API_KEY
+   gh secret set GOOGLE_API_KEY --repo chethavuthy/race-lens
+   ```
+
+3. **R2 S3 tokens** — dashboard → R2 → Manage API tokens → Create (Object Read
+   & Write on `race-lens`). Cannot be minted through the Workers API.
+
+   ```bash
+   gh secret set R2_ACCESS_KEY_ID --repo chethavuthy/race-lens
+   gh secret set R2_SECRET_ACCESS_KEY --repo chethavuthy/race-lens
+   ```
+
+4. **`GH_DISPATCH_TOKEN`** — a fine-grained PAT (Contents: read/write on this
+   repo only). Deliberately not set from your existing `gh` OAuth token: that
+   one carries `repo`, `gist`, and `admin:public_key` across *every* repo you
+   own, and storing it in a Worker secret would hand the Worker all of it.
+
+   ```bash
+   cd apps/api && npx wrangler secret put GH_DISPATCH_TOKEN
+   ```
+
+**Then, one manual console step:** Cloudflare Access. Until it exists `/admin`
+403s for everyone — correct, but you cannot use it either.
+
+Zero Trust → Access → Applications → Add → Self-hosted, one app covering
+`racelens.runlytics.fit` and `race-lens.runlytics.fit`, paths `/admin` and
+`/api/admin`. Policy: *Allow* → Emails → `vuthychetha@gmail.com`.
+
+Access only works on the custom domains — the API is same-origin there. On
+`*.pages.dev` the admin UI calls the Worker cross-origin, and a host-scoped
+Access cookie will never be sent, so admin is expected to fail there.
 
 ---
+
 
 ## Already verified — do not redo
 

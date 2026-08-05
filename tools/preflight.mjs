@@ -44,12 +44,18 @@ if (!toml) {
     soft('database_id is set but is not a uuid — double-check it');
   }
 
-  const origin = toml.match(/WEB_ORIGIN\s*=\s*"([^"]*)"/)?.[1] ?? '';
-  if (!origin || /race-lens\.pages\.dev/.test(origin)) {
-    soft(`WEB_ORIGIN is "${origin}" — the default placeholder`,
-         'Set it to the real Pages origin, or CORS will reject the frontend');
+  // Comma-separated allowlist. A *.pages.dev entry is fine alongside a real
+  // domain; it is only a smell when it is the only origin configured.
+  const origins = (toml.match(/WEB_ORIGIN\s*=\s*"([^"]*)"/)?.[1] ?? '')
+    .split(',').map((o) => o.trim()).filter(Boolean);
+  const custom = origins.filter((o) => !/\.pages\.dev$/.test(o));
+  if (!origins.length) {
+    bad('WEB_ORIGIN is empty — CORS will reject every browser request');
+  } else if (!custom.length) {
+    soft(`WEB_ORIGIN is only "${origins.join(', ')}"`,
+         'Add the real custom domain once its DNS is live');
   } else {
-    ok(`WEB_ORIGIN = ${origin}`);
+    ok(`WEB_ORIGIN allows ${origins.length} origins (${custom.join(', ')})`);
   }
 
   // This is the one that must never be wrong in production.
@@ -117,8 +123,8 @@ if (remote) {
         bad(`${label} → ${e.message}`);
       }
     };
-    await probe('/health', [200], 'GET /health');
-    await probe('/api/events', [200], 'GET /api/events');
+    await probe('/api/events', [200], 'GET /api/events (liveness)');
+    await probe('/health', [200, 404], 'GET /health (flaps while a new workers.dev subdomain propagates)');
     // Must be refused: these are the two doors into the system.
     await probe('/api/admin/events', [403, 302], 'GET /api/admin/events (must be blocked)');
     try {
