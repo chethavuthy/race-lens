@@ -110,7 +110,7 @@ const summary = computed(() => {
   <!-- zoom -->
   <div v-if="zoom" class="zoom-backdrop" @click="zoom = null">
     <div class="zoom-inner" @click.stop>
-      <div class="inspect-tile" style="max-height: 76vh">
+      <div class="inspect-tile zoom">
         <img :src="zoom.thumb_url ?? ''" alt="" />
         <span v-for="(f, i) in zoom.faces" :key="i" class="face-box"
               :style="{ left: pct(f.x), top: pct(f.y), width: pct(f.w), height: pct(f.h) }">

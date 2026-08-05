@@ -303,6 +303,17 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
 }
 .inspect-tile img { width: 100%; display: block; }
 
+/* Zoom variant.
+   The container MUST size to the rendered image. Constraining the container's
+   height instead (max-height + overflow:hidden) clipped it shorter than the
+   image, and since the boxes are positioned as a percentage OF THE CONTAINER
+   they all drifted upward — a face box floating above the runner's head. The
+   image carries the height limit; the box tracks the image. */
+.inspect-tile.zoom {
+  width: fit-content; max-width: 100%; margin: 0 auto; overflow: visible;
+}
+.inspect-tile.zoom img { width: auto; max-width: 100%; max-height: 74vh; }
+
 /* Detection overlay. Green reads as "the machine saw this", distinct from the
    accent, which means "the user chose this" everywhere else in the app. */
 .face-box {

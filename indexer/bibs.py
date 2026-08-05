@@ -62,7 +62,16 @@ FULL_OCR_MAX_EDGE = 2400
 # short fragments ("29") appear, which is the precision problem face-anchored
 # cropping exists to avoid.
 TORSO_TOP = 1.2      # y + 1.2h
-TORSO_BOTTOM = 4.4   # y + 4.4h
+TORSO_BOTTOM = 6.5   # y + 6.5h
+#
+# Re-swept over 20 real photos AFTER fragments were rejected (3-5 digits,
+# conf >= 0.7). The earlier 4.4h peak was measured while 1-2 digit tokens still
+# counted, which made taller windows look like they were adding noise:
+#   4.4h -> 47 faces-with-bib   5.5h -> 50   6.0h -> 51   6.5h -> 52   7.0h -> 50
+#
+# The geometry is the point: a distant runner has a small face box, so a
+# multiple of face-height is a short distance, and 4.4h stopped just ABOVE the
+# bib. A clearly legible 0804 was being missed for exactly that reason.
 TORSO_LEFT = -0.75   # x - 0.75w
 TORSO_RIGHT = 1.75   # x + 1.75w
 
