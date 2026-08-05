@@ -69,6 +69,17 @@ def run(args: argparse.Namespace) -> int:
 
     images: list[DriveImage] = drive.walk(args.folder_id)
     discovered = len(images)
+    journal: list[dict] = []
+
+    def note(level: str, code: str, message: str, drive_file_id: str | None = None) -> None:
+        journal.append({
+            "job_id": args.job_id, "source_id": args.source_id,
+            "level": level, "code": code, "message": message,
+            "drive_file_id": drive_file_id,
+        })
+
+    up.set_discovered(args.source_id, discovered)
+    note("info", "walk", f"Found {discovered} images in this folder")
 
     # Resume. Drive throttles sustained bulk downloading, so a big album often
     # needs more than one run; without this every run re-fetches the same prefix
@@ -129,10 +140,14 @@ def run(args: argparse.Namespace) -> int:
                 # already fetched and finish as `partial` rather than losing
                 # a run that may already be 90% complete.
                 log.error("Download quota exceeded — finishing as partial")
+                note("warn", "quota",
+                     "Google Drive stopped serving downloads (rate limit). "
+                     "Remaining photos will be picked up automatically.", img.id)
                 quota_hit = True
                 break
             except Exception as exc:  # noqa: BLE001
                 log.warning("Skipping %s (%s): %s", img.name, img.id, exc)
+                note("error", "download_failed", f"{img.name}: {str(exc)[:180]}", img.id)
                 skipped += 1
 
         photo_payload: list[dict] = []
@@ -143,6 +158,7 @@ def run(args: argparse.Namespace) -> int:
                 thumb, tw, th = make_thumbnail(path, cfg.thumb_max_edge, cfg.thumb_quality)
             except Exception as exc:  # noqa: BLE001
                 log.warning("Thumbnail failed for %s: %s", img.name, exc)
+                note("error", "thumbnail_failed", f"{img.name}: {str(exc)[:180]}", img.id)
                 continue
 
             thumb_key = f"thumbs/{args.event_id}/{img.id}.webp"
@@ -173,7 +189,7 @@ def run(args: argparse.Namespace) -> int:
                 hit = reader.read_torso(bgr, face.bbox)
                 if hit:
                     face.bib = hit.bib
-                    bib_payload.append({"photo_id": photo_id, "bib": hit.bib, "conf": hit.conf})
+                    bib_payload.append({"photo_id": photo_id, "bib": hit.bib, "bib_raw": hit.raw, "conf": hit.conf})
 
                 # In bibs-only mode the vector index is already built and
                 # verified; re-emitting faces would duplicate every row.
@@ -193,7 +209,7 @@ def run(args: argparse.Namespace) -> int:
                 # No face to anchor a torso crop to — fall back to a full-image
                 # pass so back-of-pack and finish-line-clock shots still index.
                 for hit in reader.read_full(bgr):
-                    bib_payload.append({"photo_id": photo_id, "bib": hit.bib, "conf": hit.conf})
+                    bib_payload.append({"photo_id": photo_id, "bib": hit.bib, "bib_raw": hit.raw, "conf": hit.conf})
 
         if bib_payload:
             up.put_bibs(args.event_id, bib_payload)
@@ -204,6 +220,10 @@ def run(args: argparse.Namespace) -> int:
             "Batch %d: %d photos, %d faces so far, %d/%d done",
             batch_no + 1, len(local), len(embeddings), processed, total,
         )
+
+        if journal:
+            up.log(args.event_id, journal)
+            journal = []
 
         shutil.rmtree(work, ignore_errors=True)
         if quota_hit:
@@ -249,6 +269,11 @@ def run(args: argparse.Namespace) -> int:
             up.finalize(args.event_id, "partial")
             return 0
         log.warning("Continuation was not dispatched; finishing as partial")
+    note("info", "summary",
+         f"Pass finished: {downloaded} downloaded, {skipped} could not be fetched, "
+         f"{len(embeddings)} faces indexed" + (" — Drive rate limit hit" if quota_hit else ""))
+    up.log(args.event_id, journal)
+
     up.progress(
         args.job_id, status=status, done=processed, total=total,
         error=(f"{skipped} of {total} photos could not be downloaded from Drive"

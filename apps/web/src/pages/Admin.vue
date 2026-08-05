@@ -131,6 +131,30 @@ async function onEventBanner(ev: EventSummary, e: Event) {
   }
 }
 
+type Report = Awaited<ReturnType<typeof api.admin.report>>;
+const openReport = ref<string | null>(null);
+const report = ref<Report | null>(null);
+const reportBusy = ref(false);
+
+async function toggleReport(ev: EventSummary) {
+  if (openReport.value === ev.id) { openReport.value = null; report.value = null; return; }
+  openReport.value = ev.id;
+  report.value = null;
+  reportBusy.value = true;
+  try {
+    report.value = await api.admin.report(ev.id);
+  } catch (e: any) {
+    bannerError.value = e.message;
+    openReport.value = null;
+  } finally {
+    reportBusy.value = false;
+  }
+}
+
+function shortFolder(url: string) {
+  return url.match(/\/folders\/([\w-]+)/)?.[1] ?? url;
+}
+
 async function publish(ev: EventSummary) {
   await api.admin.setStatus(ev.id, 'ready');
   await refreshEvents();
@@ -255,6 +279,9 @@ async function publish(ev: EventSummary) {
            style="width: 96px; aspect-ratio: 16/9; flex: none" />
       <div v-else class="thumb" style="width: 96px; aspect-ratio: 16/9; flex: none" />
       <div class="btn-row" style="flex: none">
+        <button @click="toggleReport(e)">
+          {{ openReport === e.id ? 'Hide log' : 'Ingest log' }}
+        </button>
         <label :for="`bn-${e.id}`" class="btn" style="margin: 0; display: inline-flex;
                align-items: center; min-height: var(--tap); cursor: pointer; color: var(--text)">
           {{ e.banner_url ? 'Replace banner' : 'Add banner' }}

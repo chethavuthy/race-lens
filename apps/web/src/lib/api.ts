@@ -149,5 +149,16 @@ export const api = {
       ),
 
     getJob: (jobId: string) => req<{ job: Job }>(`/api/admin/jobs/${jobId}`),
+
+    report: (eventId: string) =>
+      req<{
+        sources: { id: string; drive_folder_id: string; drive_url: string;
+                   discovered: number; indexed: number; missing: number; added_at: string }[];
+        jobs: { id: string; source_id: string | null; status: string; done: number; total: number;
+                skipped: number; attempts: number; error: string | null; updated_at: string }[];
+        log: { level: string; code: string | null; message: string;
+               drive_file_id: string | null; created_at: string }[];
+        summary: { level: string; code: string | null; n: number }[];
+      }>(`/api/admin/events/${eventId}/report`),
   },
 };

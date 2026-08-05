@@ -171,6 +171,44 @@ adminRoutes.post('/ingest', async (c) => {
   return c.json({ job_id: jobId, source_id: sourceId, folder_id: folderId }, 202);
 });
 
+/**
+ * Everything the organizer needs to answer "why is my album short?" without
+ * access to CI logs: every link bound to the event, what each one found versus
+ * what actually landed, and the reason for each miss.
+ */
+adminRoutes.get('/events/:id/report', async (c) => {
+  const eventId = c.req.param('id');
+
+  const { results: sources } = await c.env.DB.prepare(
+    `SELECT s.id, s.drive_folder_id, s.drive_url, s.discovered, s.added_at,
+            (SELECT COUNT(*) FROM photos p WHERE p.source_id = s.id) AS indexed
+       FROM sources s WHERE s.event_id = ? ORDER BY s.added_at`,
+  ).bind(eventId).all<any>();
+
+  const { results: jobs } = await c.env.DB.prepare(
+    `SELECT id, source_id, status, done, total, skipped, attempts, error, updated_at
+       FROM jobs WHERE event_id = ? ORDER BY updated_at DESC`,
+  ).bind(eventId).all<any>();
+
+  const { results: log } = await c.env.DB.prepare(
+    `SELECT level, code, message, drive_file_id, source_id, created_at
+       FROM ingest_log WHERE event_id = ? ORDER BY id DESC LIMIT 300`,
+  ).bind(eventId).all<any>();
+
+  const { results: counts } = await c.env.DB.prepare(
+    `SELECT level, code, COUNT(*) AS n FROM ingest_log
+      WHERE event_id = ? GROUP BY level, code ORDER BY n DESC`,
+  ).bind(eventId).all<any>();
+
+  return c.json({
+    sources: sources.map((s) => ({
+      ...s,
+      missing: Math.max(0, (s.discovered ?? 0) - (s.indexed ?? 0)),
+    })),
+    jobs, log, summary: counts,
+  });
+});
+
 adminRoutes.get('/jobs/:id', async (c) => {
   const row = await c.env.DB.prepare('SELECT * FROM jobs WHERE id = ?').bind(c.req.param('id')).first<JobRow>();
   if (!row) throw new HttpError(404, 'Job not found', 'no_job');

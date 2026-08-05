@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS sources (
   event_id        TEXT NOT NULL REFERENCES events(id),
   drive_folder_id TEXT NOT NULL,
   drive_url       TEXT NOT NULL,
+  discovered      INTEGER NOT NULL DEFAULT 0,  -- images the walk found in this folder
   added_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sources_event ON sources(event_id);
@@ -81,6 +82,23 @@ CREATE TABLE IF NOT EXISTS jobs (
   -- How many times this job has auto-continued after a Drive rate limit.
   -- Bounds the chain so a permanently-failing folder cannot loop forever.
   attempts   INTEGER NOT NULL DEFAULT 0,
+  skipped    INTEGER NOT NULL DEFAULT 0,       -- photos this job could not fetch
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_event ON jobs(event_id, updated_at);
+
+-- Per-event ingest journal. The organizer pastes a link and walks away; when
+-- an album comes back short they need to know which link, how many photos, and
+-- why — without reading CI logs they have no access to.
+CREATE TABLE IF NOT EXISTS ingest_log (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id      TEXT NOT NULL,
+  job_id        TEXT,
+  source_id     TEXT,
+  level         TEXT NOT NULL,          -- info|warn|error
+  code          TEXT,                   -- quota|download_failed|decode_failed|…
+  message       TEXT NOT NULL,
+  drive_file_id TEXT,                   -- set when the entry is about one photo
+  created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ingest_log_event ON ingest_log(event_id, id DESC);

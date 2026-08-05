@@ -35,8 +35,14 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-BIB_RE = re.compile(r"^\d{1,5}$")
-MIN_CONF = 0.6
+# At least 3 digits AS PRINTED. Real bibs at this race are 3-4 digits, usually
+# zero-padded ("0056"). Accepting 1-2 digit tokens let partial reads of a longer
+# number ("5", "56", "60") into the index, where they are indistinguishable from
+# a genuine short bib and pollute every suffix comparison.
+BIB_RE = re.compile(r"^\d{3,5}$")
+# 0.6 admitted reads the engine itself was unsure of. Every correct bib observed
+# on real photos scored 0.88-1.00, so this costs nothing and drops guesses.
+MIN_CONF = 0.7
 
 # Torso box relative to the face box.
 #
@@ -58,8 +64,9 @@ TORSO_RIGHT = 1.75   # x + 1.75w
 
 @dataclass
 class BibHit:
-    bib: str
+    bib: str        # normalized for matching: leading zeros stripped
     conf: float
+    raw: str = ""   # exactly as printed on the bib, e.g. "0056"
 
 
 def _tokens_from_rapidocr(result) -> list[tuple[str, float]]:
@@ -146,7 +153,7 @@ class BibReader:
             if conf >= MIN_CONF and BIB_RE.match(token):
                 # Store leading zeros stripped. The Worker normalizes the query
                 # the same way, so "0123" and "123" both land here.
-                hits.append(BibHit(bib=token.lstrip("0") or "0", conf=conf))
+                hits.append(BibHit(bib=token.lstrip("0") or "0", conf=conf, raw=token))
         return hits
 
     def read_torso(self, bgr: np.ndarray, face_bbox: tuple[float, float, float, float]) -> BibHit | None:

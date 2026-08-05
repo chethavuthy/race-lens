@@ -162,16 +162,19 @@ internalRoutes.get('/events/:id/indexed', async (c) => {
 
 internalRoutes.post('/events/:id/bibs', async (c) => {
   const eventId = c.req.param('id');
-  const { bibs } = await c.req.json<{ bibs: { photo_id: string; bib: string; conf?: number }[] }>();
+  const { bibs } = await c.req.json<{
+    bibs: { photo_id: string; bib: string; bib_raw?: string; conf?: number }[];
+  }>();
   if (!Array.isArray(bibs)) throw new HttpError(400, 'bibs is required', 'bad_request');
 
   for (const part of chunk(bibs, 150)) {
     await c.env.DB.batch(
       part.map((b) =>
         c.env.DB.prepare(
-          `INSERT INTO bibs (event_id, bib, photo_id, conf) VALUES (?, ?, ?, ?)
-           ON CONFLICT (event_id, bib, photo_id) DO UPDATE SET conf = MAX(conf, excluded.conf)`,
-        ).bind(eventId, b.bib, b.photo_id, b.conf ?? null),
+          `INSERT INTO bibs (event_id, bib, photo_id, conf, bib_raw) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (event_id, bib, photo_id) DO UPDATE SET
+             conf = MAX(conf, excluded.conf), bib_raw = excluded.bib_raw`,
+        ).bind(eventId, b.bib, b.photo_id, b.conf ?? null, b.bib_raw ?? null),
       ),
     );
   }
@@ -252,6 +255,38 @@ internalRoutes.post('/events/:id/faces', async (c) => {
 
   invalidateIndex(eventId);
   return c.json({ ok: true, inserted: rows.length });
+});
+
+/** Append ingest journal entries. Batched by the runner. */
+internalRoutes.post('/events/:id/log', async (c) => {
+  const eventId = c.req.param('id');
+  const { entries } = await c.req.json<{
+    entries: { job_id?: string; source_id?: string; level?: string;
+               code?: string; message: string; drive_file_id?: string }[];
+  }>();
+  if (!Array.isArray(entries) || !entries.length) return c.json({ ok: true, inserted: 0 });
+
+  const ts = nowIso();
+  for (const part of chunk(entries, 100)) {
+    await c.env.DB.batch(
+      part.map((e) =>
+        c.env.DB.prepare(
+          `INSERT INTO ingest_log (event_id, job_id, source_id, level, code, message, drive_file_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(eventId, e.job_id ?? null, e.source_id ?? null, e.level ?? 'info',
+               e.code ?? null, String(e.message).slice(0, 500), e.drive_file_id ?? null, ts),
+      ),
+    );
+  }
+  return c.json({ ok: true, inserted: entries.length });
+});
+
+/** Record how many images the walk found, so "found vs indexed" is comparable. */
+internalRoutes.post('/sources/:id/discovered', async (c) => {
+  const { count } = await c.req.json<{ count: number }>();
+  await c.env.DB.prepare('UPDATE sources SET discovered = ? WHERE id = ?')
+    .bind(Number(count) || 0, c.req.param('id')).run();
+  return c.json({ ok: true });
 });
 
 internalRoutes.post('/events/:id/finalize', async (c) => {

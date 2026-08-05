@@ -146,5 +146,21 @@ class Uploader:
             log.warning("Could not request continuation: %s", exc)
             return False
 
+    def log(self, event_id: str, entries: list[dict]) -> None:
+        """Append ingest journal entries. Advisory — never fail a run over it."""
+        if not entries:
+            return
+        try:
+            for part in chunked(entries, 100):
+                self._post(f"/api/internal/events/{event_id}/log", {"entries": part})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not write ingest log: %s", exc)
+
+    def set_discovered(self, source_id: str, count: int) -> None:
+        try:
+            self._post(f"/api/internal/sources/{source_id}/discovered", {"count": count})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not record discovered count: %s", exc)
+
     def finalize(self, event_id: str, status: str) -> dict:
         return self._post(f"/api/internal/events/{event_id}/finalize", {"status": status})

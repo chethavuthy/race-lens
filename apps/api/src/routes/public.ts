@@ -59,26 +59,46 @@ publicRoutes.get('/events/:slug/bib/:bib', async (c) => {
   const bib = digits.replace(/^0+(?=\d)/, '');
   if (!bib) return c.json({ photos: [], matched: null });
 
-  const select = `SELECT p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.taken_at, b.conf
+  const select = `SELECT p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.taken_at,
+                         b.conf, b.bib, b.bib_raw
                     FROM bibs b JOIN photos p ON p.id = b.photo_id
                    WHERE b.event_id = ?`;
 
+  // Exact match on the normalized number. Both sides strip leading zeros, so
+  // "0056", "056" and "56" all resolve to the same runner.
   let matched: 'exact' | 'suffix' = 'exact';
   let { results } = await c.env.DB.prepare(`${select} AND b.bib = ? ORDER BY b.conf DESC LIMIT 200`)
     .bind(event.id, bib).all<any>();
 
-  // OCR drops leading digits often enough that a suffix fallback meaningfully
-  // improves recall — e.g. "1234" read as "234".
-  if (results.length === 0) {
+  // Suffix matching is OPT-IN (?fuzzy=1), never the default.
+  //
+  // It was the default, to recover bibs whose leading digit OCR missed. But
+  // `LIKE '%56'` also matches 956, 1056, 2256 — so a runner searching their own
+  // number was shown strangers' photos and had no way to tell. Returning the
+  // wrong person's race photos is worse than returning none: the runner cannot
+  // verify it, and the whole product is "find MY photos".
+  const fuzzy = c.req.query('fuzzy') === '1';
+  if (results.length === 0 && fuzzy) {
     matched = 'suffix';
     const r = await c.env.DB.prepare(`${select} AND b.bib LIKE ? ORDER BY b.conf DESC LIMIT 200`)
       .bind(event.id, `%${bib}`).all<any>();
     results = r.results;
   }
 
+  // Collapse to one row per photo — a group shot holds many bibs, and the same
+  // number can be read on two faces in it.
+  const seen = new Set<string>();
+  const photos = results.filter((r: any) => !seen.has(r.id) && seen.add(r.id));
+
   return c.json({
-    matched: results.length ? matched : null,
-    photos: results.map((p) => publicPhoto(c.env, p)),
+    matched: photos.length ? matched : null,
+    // What was actually printed on the bib we matched, so the UI can show the
+    // runner why a photo came back.
+    bib_read: photos[0]?.bib_raw ?? null,
+    photos: photos.map((p: any) => publicPhoto(c.env, p)),
+    // Offered only when an exact search found nothing, so the UI can present
+    // widening as a deliberate choice rather than doing it silently.
+    fuzzy_available: photos.length === 0 && !fuzzy,
   });
 });
 
