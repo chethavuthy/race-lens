@@ -17,6 +17,21 @@ jobs:
 
       - run: npm ci
 
+      # The ONNX models are gitignored — 16 MB of binaries do not belong in the
+      # repo. Fetching them here keeps preflight honest AND catches the upstream
+      # insightface release URL going away, which would otherwise only surface
+      # on someone's fresh clone.
+      - name: Cache face models
+        id: models
+        uses: actions/cache@v4
+        with:
+          path: apps/web/public/models
+          key: onnx-buffalo_s-${{ hashFiles('tools/fetch-models.sh') }}
+
+      - name: Fetch face models
+        if: steps.models.outputs.cache-hit != 'true'
+        run: ./tools/fetch-models.sh
+
       - name: Typecheck (Worker + web)
         run: npm run typecheck
 
