@@ -10,15 +10,20 @@ const props = defineProps<{
 }>();
 
 const loaded = ref(new Set<string>());
-// A photographer can revoke Drive access at any time. The thumbnail still works
-// (it lives in R2) but the original 404s, so warn instead of letting the user
-// click into a dead page.
-const gone = ref(new Set<string>());
+// Thumbnails live in OUR R2 bucket. If one fails to load that is our problem —
+// a bad key, a misconfigured base URL, a network blip — and NOT evidence that
+// the photographer revoked anything. Blaming them for a config bug is exactly
+// what happened when R2_PUBLIC_BASE was relative and every tile in production
+// read "No longer available from the photographer".
+//
+// Whether a Drive *original* has been revoked cannot be detected from here at
+// all: it is a cross-origin link we never fetch.
+const failed = ref(new Set<string>());
 
 function label(item: { photo: Photo; score?: number }, i: number) {
   const n = `Photo ${i + 1} of ${props.items.length}`;
-  return gone.value.has(item.photo.id)
-    ? `${n} — original no longer available`
+  return failed.value.has(item.photo.id)
+    ? `${n} — preview unavailable`
     : `${n} — open the full-size original on Google Drive`;
 }
 </script>
@@ -42,13 +47,13 @@ function label(item: { photo: Photo; score?: number }, i: number) {
           loading="lazy"
           decoding="async"
           @load="loaded.add(item.photo.id)"
-          @error="gone.add(item.photo.id); loaded.add(item.photo.id)" />
+          @error="failed.add(item.photo.id); loaded.add(item.photo.id)" />
         <span v-if="showScore && item.score != null" class="badge">
           {{ item.score.toFixed(3) }}
         </span>
       </a>
-      <figcaption v-if="gone.has(item.photo.id)" class="muted small" style="margin-top: 6px">
-        No longer available from the photographer
+      <figcaption v-if="failed.has(item.photo.id)" class="muted small" style="margin-top: 6px">
+        Preview unavailable — the full-size photo may still open
       </figcaption>
     </figure>
   </div>
