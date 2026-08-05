@@ -53,12 +53,22 @@ export class ApiError extends Error {
  * *.pages.dev has no Worker route, so it falls back to the Worker's own origin
  * and relies on CORS. Public browsing works there; admin does not.
  */
+/**
+ * The pages.dev fallback is a hardcoded constant, deliberately.
+ *
+ * It used to read VITE_API_FALLBACK_BASE, which nothing ever set, so the branch
+ * was dead and *.pages.dev sent /api/* to the SPA catch-all — which answers with
+ * index.html and a 200. JSON.parse then yielded null and every page died with
+ * "Cannot read properties of null (reading 'event')". A correctness-critical
+ * path must not depend on a build variable someone has to remember to pass.
+ */
+const PAGES_DEV_API = 'https://race-lens-api.jt7.workers.dev';
+
 function resolveApiBase(): string {
   const forced = import.meta.env.VITE_API_BASE;
   if (forced) return String(forced).replace(/\/+$/, '');
-  const fallback = import.meta.env.VITE_API_FALLBACK_BASE;
-  if (fallback && typeof location !== 'undefined' && location.hostname.endsWith('.pages.dev')) {
-    return String(fallback).replace(/\/+$/, '');
+  if (typeof location !== 'undefined' && location.hostname.endsWith('.pages.dev')) {
+    return PAGES_DEV_API;
   }
   return '';
 }
