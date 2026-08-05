@@ -58,21 +58,33 @@ class DriveClient:
                 return res
             last = res
 
-            body = "" if stream else res.text[:500]
+            # Always read the body on an error, even for stream=True. Drive
+            # error responses are small JSON, and skipping them here was a real
+            # bug: every download 403 (stream=True) fell through unclassified,
+            # so quota and rate-limit backoff never fired and 101 photos of a
+            # 151-photo album were dropped while the job still reported "done".
+            body = res.text[:500]
             if res.status_code == 403 and "downloadQuotaExceeded" in body:
                 raise QuotaExceeded(f"downloadQuotaExceeded on {url}")
-            if res.status_code in (429, 500, 502, 503, 504) or (
-                res.status_code == 403 and "rateLimitExceeded" in body
-            ):
+            # Drive also returns a bare 403 for per-user rate limits, sometimes
+            # with no machine-readable reason at all. Treat every 403 that is not
+            # an explicit permission failure as retryable.
+            retryable_403 = res.status_code == 403 and not (
+                "insufficientFilePermissions" in body or "notFound" in body
+            )
+            if res.status_code in (429, 500, 502, 503, 504) or retryable_403:
                 sleep = delay + random.uniform(0, 0.5)
-                log.warning("Drive %s, retrying in %.1fs (attempt %d)", res.status_code, sleep, attempt + 1)
+                log.warning("Drive %s, retrying in %.1fs (attempt %d/6)", res.status_code, sleep, attempt + 1)
                 time.sleep(sleep)
                 delay = min(delay * 2, 60)
                 continue
             res.raise_for_status()
 
         assert last is not None
-        raise QuotaExceeded(f"Drive kept failing with {last.status_code}")
+        # Out of retries. Surfaced as QuotaExceeded so the caller finishes the
+        # run as `partial` and keeps what it already has, rather than dropping
+        # the file and calling the job complete.
+        raise QuotaExceeded(f"Drive kept failing with {last.status_code} after 6 attempts")
 
     def list_folder(self, folder_id: str) -> Iterator[dict]:
         page_token: str | None = None

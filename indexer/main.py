@@ -80,6 +80,7 @@ def run(args: argparse.Namespace) -> int:
     face_rows: list[dict] = []
     processed = 0
     downloaded = 0
+    skipped = 0
     quota_hit = False
 
     work = cfg.work_dir
@@ -110,6 +111,7 @@ def run(args: argparse.Namespace) -> int:
                 break
             except Exception as exc:  # noqa: BLE001
                 log.warning("Skipping %s (%s): %s", img.name, img.id, exc)
+                skipped += 1
 
         photo_payload: list[dict] = []
         decoded: dict[str, np.ndarray] = {}
@@ -193,13 +195,21 @@ def run(args: argparse.Namespace) -> int:
             row["row_idx"] += row_base
         up.put_faces(args.event_id, shard_key, row_base, face_rows)
 
-    status = "partial" if quota_hit else "done"
-    up.progress(args.job_id, status=status, done=processed, total=total)
-    counts = up.finalize(args.event_id, "partial" if quota_hit else "ready")
+    # Any photo we could not fetch means the album is not fully represented.
+    # Reporting "done" there is a lie the organizer cannot see through.
+    incomplete = quota_hit or skipped > 0
+    status = "partial" if incomplete else "done"
+    up.progress(
+        args.job_id, status=status, done=processed, total=total,
+        error=(f"{skipped} of {total} photos could not be downloaded from Drive"
+               if skipped else None),
+    )
+    counts = up.finalize(args.event_id, "partial" if incomplete else "ready")
 
     log.info(
-        "Finished: %s — %d photos downloaded, %d faces, event now %s photos / %s faces",
-        status, downloaded, len(embeddings), counts.get("photo_count"), counts.get("face_count"),
+        "Finished: %s — %d downloaded, %d skipped, %d faces; event now %s photos / %s faces",
+        status, downloaded, skipped, len(embeddings),
+        counts.get("photo_count"), counts.get("face_count"),
     )
     return 0
 
