@@ -159,6 +159,15 @@ export const api = {
     reindexSource: (sourceId: string) =>
       req<{ job_id: string }>(`/api/admin/sources/${sourceId}/reindex`, { method: 'POST' }),
 
+    photos: (eventId: string, cursor: string | null, filter = 'all') =>
+      req<{
+        photos: (Photo & {
+          faces: { bib: string | null; x: number; y: number; w: number; h: number }[];
+          bibs: { bib: string; conf: number | null }[];
+        })[];
+        cursor: string | null;
+      }>(`/api/admin/events/${eventId}/photos?filter=${filter}&cursor=${encodeURIComponent(cursor ?? '')}`),
+
     report: (eventId: string) =>
       req<{
         sources: { id: string; drive_folder_id: string; drive_url: string;

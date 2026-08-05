@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { Env, EventRow, JobRow } from '../types';
-import { HttpError, newId, nowIso, publicEvent, r2Url, slugify } from '../lib';
+import { chunk, HttpError, newId, nowIso, publicEvent, publicPhoto, r2Url, slugify } from '../lib';
 import { parseFolderId, sampleThumbUrl, walkFolder } from '../drive';
 
 export const adminRoutes = new Hono<{ Bindings: Env }>();
@@ -320,6 +320,74 @@ adminRoutes.get('/events/:id', async (c) => {
     .bind(c.req.param('id')).first<EventRow>();
   if (!row) throw new HttpError(404, 'Event not found', 'no_event');
   return c.json({ event: { ...publicEvent(c.env, row), created_at: row.created_at } });
+});
+
+/**
+ * Photos with their detected faces and read bibs, for visual debugging.
+ *
+ * Boxes are returned as fractions of the image, not pixels: they were detected
+ * on the 6000px original but are drawn over a 1000px thumbnail, so anything
+ * absolute would be six times too big.
+ */
+adminRoutes.get('/events/:id/photos', async (c) => {
+  const eventId = c.req.param('id');
+  const limit = Math.min(Number(c.req.query('limit') ?? 24) || 24, 60);
+  const cursor = c.req.query('cursor') ?? '';
+  const filter = c.req.query('filter') ?? 'all'; // all | no_face | no_bib | has_bib
+
+  const where =
+    filter === 'no_face' ? 'AND NOT EXISTS (SELECT 1 FROM faces f WHERE f.photo_id = p.id)'
+    : filter === 'no_bib' ? 'AND NOT EXISTS (SELECT 1 FROM bibs b WHERE b.photo_id = p.id)'
+    : filter === 'has_bib' ? 'AND EXISTS (SELECT 1 FROM bibs b WHERE b.photo_id = p.id)'
+    : '';
+
+  const { results: photos } = await c.env.DB.prepare(
+    `SELECT p.id, p.drive_file_id, p.thumb_key, p.width, p.height
+       FROM photos p WHERE p.event_id = ? AND p.id > ? ${where}
+      ORDER BY p.id LIMIT ?`,
+  ).bind(eventId, cursor, limit).all<any>();
+
+  if (!photos.length) return c.json({ photos: [], cursor: null });
+
+  const ids = photos.map((p: any) => p.id);
+  const faces: any[] = [];
+  const bibs: any[] = [];
+  for (const part of chunk(ids, 90)) {
+    const ph = part.map(() => '?').join(',');
+    const f = await c.env.DB.prepare(
+      `SELECT photo_id, bbox, bib FROM faces WHERE photo_id IN (${ph})`).bind(...part).all<any>();
+    faces.push(...f.results);
+    const b = await c.env.DB.prepare(
+      `SELECT photo_id, COALESCE(bib_raw, bib) AS bib, conf FROM bibs WHERE photo_id IN (${ph})`,
+    ).bind(...part).all<any>();
+    bibs.push(...b.results);
+  }
+
+  const byPhoto = (rows: any[]) => rows.reduce((m: any, r: any) => {
+    (m[r.photo_id] ??= []).push(r); return m;
+  }, {});
+  const fMap = byPhoto(faces);
+  const bMap = byPhoto(bibs);
+
+  return c.json({
+    photos: photos.map((p: any) => {
+      const w = p.width || 1, h = p.height || 1;
+      return {
+        ...publicPhoto(c.env, p),
+        faces: (fMap[p.id] ?? []).map((f: any) => {
+          const [x, y, bw, bh] = JSON.parse(f.bbox);
+          return {
+            bib: f.bib,
+            // clamped: a box can sit a pixel or two outside after rounding
+            x: Math.max(0, Math.min(1, x / w)), y: Math.max(0, Math.min(1, y / h)),
+            w: Math.max(0, Math.min(1, bw / w)), h: Math.max(0, Math.min(1, bh / h)),
+          };
+        }),
+        bibs: (bMap[p.id] ?? []).map((b: any) => ({ bib: b.bib, conf: b.conf })),
+      };
+    }),
+    cursor: photos.length === limit ? photos[photos.length - 1].id : null,
+  });
 });
 
 adminRoutes.get('/jobs/:id', async (c) => {

@@ -163,6 +163,11 @@ const when = (iso: string) => new Date(iso).toLocaleString();
           backs turned, bibs folded or hidden — so treat it as a ceiling on bib search, not a fault.
           Face search is unaffected by a missing bib.
         </p>
+        <p style="margin-top: var(--s-3)">
+          <RouterLink :to="`/admin/e/${id}/photos`" class="btn file-btn">
+            Inspect photos — see faces and bibs drawn on each frame
+          </RouterLink>
+        </p>
         <template v-if="report?.top_bibs.length">
           <div class="muted small" style="margin-top: var(--s-3)">Most-photographed bibs — use one to sanity-check search:</div>
           <div class="btn-row" style="margin-top: var(--s-2)">
