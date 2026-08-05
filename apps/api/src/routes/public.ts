@@ -90,9 +90,19 @@ publicRoutes.post('/events/:slug/search/face', async (c) => {
     throw new HttpError(400, 'Body must be { vec: number[512] } of finite numbers', 'bad_vec');
   }
   const threshold = Number(c.req.query('t') ?? 0.38);
-  const matches = await searchFaces(c.env, event.id, vec as number[], {
+  const { matches, timing } = await searchFaces(c.env, event.id, vec as number[], {
     threshold: Number.isFinite(threshold) ? threshold : 0.38,
     ctx: c.executionCtx,
   });
-  return c.json({ event: publicEvent(c.env, event), matches });
+  // Server-side timing, so latency work is driven by the Worker's own numbers
+  // rather than by round-trip wall clock from wherever the client happens to be.
+  c.header(
+    'Server-Timing',
+    `load;dur=${timing.loadMs},scan;dur=${timing.scanMs},join;dur=${timing.joinMs},total;dur=${timing.totalMs}`,
+  );
+  return c.json({
+    event: publicEvent(c.env, event),
+    matches,
+    ...(c.req.query('debug') ? { timing } : {}),
+  });
 });

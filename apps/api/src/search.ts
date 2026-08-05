@@ -118,6 +118,23 @@ export function invalidateIndex(eventId: string): void {
   memCache.delete(eventId);
 }
 
+/**
+ * NOTE ON scanMs: it will always read 0.
+ *
+ * Workers freezes Date.now() during synchronous execution (a Spectre timing
+ * mitigation) — the clock only advances on I/O. So pure CPU is unmeasurable
+ * from inside the isolate, and only loadMs/joinMs, which straddle I/O, mean
+ * anything. Do not go looking for a bug here.
+ */
+export interface SearchTiming {
+  loadMs: number;   // shard fetch (R2 or edge cache)
+  scanMs: number;   // brute-force dot product
+  joinMs: number;   // D1 lookup of matched rows
+  totalMs: number;
+  rows: number;
+  cached: boolean;  // served from the in-isolate module cache
+}
+
 export interface FaceMatch {
   photo: ReturnType<typeof publicPhoto>;
   score: number;
@@ -129,13 +146,18 @@ export async function searchFaces(
   eventId: string,
   vec: number[],
   opts: { threshold?: number; topFaces?: number; topPhotos?: number; ctx?: Waiter } = {},
-): Promise<FaceMatch[]> {
+): Promise<{ matches: FaceMatch[]; timing: SearchTiming }> {
+  const t0 = Date.now();
   const threshold = opts.threshold ?? 0.38;
   const topFaces = opts.topFaces ?? 200;
   const topPhotos = opts.topPhotos ?? 60;
 
+  const warm = memCache.has(eventId);
   const index = await loadIndex(env, eventId, opts.ctx);
-  if (!index) return [];
+  const tLoad = Date.now();
+  if (!index) {
+    return { matches: [], timing: { loadMs: tLoad - t0, scanMs: 0, joinMs: 0, totalMs: tLoad - t0, rows: 0, cached: warm } };
+  }
 
   const q = quantize(vec);
   const { rows, rowCount } = index;
@@ -150,27 +172,43 @@ export async function searchFaces(
     scores[r] = dot;
   }
 
+  const tScan = Date.now();
   const cutoff = threshold * SCALE * SCALE;
   const candidates: number[] = [];
   for (let r = 0; r < rowCount; r++) if (scores[r] >= cutoff) candidates.push(r);
   candidates.sort((a, b) => scores[b] - scores[a]);
   const top = candidates.slice(0, topFaces);
-  if (!top.length) return [];
+  const mkTiming = (end: number, joinStart: number): SearchTiming => ({
+    loadMs: tLoad - t0,
+    scanMs: tScan - tLoad,
+    joinMs: end - joinStart,
+    totalMs: end - t0,
+    rows: rowCount,
+    cached: warm,
+  });
+  if (!top.length) {
+    const now = Date.now();
+    return { matches: [], timing: mkTiming(now, now) };
+  }
 
   // D1 allows at most 100 bound parameters per query — far below SQLite's 999.
   // topFaces is 200, so this MUST be chunked; binding them in one statement
   // throws "too many SQL variables" on every search with enough matches, which
   // is exactly the case that matters.
-  const results: any[] = [];
-  for (const part of chunk(top, D1_MAX_PARAMS - 1)) {
-    const placeholders = part.map(() => '?').join(',');
-    const page = await env.DB.prepare(
-      `SELECT f.row_idx, f.bbox, p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.taken_at
-         FROM faces f JOIN photos p ON p.id = f.photo_id
-        WHERE f.event_id = ? AND f.row_idx IN (${placeholders})`,
-    ).bind(eventId, ...part).all<any>();
-    results.push(...page.results);
-  }
+  // Issued as one D1 batch rather than sequential awaits: 200 candidates is
+  // three chunks, and serialised they cost three full round trips (~75 ms
+  // measured) for what is one round trip's worth of work.
+  const parts = chunk(top, D1_MAX_PARAMS - 1);
+  const pages = await env.DB.batch<any>(
+    parts.map((part) =>
+      env.DB.prepare(
+        `SELECT f.row_idx, f.bbox, p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.taken_at
+           FROM faces f JOIN photos p ON p.id = f.photo_id
+          WHERE f.event_id = ? AND f.row_idx IN (${part.map(() => '?').join(',')})`,
+      ).bind(eventId, ...part),
+    ),
+  );
+  const results: any[] = pages.flatMap((p) => p.results ?? []);
 
   // Collapse to the best-scoring face per photo — a runner appearing twice in
   // one frame should not produce two grid tiles.
@@ -186,5 +224,8 @@ export async function searchFaces(
     });
   }
 
-  return [...best.values()].sort((a, b) => b.score - a.score).slice(0, topPhotos);
+  return {
+    matches: [...best.values()].sort((a, b) => b.score - a.score).slice(0, topPhotos),
+    timing: mkTiming(Date.now(), tScan),
+  };
 }

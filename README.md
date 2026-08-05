@@ -169,6 +169,32 @@ a second day.
 10. `row_base` is allocated by the Worker, not the runner — two sources indexing
     concurrently would otherwise pick the same offset and overwrite each other.
 
+## Search latency, measured
+
+Numbers from the deployed Worker at 30,000 faces (14.65 MB shard), not estimates.
+
+| | |
+|---|---|
+| Server-side total | **~100–150 ms** typical, **~20 ms** on a warm isolate |
+| — shard load | 65–307 ms cold, 0 ms warm (module cache), occasionally much worse |
+| — D1 join | ~30 ms (one batch; was ~75 ms as three sequential queries) |
+| — scan | unmeasurable, see below |
+| Client wall clock | 340–700 ms — but **220–530 ms of that is network RTT**, not the server |
+
+Two things worth knowing before optimizing this further:
+
+- **`Date.now()` does not advance during synchronous work in a Worker.** It is
+  frozen as a Spectre mitigation and only moves on I/O, so CPU time cannot be
+  measured from inside the isolate. `scanMs` always reads 0. That is not a bug.
+- **Wall clock is dominated by the client's distance to the colo.** Judge this
+  endpoint by `Server-Timing` (or `?debug=1`), never by curl totals.
+
+The shard fetch is the remaining variable cost. Halving it would mean binary
+(1-bit) quantization for a first pass and reranking survivors with the int8
+vectors — an 8× smaller first-pass index. That is not implemented, because at
+~150 ms server-side it buys nothing a user could notice: the selfie flow already
+spends seconds downloading 16 MB of models and running inference locally.
+
 ## Design system
 
 `.claude/skills/` vendors a design-engineering skill set (from the sibling
