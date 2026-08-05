@@ -77,7 +77,8 @@ jobs:
             --source-id "${{ github.event.client_payload.source_id || inputs.source_id }}" \
             --folder-id "${{ github.event.client_payload.folder_id || inputs.folder_id }}" \
             --job-id    "${{ github.event.client_payload.job_id    || inputs.job_id }}" \
-            ${{ (github.event.client_payload.bibs_only || inputs.bibs_only) && '--bibs-only' || '' }}
+            ${{ (github.event.client_payload.bibs_only || inputs.bibs_only) && '--bibs-only' || '' }} \
+            ${{ (github.event.client_payload.no_resume || inputs.no_resume) && '--no-resume' || '' }}
 
       - name: Report failure
         # main.py reports its own exceptions, but this also catches the cases it
