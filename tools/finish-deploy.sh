@@ -67,27 +67,30 @@ if [ "$(echo "$APPS" | jqf 'j.success')" != "true" ]; then
   warn "cannot list Access apps: $(echo "$APPS" | jqf '(j.errors||[]).map(e=>e.code+" "+e.message).join("; ")')"
   warn "token is missing Account · Access: Apps and Policies · Edit"
 else
+  # ONE app per hostname covering BOTH paths.
+  #
+  # Separate apps per path was wrong: each Access application issues its own
+  # JWT audience, so signing in at /admin produced a token /api/admin rejected.
+  # The admin page then loaded, its XHR to /api/admin/events got 302'd to the
+  # cross-origin Access login, and fetch() failed with a bare "Failed to fetch".
   for H in "${HOSTS[@]}"; do
-    for P in admin api/admin; do
-      DOM="$H/$P"
-      HAVE=$(echo "$APPS" | jqf "(j.result||[]).some(a=>a.domain==='$DOM')")
-      if [ "$HAVE" = "true" ]; then ok "app exists: $DOM"; continue; fi
-      APP=$(curl -s -X POST "${auth[@]}" "$API/accounts/$ACC/access/apps" --data "{
-        \"name\":\"Race Lens admin ($DOM)\",\"domain\":\"$DOM\",
-        \"type\":\"self_hosted\",\"session_duration\":\"24h\",
-        \"allowed_idps\":[],\"auto_redirect_to_identity\":false}")
-      AID=$(echo "$APP" | jqf 'j.result&&j.result.id')
-      if [ -z "$AID" ]; then
-        warn "$DOM: $(echo "$APP" | jqf '(j.errors||[]).map(e=>e.code+" "+e.message).join("; ")')"
-        continue
-      fi
-      POL=$(curl -s -X POST "${auth[@]}" "$API/accounts/$ACC/access/apps/$AID/policies" --data "{
-        \"name\":\"Allow owner\",\"decision\":\"allow\",\"precedence\":1,
-        \"include\":[{\"email\":{\"email\":\"$EMAIL\"}}]}")
-      [ "$(echo "$POL" | jqf 'j.success')" = "true" ] \
-        && ok "$DOM protected, allow $EMAIL" \
-        || warn "$DOM app created but policy failed: $(echo "$POL" | jqf '(j.errors||[]).map(e=>e.code+" "+e.message).join("; ")')"
-    done
+    HAVE=$(echo "$APPS" | jqf "(j.result||[]).some(a=>(a.destinations||[]).some(d=>d.uri==='$H/api/admin'))")
+    if [ "$HAVE" = "true" ]; then ok "Access app exists for $H"; continue; fi
+    APP=$(curl -s -X POST "${auth[@]}" "$API/accounts/$ACC/access/apps" --data "{
+      \"name\":\"Race Lens admin — $H\",\"type\":\"self_hosted\",\"session_duration\":\"24h\",
+      \"destinations\":[{\"type\":\"public\",\"uri\":\"$H/admin\"},
+                       {\"type\":\"public\",\"uri\":\"$H/api/admin\"}]}")
+    AID=$(echo "$APP" | jqf 'j.result&&j.result.id')
+    if [ -z "$AID" ]; then
+      warn "$H: $(echo "$APP" | jqf '(j.errors||[]).map(e=>e.code+" "+e.message).join("; ")')"
+      continue
+    fi
+    POL=$(curl -s -X POST "${auth[@]}" "$API/accounts/$ACC/access/apps/$AID/policies" --data "{
+      \"name\":\"Allow owner\",\"decision\":\"allow\",\"precedence\":1,
+      \"include\":[{\"email\":{\"email\":\"$EMAIL\"}}]}")
+    [ "$(echo "$POL" | jqf 'j.success')" = "true" ] \
+      && ok "$H/admin + /api/admin protected, allow $EMAIL (one session)" \
+      || warn "$H app created but policy failed"
   done
 fi
 
