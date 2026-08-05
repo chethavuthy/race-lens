@@ -52,7 +52,7 @@ class DriveClient:
         """GET with exponential backoff on the transient failure classes."""
         delay = 1.0
         last: requests.Response | None = None
-        for attempt in range(6):
+        for attempt in range(8):
             res = self.session.get(url, params=params, stream=stream, timeout=120)
             if res.status_code < 400:
                 return res
@@ -74,9 +74,9 @@ class DriveClient:
             )
             if res.status_code in (429, 500, 502, 503, 504) or retryable_403:
                 sleep = delay + random.uniform(0, 0.5)
-                log.warning("Drive %s, retrying in %.1fs (attempt %d/6)", res.status_code, sleep, attempt + 1)
+                log.warning("Drive %s, retrying in %.1fs (attempt %d/8)", res.status_code, sleep, attempt + 1)
                 time.sleep(sleep)
-                delay = min(delay * 2, 60)
+                delay = min(delay * 2, 120)
                 continue
             res.raise_for_status()
 
@@ -84,7 +84,7 @@ class DriveClient:
         # Out of retries. Surfaced as QuotaExceeded so the caller finishes the
         # run as `partial` and keeps what it already has, rather than dropping
         # the file and calling the job complete.
-        raise QuotaExceeded(f"Drive kept failing with {last.status_code} after 6 attempts")
+        raise QuotaExceeded(f"Drive kept failing with {last.status_code} after 8 attempts")
 
     def list_folder(self, folder_id: str) -> Iterator[dict]:
         page_token: str | None = None

@@ -82,6 +82,21 @@ internalRoutes.post('/events/:id/photos', async (c) => {
   return c.json({ ok: true, photo_ids: ids });
 });
 
+/**
+ * drive_file_ids already indexed for this event.
+ *
+ * Lets a re-run skip what it already has. Without this, a run that dies partway
+ * re-downloads the same prefix every time and can never get past whatever wall
+ * stopped it — the Angkor album stalled at the same 50 photos on repeat runs
+ * because Drive rate-limits sustained bulk downloads.
+ */
+internalRoutes.get('/events/:id/indexed', async (c) => {
+  const { results } = await c.env.DB.prepare(
+    'SELECT drive_file_id FROM photos WHERE event_id = ?',
+  ).bind(c.req.param('id')).all<{ drive_file_id: string }>();
+  return c.json({ drive_file_ids: results.map((r) => r.drive_file_id) });
+});
+
 internalRoutes.post('/events/:id/bibs', async (c) => {
   const eventId = c.req.param('id');
   const { bibs } = await c.req.json<{ bibs: { photo_id: string; bib: string; conf?: number }[] }>();

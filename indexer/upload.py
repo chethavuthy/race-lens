@@ -89,6 +89,18 @@ class Uploader:
             ids.update(res.get("photo_ids", {}))
         return ids
 
+    def already_indexed(self, event_id: str) -> set[str]:
+        """drive_file_ids this event already has, so a re-run can skip them."""
+        try:
+            res = self.session.get(
+                f"{self.cfg.api_base_url}/api/internal/events/{event_id}/indexed", timeout=60
+            )
+            res.raise_for_status()
+            return set(res.json().get("drive_file_ids", []))
+        except Exception as exc:  # noqa: BLE001 - resume is an optimisation
+            log.warning("Could not fetch indexed ids (%s); processing everything", exc)
+            return set()
+
     def put_bibs(self, event_id: str, bibs: list[dict]) -> None:
         for part in chunked(bibs, 150):
             self._post(f"/api/internal/events/{event_id}/bibs", {"bibs": part})

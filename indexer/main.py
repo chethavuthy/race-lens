@@ -19,6 +19,7 @@ import os
 import shutil
 import sys
 import traceback
+import uuid
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -67,6 +68,25 @@ def run(args: argparse.Namespace) -> int:
     up.progress(args.job_id, status="running", done=0, total=0)
 
     images: list[DriveImage] = drive.walk(args.folder_id)
+    discovered = len(images)
+
+    # Resume. Drive throttles sustained bulk downloading, so a big album often
+    # needs more than one run; without this every run re-fetches the same prefix
+    # and stalls at exactly the same place.
+    if not args.no_resume:
+        have = up.already_indexed(args.event_id)
+        if have:
+            images = [i for i in images if i.id not in have]
+            log.info(
+                "Resume: %d of %d already indexed, %d to do",
+                len(have), discovered, len(images),
+            )
+            if not images:
+                log.info("Nothing left to index")
+                up.progress(args.job_id, status="done", done=discovered, total=discovered)
+                up.finalize(args.event_id, "ready")
+                return 0
+
     total = len(images)
     up.progress(args.job_id, total=total)
     if not total:
@@ -183,9 +203,18 @@ def run(args: argparse.Namespace) -> int:
         if quota_hit:
             break
 
-    # One shard per source: binding a second Drive folder to an existing event
-    # adds a shard rather than rewriting anything already there.
-    shard_key = f"index/{args.event_id}/{args.source_id}.bin"
+    # One shard per RUN, not per source.
+    #
+    # Per-source was correct only while a source was always indexed in a single
+    # pass. With resume, a second run carries only the photos the first one
+    # missed — writing those to the source's existing shard key would replace
+    # the file with a shorter one and, because put_faces sends replace=True,
+    # delete the earlier run's face rows outright. The photos would survive and
+    # silently stop being findable by face.
+    #
+    # Distinct keys make every run purely additive; search already concatenates
+    # all of an event's shards by row_base.
+    shard_key = f"index/{args.event_id}/{args.source_id}-{args.run_id}.bin"
     if embeddings:
         row_base = up.reserve_rows(args.event_id, shard_key, len(embeddings))
         buffer = np.stack(embeddings).astype(np.int8)
@@ -225,6 +254,15 @@ def main() -> int:
     p.add_argument("--source-id", required=True)
     p.add_argument("--folder-id", required=True)
     p.add_argument("--job-id", required=True)
+    p.add_argument(
+        "--run-id", default=uuid.uuid4().hex[:10],
+        help="Unique per invocation; scopes this run's shard so runs never "
+             "overwrite each other's vectors.",
+    )
+    p.add_argument(
+        "--no-resume", action="store_true",
+        help="Re-process photos already indexed for this event (default is to skip them).",
+    )
     args = p.parse_args()
 
     try:
