@@ -38,9 +38,20 @@ log = logging.getLogger(__name__)
 BIB_RE = re.compile(r"^\d{1,5}$")
 MIN_CONF = 0.6
 
-# Torso box relative to the face box, per the plan.
+# Torso box relative to the face box.
+#
+# The plan specified a 1.2h-3.2h window. Measured against real bibs from the
+# Angkor album that is too short: it lands on the bib's HEADER ("11 ANGKOR
+# EMPIRE MARATHON", "42Km") and stops just above the digits. On one photo it
+# read the event name at 0.99 confidence and the number not at all.
+#
+# Swept over 8 photos / 23 faces, counting faces that yielded a usable number:
+#   3.2h ->  5    3.8h -> 13    4.4h -> 19    5.0h -> 17    5.6h -> 19 + noise
+# 4.4h is the peak. Beyond it the crop starts swallowing the runner behind and
+# short fragments ("29") appear, which is the precision problem face-anchored
+# cropping exists to avoid.
 TORSO_TOP = 1.2      # y + 1.2h
-TORSO_BOTTOM = 3.2   # y + 3.2h
+TORSO_BOTTOM = 4.4   # y + 4.4h
 TORSO_LEFT = -0.75   # x - 0.75w
 TORSO_RIGHT = 1.75   # x + 1.75w
 

@@ -73,6 +73,8 @@ def run(args: argparse.Namespace) -> int:
     # Resume. Drive throttles sustained bulk downloading, so a big album often
     # needs more than one run; without this every run re-fetches the same prefix
     # and stalls at exactly the same place.
+    if args.bibs_only:
+        args.no_resume = True
     if not args.no_resume:
         have = up.already_indexed(args.event_id)
         if have:
@@ -173,6 +175,10 @@ def run(args: argparse.Namespace) -> int:
                     face.bib = hit.bib
                     bib_payload.append({"photo_id": photo_id, "bib": hit.bib, "conf": hit.conf})
 
+                # In bibs-only mode the vector index is already built and
+                # verified; re-emitting faces would duplicate every row.
+                if args.bibs_only:
+                    continue
                 face_rows.append(
                     {
                         "photo_id": photo_id,
@@ -258,6 +264,12 @@ def main() -> int:
         "--run-id", default=uuid.uuid4().hex[:10],
         help="Unique per invocation; scopes this run's shard so runs never "
              "overwrite each other's vectors.",
+    )
+    p.add_argument(
+        "--bibs-only", action="store_true",
+        help="Re-read bib numbers for photos already indexed and write only the "
+             "bibs table. Leaves photos, faces and shards untouched — use after "
+             "changing OCR tuning. Implies --no-resume.",
     )
     p.add_argument(
         "--no-resume", action="store_true",

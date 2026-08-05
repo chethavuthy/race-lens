@@ -9,6 +9,10 @@ on:
       source_id: { description: Source id, required: true }
       folder_id: { description: Drive folder id, required: true }
       job_id: { description: Job id, required: true }
+      bibs_only:
+        description: Re-read bibs only (leaves faces/shards untouched)
+        type: boolean
+        default: false
 
 # Two runs against the same event would race on row allocation and photo
 # upserts. Queue them instead of cancelling — a cancelled run leaves a job
@@ -72,7 +76,8 @@ jobs:
             --event-id  "${{ github.event.client_payload.event_id  || inputs.event_id }}" \
             --source-id "${{ github.event.client_payload.source_id || inputs.source_id }}" \
             --folder-id "${{ github.event.client_payload.folder_id || inputs.folder_id }}" \
-            --job-id    "${{ github.event.client_payload.job_id    || inputs.job_id }}"
+            --job-id    "${{ github.event.client_payload.job_id    || inputs.job_id }}" \
+            ${{ (github.event.client_payload.bibs_only || inputs.bibs_only) && '--bibs-only' || '' }}
 
       - name: Report failure
         # main.py reports its own exceptions, but this also catches the cases it
