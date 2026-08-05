@@ -134,7 +134,14 @@ adminRoutes.post('/ingest', async (c) => {
     c.env.DB.prepare(
       'INSERT INTO jobs (id, event_id, source_id, status, updated_at) VALUES (?, ?, ?, ?, ?)',
     ).bind(jobId, event_id, sourceId, 'queued', ts),
-    c.env.DB.prepare("UPDATE events SET status = 'indexing' WHERE id = ?").bind(event_id),
+    // Only a draft becomes 'indexing'. An event that is already published must
+    // STAY published while more photos are added: 'indexing' is excluded from
+    // GET /api/events, so flipping a live event would pull it off the site and
+    // 404 its page for every runner until the job finished — for an operation
+    // that is purely additive.
+    c.env.DB.prepare(
+      "UPDATE events SET status = 'indexing' WHERE id = ? AND status = 'draft'",
+    ).bind(event_id),
   ]);
 
   const res = await fetch(`https://api.github.com/repos/${c.env.GH_REPO}/dispatches`, {

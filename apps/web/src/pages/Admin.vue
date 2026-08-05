@@ -110,6 +110,27 @@ function onBanner(e: Event) {
   bannerFile.value = (e.target as HTMLInputElement).files?.[0] ?? null;
 }
 
+const bannerBusy = ref<string | null>(null);
+const bannerError = ref<string | null>(null);
+
+/** Upload a banner for any event, not just one being created. */
+async function onEventBanner(ev: EventSummary, e: Event) {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = ''; // allow re-picking the same file after a failure
+  if (!file) return;
+  bannerError.value = null;
+  bannerBusy.value = ev.id;
+  try {
+    await api.admin.uploadBanner(ev.id, file);
+    await refreshEvents();
+  } catch (err: any) {
+    bannerError.value = `${ev.name}: ${err.message}`;
+  } finally {
+    bannerBusy.value = null;
+  }
+}
+
 async function publish(ev: EventSummary) {
   await api.admin.setStatus(ev.id, 'ready');
   await refreshEvents();
@@ -141,9 +162,9 @@ async function publish(ev: EventSummary) {
         </template>
         <template v-if="inspection.truncated"> (capped — only the first batch will be indexed)</template>
       </p>
-      <div class="photo-grid" style="margin-top: 12px; grid-template-columns: repeat(4, 1fr)">
+      <div class="photo-grid" style="margin-top: var(--s-3); grid-template-columns: repeat(4, 1fr)">
         <figure v-for="s in inspection.samples" :key="s.id">
-          <img :src="s.thumb" :alt="s.name" referrerpolicy="no-referrer" />
+          <img class="thumb" :src="s.thumb" :alt="s.name" referrerpolicy="no-referrer" loading="lazy" />
         </figure>
       </div>
     </template>
@@ -210,7 +231,8 @@ async function publish(ev: EventSummary) {
     </p>
   </div>
 
-  <h2 style="margin-top: 32px">All events</h2>
+  <h2 style="margin-top: var(--s-7)">All events</h2>
+  <p v-if="bannerError" class="notice err" style="margin-bottom: var(--s-3)">{{ bannerError }}</p>
   <div class="card">
     <p v-if="!events.length" class="muted" style="margin: 0">No events yet.</p>
     <div
@@ -221,9 +243,21 @@ async function publish(ev: EventSummary) {
         <div class="muted small">
           /e/{{ e.slug }} · {{ e.status }} · {{ e.photo_count.toLocaleString() }} photos ·
           {{ e.face_count.toLocaleString() }} faces
+          <span v-if="bannerBusy === e.id"> · <span class="spinner" /> uploading banner…</span>
         </div>
       </div>
-      <button v-if="e.status === 'draft'" @click="publish(e)">Publish</button>
+      <img v-if="e.banner_url" class="thumb" :src="e.banner_url" alt=""
+           style="width: 96px; aspect-ratio: 16/9; flex: none" />
+      <div v-else class="thumb" style="width: 96px; aspect-ratio: 16/9; flex: none" />
+      <div class="btn-row" style="flex: none">
+        <label :for="`bn-${e.id}`" class="btn" style="margin: 0; display: inline-flex;
+               align-items: center; min-height: var(--tap); cursor: pointer; color: var(--text)">
+          {{ e.banner_url ? 'Replace banner' : 'Add banner' }}
+        </label>
+        <input :id="`bn-${e.id}`" type="file" accept="image/*" class="sr-only"
+               @change="onEventBanner(e, $event)" />
+        <button v-if="e.status === 'draft'" @click="publish(e)">Publish</button>
+      </div>
     </div>
   </div>
 </template>

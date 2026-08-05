@@ -210,7 +210,18 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
   display: grid; gap: var(--s-3);
   grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
 }
-.photo-grid figure { margin: 0; position: relative; }
+.photo-grid figure { margin: 0; position: relative; min-width: 0; }
+/* Safety net: any image in the grid is contained even if it is not a
+   .photo-tile. Admin's sample strip used bare <img> and rendered at natural
+   size — 6000px wide — blowing the card open and off-screen. */
+.photo-grid img { max-width: 100%; display: block; }
+
+/* Static thumbnail: same framing as .photo-tile but no fade-in, for previews
+   that are not part of a lazy-loaded results grid. */
+.thumb {
+  width: 100%; aspect-ratio: 3 / 2; object-fit: cover; display: block;
+  border-radius: var(--radius-sm); background: var(--surface-2);
+}
 .photo-tile {
   display: block; position: relative; overflow: hidden;
   border-radius: var(--radius-sm); background: var(--surface-2);
