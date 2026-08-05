@@ -78,6 +78,9 @@ CREATE TABLE IF NOT EXISTS jobs (
   done       INTEGER NOT NULL DEFAULT 0,
   total      INTEGER NOT NULL DEFAULT 0,
   error      TEXT,
+  -- How many times this job has auto-continued after a Drive rate limit.
+  -- Bounds the chain so a permanently-failing folder cannot loop forever.
+  attempts   INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_event ON jobs(event_id, updated_at);

@@ -39,6 +39,69 @@ interface PhotoIn {
  * Batch upsert. Returns drive_file_id -> photo_id so the runner can attach
  * faces and bibs to rows it did not itself name.
  */
+/**
+ * Re-dispatch a job that stopped early on a Drive rate limit.
+ *
+ * Drive throttles sustained bulk downloading, so a large album of full-size
+ * originals reliably stops around 1 GB. Resume means each run makes progress,
+ * but without this the organizer has to notice and press the button again —
+ * repeatedly, for one album. The runner asks for a continuation instead.
+ *
+ * Bounded by jobs.attempts: a folder that can never finish must not loop.
+ */
+internalRoutes.post('/jobs/:id/continue', async (c) => {
+  const id = c.req.param('id');
+  const MAX_ATTEMPTS = 8;
+
+  const job = await c.env.DB.prepare('SELECT * FROM jobs WHERE id = ?').bind(id).first<any>();
+  if (!job) throw new HttpError(404, 'Job not found', 'no_job');
+
+  if ((job.attempts ?? 0) >= MAX_ATTEMPTS) {
+    await c.env.DB.prepare(
+      "UPDATE jobs SET status = 'partial', error = ?, updated_at = ? WHERE id = ?",
+    ).bind(
+      `Stopped after ${MAX_ATTEMPTS} automatic continuations — Drive is still rate-limiting this folder. Everything indexed so far is live; press Start indexing again later to resume.`,
+      nowIso(), id,
+    ).run();
+    return c.json({ dispatched: false, reason: 'max_attempts' });
+  }
+
+  const source = await c.env.DB.prepare('SELECT drive_folder_id FROM sources WHERE id = ?')
+    .bind(job.source_id).first<{ drive_folder_id: string }>();
+  if (!source) throw new HttpError(400, 'Job has no source to continue', 'no_source');
+
+  const res = await fetch(`https://api.github.com/repos/${c.env.GH_REPO}/dispatches`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${c.env.GH_DISPATCH_TOKEN}`,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'race-lens-worker',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      event_type: 'index-event',
+      client_payload: {
+        event_id: job.event_id, source_id: job.source_id,
+        folder_id: source.drive_folder_id, job_id: id,
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    return c.json({ dispatched: false, reason: `github_${res.status}` });
+  }
+
+  await c.env.DB.prepare(
+    `UPDATE jobs SET attempts = attempts + 1, status = 'queued',
+                     error = ?, updated_at = ? WHERE id = ?`,
+  ).bind(
+    `Drive rate limit — continuing automatically (attempt ${(job.attempts ?? 0) + 2} of ${MAX_ATTEMPTS + 1}).`,
+    nowIso(), id,
+  ).run();
+
+  return c.json({ dispatched: true, attempts: (job.attempts ?? 0) + 1 });
+});
+
 internalRoutes.post('/events/:id/photos', async (c) => {
   const eventId = c.req.param('id');
   const { source_id, photos } = await c.req.json<{ source_id: string; photos: PhotoIn[] }>();

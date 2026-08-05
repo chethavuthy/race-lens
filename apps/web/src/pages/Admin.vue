@@ -227,7 +227,12 @@ async function publish(ev: EventSummary) {
     </p>
     <p v-if="job.error" class="notice err">{{ job.error }}</p>
     <p v-if="job.status === 'partial'" class="notice warn">
-      Some photos could not be downloaded (Drive rate limit). Everything indexed so far is live.
+      Google Drive rate-limits bulk downloads of large photos, so this album needs
+      several passes. Indexing continues automatically — everything done so far is
+      already live, and you can close this page.
+    </p>
+    <p v-else-if="job.status === 'queued' && job.done > 0" class="notice">
+      <span class="spinner" /> Waiting for the next pass to start…
     </p>
   </div>
 

@@ -234,6 +234,21 @@ def run(args: argparse.Namespace) -> int:
     # Reporting "done" there is a lie the organizer cannot see through.
     incomplete = quota_hit or skipped > 0
     status = "partial" if incomplete else "done"
+
+    # A run stopped by Drive's throttle has more to do and will succeed later —
+    # ask for a continuation rather than making the organizer press the button
+    # again. Only when the run actually hit the limit AND left work behind;
+    # a run that merely skipped a few unreadable files must not loop.
+    remaining = discovered - len(up.already_indexed(args.event_id))
+    if quota_hit and remaining > 0 and not args.bibs_only:
+        if up.request_continue(args.job_id):
+            log.info(
+                "Drive rate limit with %d photos left — continuation dispatched",
+                remaining,
+            )
+            up.finalize(args.event_id, "partial")
+            return 0
+        log.warning("Continuation was not dispatched; finishing as partial")
     up.progress(
         args.job_id, status=status, done=processed, total=total,
         error=(f"{skipped} of {total} photos could not be downloaded from Drive"

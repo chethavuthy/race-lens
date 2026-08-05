@@ -132,5 +132,19 @@ class Uploader:
                 },
             )
 
+    def request_continue(self, job_id: str) -> bool:
+        """Ask the Worker to re-dispatch this job after a Drive rate limit.
+
+        The runner cannot re-dispatch itself: GH_DISPATCH_TOKEN lives only in
+        the Worker, deliberately, so a CI runner never holds a token that can
+        trigger workflows.
+        """
+        try:
+            res = self._post(f"/api/internal/jobs/{job_id}/continue", {})
+            return bool(res.get("dispatched"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not request continuation: %s", exc)
+            return False
+
     def finalize(self, event_id: str, status: str) -> dict:
         return self._post(f"/api/internal/events/{event_id}/finalize", {"status": status})
