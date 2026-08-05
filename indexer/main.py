@@ -96,6 +96,11 @@ def run(args: argparse.Namespace) -> int:
                 drive.download(img.id, dest)
                 local.append((img, dest))
                 downloaded += 1
+                # Downloading dominates wall time on full-size originals, so
+                # report inside the loop; per-batch reporting alone leaves the
+                # admin bar frozen for minutes at a stretch.
+                if downloaded % 5 == 0:
+                    up.progress(args.job_id, done=processed + len(local), total=total)
             except QuotaExceeded:
                 # Popular albums hit downloadQuotaExceeded. Keep everything
                 # already fetched and finish as `partial` rather than losing

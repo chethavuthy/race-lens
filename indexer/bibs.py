@@ -8,6 +8,22 @@ Two modes:
 
 Cropping to torsos is also the main defence against reading race numbers off
 bystanders in the background.
+
+ENGINE CHOICE
+-------------
+RapidOCR (onnxruntime) rather than PaddleOCR. Same underlying PP-OCR models,
+but it runs on the ONNX runtime this project already ships for insightface,
+instead of pulling in the paddlepaddle native runtime.
+
+That is not a preference, it is scar tissue. PaddleOCR broke two consecutive
+production runs:
+  1. 3.x removed `show_log` and renamed `use_angle_cls` -> crash at start-up.
+  2. paddlepaddle 3.x then failed on every single crop with
+     "ConvertPirAttribute2RuntimeAttribute not support" out of its oneDNN/PIR
+     path — silently reading zero bibs while burning ~2 s per face.
+
+PaddleOCR is kept as a fallback for environments that already have it, but it
+is no longer the dependency we rely on.
 """
 from __future__ import annotations
 
@@ -29,25 +45,31 @@ TORSO_LEFT = -0.75   # x - 0.75w
 TORSO_RIGHT = 1.75   # x + 1.75w
 
 
-def _iter_tokens(result) -> "list[tuple[str, float]]":
-    """Yield (text, confidence) from either PaddleOCR result shape.
+@dataclass
+class BibHit:
+    bib: str
+    conf: float
 
-    3.x returns dict-like pages with parallel `rec_texts` / `rec_scores` lists.
-    2.x returns [[[box, (text, score)], ...], ...].
-    """
+
+def _tokens_from_rapidocr(result) -> list[tuple[str, float]]:
+    """RapidOCR returns [[box, text, score], ...] or None."""
+    return [(str(item[1]), float(item[2])) for item in (result or []) if len(item) >= 3]
+
+
+def _tokens_from_paddle(result) -> list[tuple[str, float]]:
+    """PaddleOCR 3.x pages carry rec_texts/rec_scores; 2.x is [[box,(text,score)]]."""
     out: list[tuple[str, float]] = []
     for page in result or []:
         if page is None:
             continue
-        texts = None
-        if isinstance(page, dict):
-            texts = page.get("rec_texts")
-            scores = page.get("rec_scores")
-        elif hasattr(page, "get"):  # 3.x returns a Result object supporting .get
-            texts, scores = page.get("rec_texts"), page.get("rec_scores")
+        texts = scores = None
+        if isinstance(page, dict) or hasattr(page, "get"):
+            try:
+                texts, scores = page.get("rec_texts"), page.get("rec_scores")
+            except Exception:  # noqa: BLE001
+                texts = None
         if texts is not None:
-            for t, c in zip(texts, scores or []):
-                out.append((str(t), float(c)))
+            out.extend((str(t), float(c)) for t, c in zip(texts, scores or []))
             continue
         for line in page or []:
             try:
@@ -57,56 +79,59 @@ def _iter_tokens(result) -> "list[tuple[str, float]]":
     return out
 
 
-@dataclass
-class BibHit:
-    bib: str
-    conf: float
-
-
 class BibReader:
-    """Wraps PaddleOCR across two incompatible major versions.
-
-    PaddleOCR 3.x renamed `use_angle_cls` to `use_textline_orientation`, dropped
-    `show_log` entirely, and changed the result shape. Pinning to 2.x would work
-    today but rots the moment the pin is bumped, and the failure is a crash at
-    runner start-up, 40 minutes into someone's race day. So probe instead.
-    """
-
     def __init__(self) -> None:
+        self.engine = None
+        self.kind = None
+
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+
+            self.engine = RapidOCR()
+            self.kind = "rapidocr"
+            log.info("OCR engine: RapidOCR (onnxruntime)")
+            return
+        except Exception as exc:  # noqa: BLE001
+            log.warning("RapidOCR unavailable (%s), falling back to PaddleOCR", exc)
+
         from paddleocr import PaddleOCR
 
         # Angle classification stays off: bibs are upright, and the classifier
         # roughly doubles per-crop latency for no measurable recall gain here.
-        attempts = [
-            {"use_textline_orientation": False, "lang": "en"},   # 3.x
-            {"use_angle_cls": False, "lang": "en", "show_log": False},  # 2.x
-            {"lang": "en"},                                      # last resort
-        ]
-        last: Exception | None = None
-        for kwargs in attempts:
+        for kwargs in (
+            {"use_textline_orientation": False, "lang": "en"},           # 3.x
+            {"use_angle_cls": False, "lang": "en", "show_log": False},   # 2.x
+            {"lang": "en"},
+        ):
             try:
-                self.ocr = PaddleOCR(**kwargs)
-                log.info("PaddleOCR initialised with %s", sorted(kwargs))
+                self.engine = PaddleOCR(**kwargs)
+                self.kind = "paddleocr"
+                log.info("OCR engine: PaddleOCR %s", sorted(kwargs))
                 return
-            except (TypeError, ValueError) as exc:
-                last = exc
-        raise RuntimeError(f"Could not initialise PaddleOCR: {last}")
+            except (TypeError, ValueError):
+                continue
+        raise RuntimeError("No usable OCR engine (tried RapidOCR and PaddleOCR)")
 
     def _read(self, image: np.ndarray) -> list[BibHit]:
         if image.size == 0 or min(image.shape[:2]) < 12:
             return []
         try:
-            try:
-                result = self.ocr.predict(image)          # 3.x
-            except AttributeError:
-                result = self.ocr.ocr(image, cls=False)   # 2.x
+            if self.kind == "rapidocr":
+                result, _ = self.engine(image)
+                pairs = _tokens_from_rapidocr(result)
+            else:
+                try:
+                    result = self.engine.predict(image)
+                except AttributeError:
+                    result = self.engine.ocr(image, cls=False)
+                pairs = _tokens_from_paddle(result)
         except Exception as exc:  # noqa: BLE001 - a bad crop must not kill the run
             log.warning("OCR failed on a crop: %s", exc)
             return []
 
         hits: list[BibHit] = []
-        for token, conf in _iter_tokens(result):
-            token = token.strip().replace(" ", "")
+        for text, conf in pairs:
+            token = text.strip().replace(" ", "")
             if conf >= MIN_CONF and BIB_RE.match(token):
                 # Store leading zeros stripped. The Worker normalizes the query
                 # the same way, so "0123" and "123" both land here.

@@ -4,5 +4,11 @@ requests>=2.32
 boto3>=1.35
 onnxruntime>=1.19
 insightface>=0.7.3
-paddlepaddle>=2.6
-paddleocr>=2.8
+opencv-python-headless>=4.10
+
+# OCR on the ONNX runtime already required by insightface. Deliberately NOT
+# paddleocr/paddlepaddle: those broke two consecutive production runs (a 3.x
+# kwarg rename, then an oneDNN/PIR failure on every crop) and pull a ~500 MB
+# native runtime for no benefit here. bibs.py still falls back to PaddleOCR if
+# it happens to be installed.
+rapidocr-onnxruntime>=1.3

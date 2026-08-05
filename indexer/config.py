@@ -22,7 +22,12 @@ class Config:
         self.r2_bucket = _require("R2_BUCKET")
 
         # Tunables — safe defaults, overridable from the workflow.
-        self.batch_size = int(os.environ.get("BATCH_SIZE", "200"))
+        # 25, not 200. Two reasons, both learned from a real run:
+        #  * progress is reported per batch, so a 151-photo album with a batch of
+        #    200 sat at 0% for its entire duration, then jumped to 100%.
+        #  * peak disk is batch_size * photo size. At 21.6 MB/photo (ordinary for
+        #    a DSLR) a 200-batch holds 4.3 GB; 25 holds 540 MB.
+        self.batch_size = int(os.environ.get("BATCH_SIZE", "25"))
         self.thumb_max_edge = int(os.environ.get("THUMB_MAX_EDGE", "1000"))
         self.thumb_quality = int(os.environ.get("THUMB_QUALITY", "80"))
         self.det_size = int(os.environ.get("DET_SIZE", "640"))

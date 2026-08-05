@@ -39,16 +39,12 @@ jobs:
           path: ~/.insightface/models
           key: insightface-buffalo_s-v1
 
-      - name: Cache PaddleOCR models
-        uses: actions/cache@v4
-        with:
-          path: ~/.paddleocr
-          key: paddleocr-en-v1
-
+      # opencv-python-headless still needs libglib; libgl is no longer required
+      # now that paddlepaddle is gone.
       - name: Install system libs
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libgl1 libglib2.0-0
+          sudo apt-get install -y -qq libglib2.0-0
 
       - name: Install Python deps
         run: |
