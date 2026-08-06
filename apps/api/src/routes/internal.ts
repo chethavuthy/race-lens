@@ -185,24 +185,44 @@ internalRoutes.post('/events/:id/bibs', async (c) => {
   // the current rules reject outright.
   if (Array.isArray(replace_photos) && replace_photos.length) {
     for (const part of chunk(replace_photos, D1_MAX_PARAMS - 1)) {
+      // source = 'ocr' only. A human correction outranks the model and must
+      // survive every future re-index — otherwise the organizer would fix a
+      // number and silently lose it on the next pass.
       await c.env.DB.prepare(
-        `DELETE FROM bibs WHERE event_id = ? AND photo_id IN (${part.map(() => '?').join(',')})`,
+        `DELETE FROM bibs WHERE event_id = ? AND source = 'ocr'
+           AND photo_id IN (${part.map(() => '?').join(',')})`,
       ).bind(eventId, ...part).run();
     }
   }
 
-  for (const part of chunk(bibs, 150)) {
+  // Drop anything the organizer explicitly rejected. Without this a wrong OCR
+  // read returns on the very next re-index and the correction looks undone.
+  let accepted = bibs;
+  if (bibs.length) {
+    const { results: rejects } = await c.env.DB.prepare(
+      'SELECT photo_id, bib FROM bib_rejects WHERE event_id = ?',
+    ).bind(eventId).all<{ photo_id: string; bib: string }>();
+    if (rejects.length) {
+      const blocked = new Set(rejects.map((r) => `${r.photo_id}|${r.bib}`));
+      accepted = bibs.filter((b) => !blocked.has(`${b.photo_id}|${b.bib}`));
+    }
+  }
+
+  for (const part of chunk(accepted, 150)) {
     await c.env.DB.batch(
       part.map((b) =>
         c.env.DB.prepare(
-          `INSERT INTO bibs (event_id, bib, photo_id, conf, bib_raw) VALUES (?, ?, ?, ?, ?)
+          `INSERT INTO bibs (event_id, bib, photo_id, conf, bib_raw, source)
+           VALUES (?, ?, ?, ?, ?, 'ocr')
            ON CONFLICT (event_id, bib, photo_id) DO UPDATE SET
-             conf = MAX(conf, excluded.conf), bib_raw = excluded.bib_raw`,
+             conf = MAX(conf, excluded.conf),
+             bib_raw = excluded.bib_raw
+           WHERE bibs.source = 'ocr'`,
         ).bind(eventId, b.bib, b.photo_id, b.conf ?? null, b.bib_raw ?? null),
       ),
     );
   }
-  return c.json({ ok: true, inserted: bibs.length });
+  return c.json({ ok: true, inserted: accepted.length, rejected: bibs.length - accepted.length });
 });
 
 /**

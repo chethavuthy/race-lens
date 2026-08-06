@@ -358,7 +358,8 @@ adminRoutes.get('/events/:id/photos', async (c) => {
       `SELECT photo_id, bbox, bib FROM faces WHERE photo_id IN (${ph})`).bind(...part).all<any>();
     faces.push(...f.results);
     const b = await c.env.DB.prepare(
-      `SELECT photo_id, COALESCE(bib_raw, bib) AS bib, conf FROM bibs WHERE photo_id IN (${ph})`,
+      `SELECT photo_id, COALESCE(bib_raw, bib) AS bib, bib AS bib_key, conf, source
+         FROM bibs WHERE photo_id IN (${ph})`,
     ).bind(...part).all<any>();
     bibs.push(...b.results);
   }
@@ -383,11 +384,69 @@ adminRoutes.get('/events/:id/photos', async (c) => {
             w: Math.max(0, Math.min(1, bw / w)), h: Math.max(0, Math.min(1, bh / h)),
           };
         }),
-        bibs: (bMap[p.id] ?? []).map((b: any) => ({ bib: b.bib, conf: b.conf })),
+        bibs: (bMap[p.id] ?? []).map((b: any) => ({
+          bib: b.bib, bib_key: b.bib_key, conf: b.conf, source: b.source ?? 'ocr',
+        })),
       };
     }),
     cursor: photos.length === limit ? photos[photos.length - 1].id : null,
   });
+});
+
+/**
+ * Manual bib entry and correction.
+ *
+ * OCR has a measured ceiling on mid-distance and partly-occluded bibs, and a
+ * single wrong digit makes a runner unfindable. These rows carry source =
+ * 'manual', which the indexer's replace path never deletes, so a correction
+ * outlives every future re-index.
+ */
+adminRoutes.post('/photos/:id/bibs', async (c) => {
+  const photoId = c.req.param('id');
+  const { bib } = await c.req.json<{ bib?: string }>();
+
+  const raw = String(bib ?? '').trim().replace(/\D/g, '');
+  if (!raw || raw.length > 5) {
+    throw new HttpError(400, 'Enter a bib number of 1-5 digits', 'bad_bib');
+  }
+  // Same normalisation as search and the indexer: leading zeros stripped for
+  // matching, printed form kept for display.
+  const norm = raw.replace(/^0+(?=\d)/, '');
+
+  const photo = await c.env.DB.prepare('SELECT event_id FROM photos WHERE id = ?')
+    .bind(photoId).first<{ event_id: string }>();
+  if (!photo) throw new HttpError(404, 'Photo not found', 'no_photo');
+
+  await c.env.DB.prepare(
+    `INSERT INTO bibs (event_id, bib, photo_id, conf, bib_raw, source)
+     VALUES (?, ?, ?, 1.0, ?, 'manual')
+     ON CONFLICT (event_id, bib, photo_id) DO UPDATE SET
+       conf = 1.0, bib_raw = excluded.bib_raw, source = 'manual'`,
+  ).bind(photo.event_id, norm, photoId, raw).run();
+
+  return c.json({ ok: true, bib: norm, bib_raw: raw });
+});
+
+adminRoutes.delete('/photos/:id/bibs/:bib', async (c) => {
+  const photoId = c.req.param('id');
+  const digits = c.req.param('bib').replace(/\D/g, '');
+  const norm = digits.replace(/^0+(?=\d)/, '');
+  const photo = await c.env.DB.prepare('SELECT event_id FROM photos WHERE id = ?')
+    .bind(photoId).first<{ event_id: string }>();
+  if (!photo) throw new HttpError(404, 'Photo not found', 'no_photo');
+
+  // A deleted OCR read would come straight back on the next re-index, so record
+  // the removal as a manual tombstone rather than just dropping the row.
+  await c.env.DB.prepare(
+    'DELETE FROM bibs WHERE event_id = ? AND photo_id = ? AND bib = ?',
+  ).bind(photo.event_id, photoId, norm).run();
+
+  await c.env.DB.prepare(
+    `INSERT INTO bib_rejects (event_id, photo_id, bib, created_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT (event_id, photo_id, bib) DO NOTHING`,
+  ).bind(photo.event_id, photoId, norm, nowIso()).run();
+
+  return c.json({ ok: true, removed: norm });
 });
 
 adminRoutes.get('/jobs/:id', async (c) => {

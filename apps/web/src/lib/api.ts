@@ -163,10 +163,18 @@ export const api = {
       req<{
         photos: (Photo & {
           faces: { bib: string | null; x: number; y: number; w: number; h: number }[];
-          bibs: { bib: string; conf: number | null }[];
+          bibs: { bib: string; bib_key: string; conf: number | null; source: string }[];
         })[];
         cursor: string | null;
       }>(`/api/admin/events/${eventId}/photos?filter=${filter}&cursor=${encodeURIComponent(cursor ?? '')}`),
+
+    addBib: (photoId: string, bib: string) =>
+      req<{ ok: true; bib: string; bib_raw: string }>(
+        `/api/admin/photos/${photoId}/bibs`, json({ bib })),
+
+    removeBib: (photoId: string, bib: string) =>
+      req<{ ok: true; removed: string }>(
+        `/api/admin/photos/${photoId}/bibs/${encodeURIComponent(bib)}`, { method: 'DELETE' }),
 
     report: (eventId: string) =>
       req<{

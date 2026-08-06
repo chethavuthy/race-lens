@@ -48,6 +48,10 @@ CREATE TABLE IF NOT EXISTS bibs (
   bib      TEXT NOT NULL,
   photo_id TEXT NOT NULL REFERENCES photos(id),
   conf     REAL,
+  bib_raw  TEXT,                          -- exactly as printed, e.g. "0056"
+  -- 'ocr' or 'manual'. A re-read only ever clears 'ocr' rows, so an organizer's
+  -- correction is never erased by re-indexing.
+  source   TEXT NOT NULL DEFAULT 'ocr',
   PRIMARY KEY (event_id, bib, photo_id)
 );
 CREATE INDEX IF NOT EXISTS idx_bibs_lookup ON bibs(event_id, bib);

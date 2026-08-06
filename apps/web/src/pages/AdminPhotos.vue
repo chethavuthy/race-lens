@@ -28,6 +28,65 @@ const loading = ref(true);
 const loadingMore = ref(false);
 const error = ref<string | null>(null);
 const zoom = ref<Row | null>(null);
+const draft = ref('');
+const saving = ref(false);
+const editError = ref<string | null>(null);
+const bibInput = ref<HTMLInputElement | null>(null);
+
+/** Keep the zoomed row pointing at the live object after a reload. */
+function syncZoom() {
+  if (!zoom.value) return;
+  const fresh = photos.value.find((p) => p.id === zoom.value!.id);
+  if (fresh) zoom.value = fresh;
+}
+
+async function patchPhoto(id: string) {
+  // Refresh just this photo rather than the whole page, so the grid position
+  // and scroll are preserved while correcting a long run of photos.
+  const r = await api.admin.photos(props.id, null, 'all').catch(() => null);
+  if (!r) return;
+  const fresh = r.photos.find((p) => p.id === id);
+  if (!fresh) return;
+  const i = photos.value.findIndex((p) => p.id === id);
+  if (i >= 0) photos.value[i] = fresh;
+  syncZoom();
+}
+
+async function addBib() {
+  const v = draft.value.trim();
+  if (!v || !zoom.value) return;
+  saving.value = true; editError.value = null;
+  try {
+    await api.admin.addBib(zoom.value.id, v);
+    draft.value = '';
+    await patchPhoto(zoom.value.id);
+    bibInput.value?.focus();   // stay on the keyboard for the next number
+  } catch (e: any) { editError.value = e.message; }
+  finally { saving.value = false; }
+}
+
+async function removeBib(key: string) {
+  if (!zoom.value) return;
+  saving.value = true; editError.value = null;
+  try {
+    await api.admin.removeBib(zoom.value.id, key);
+    await patchPhoto(zoom.value.id);
+  } catch (e: any) { editError.value = e.message; }
+  finally { saving.value = false; }
+}
+
+function openZoom(p: Row) {
+  zoom.value = p; draft.value = ''; editError.value = null;
+  setTimeout(() => bibInput.value?.focus(), 50);
+}
+
+/** Move between photos without leaving the editor. */
+function step(delta: number) {
+  if (!zoom.value) return;
+  const i = photos.value.findIndex((p) => p.id === zoom.value!.id);
+  const next = photos.value[i + delta];
+  if (next) openZoom(next);
+}
 
 async function load(reset = false) {
   if (reset) { photos.value = []; cursor.value = null; loading.value = true; }
@@ -80,7 +139,7 @@ const summary = computed(() => {
 
     <div class="photo-grid" style="grid-template-columns: repeat(auto-fill, minmax(260px, 1fr))">
       <figure v-for="p in photos" :key="p.id">
-        <button class="inspect-tile" @click="zoom = p">
+        <button class="inspect-tile" @click="openZoom(p)">
           <img :src="p.thumb_url ?? ''" alt="" loading="lazy" decoding="async" />
           <span v-for="(f, i) in p.faces" :key="i" class="face-box"
                 :style="{ left: pct(f.x), top: pct(f.y), width: pct(f.w), height: pct(f.h) }">
@@ -117,15 +176,41 @@ const summary = computed(() => {
           <span class="face-tag">{{ f.bib || '?' }}</span>
         </span>
       </div>
-      <div class="row" style="border-bottom: 0">
-        <div class="row-main small">
-          <strong>{{ zoom.faces.length }}</strong> faces ·
-          bibs: {{ zoom.bibs.length ? zoom.bibs.map((b) => `${b.bib} (${(b.conf ?? 0).toFixed(2)})`).join(', ') : 'none' }}
+      <!-- editor -->
+      <div class="card" style="margin-top: var(--s-3)">
+        <div class="row" style="border-bottom: 0; padding-top: 0">
+          <div class="row-main small">
+            <strong>{{ zoom.faces.length }}</strong> faces detected
+          </div>
+          <div class="row-actions">
+            <button :disabled="!photos.length" @click="step(-1)" title="Previous photo">←</button>
+            <button :disabled="!photos.length" @click="step(1)" title="Next photo">→</button>
+            <a class="btn file-btn" :href="zoom.original_url" target="_blank" rel="noopener">Original</a>
+            <button @click="zoom = null">Close</button>
+          </div>
         </div>
-        <div class="row-actions">
-          <a class="btn file-btn" :href="zoom.original_url" target="_blank" rel="noopener">Open original</a>
-          <button @click="zoom = null">Close</button>
+
+        <div class="bib-chips">
+          <span v-for="b in zoom.bibs" :key="b.bib_key" class="bib-chip" :class="b.source">
+            {{ b.bib }}
+            <span class="muted small">{{ b.source === 'manual' ? 'you' : (b.conf ?? 0).toFixed(2) }}</span>
+            <button class="chip-x" :disabled="saving" title="Remove this bib"
+                    @click="removeBib(b.bib_key)">×</button>
+          </span>
+          <span v-if="!zoom.bibs.length" class="muted small">No bib on this photo yet.</span>
         </div>
+
+        <form style="display: flex; gap: var(--s-3); margin-top: var(--s-3)" @submit.prevent="addBib()">
+          <input ref="bibInput" v-model="draft" inputmode="numeric" pattern="[0-9]*"
+                 autocomplete="off" placeholder="Type a bib number and press Enter" />
+          <button class="primary" type="submit" :disabled="saving || !draft.trim()">
+            <span v-if="saving" class="spinner" /> Add
+          </button>
+        </form>
+        <p v-if="editError" class="notice err" style="margin-top: var(--s-3)">{{ editError }}</p>
+        <p class="muted small" style="margin: var(--s-3) 0 0">
+          Numbers you add or remove are kept as corrections — re-indexing will not overwrite them.
+        </p>
       </div>
     </div>
   </div>

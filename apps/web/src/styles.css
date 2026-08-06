@@ -340,6 +340,21 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
 }
 .zoom-inner { max-width: min(1100px, 94vw); width: 100%; }
 
+.bib-chips { display: flex; gap: var(--s-2); flex-wrap: wrap; align-items: center; margin-top: var(--s-3); }
+.bib-chip {
+  display: inline-flex; align-items: center; gap: var(--s-2);
+  padding: var(--s-1) var(--s-2) var(--s-1) var(--s-3);
+  border: 1px solid var(--line-strong); border-radius: 999px;
+  background: var(--field); font-variant-numeric: tabular-nums; font-size: var(--t-sm);
+}
+/* A human correction outranks the model, so it reads differently at a glance. */
+.bib-chip.manual { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, var(--field)); }
+.chip-x {
+  border: 0; background: transparent; color: var(--muted);
+  min-height: 0; padding: 0 2px; font-size: 15px; line-height: 1; cursor: pointer;
+}
+.chip-x:hover:not(:disabled) { color: var(--err); background: transparent; }
+
 /* ------------------------------------------------------------------ loading */
 /* Skeletons, not a spinner parked in the middle of the content area. */
 .skeleton {
