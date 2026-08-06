@@ -184,6 +184,9 @@ export const api = {
         cursor: string | null;
       }>(`/api/admin/events/${eventId}/photos?filter=${filter}&cursor=${encodeURIComponent(cursor ?? '')}`),
 
+    reindexPhoto: (photoId: string) =>
+      req<{ job_id: string }>(`/api/admin/photos/${photoId}/reindex`, { method: 'POST' }),
+
     setFaceBib: (faceId: string, bib: string) =>
       req<{ ok: true; bib: string | null }>(`/api/admin/faces/${faceId}/bib`, json({ bib })),
 

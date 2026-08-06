@@ -86,6 +86,18 @@ async function addBib() {
   finally { saving.value = false; }
 }
 
+async function reindexPhoto() {
+  if (!zoom.value) return;
+  saving.value = true; editError.value = null;
+  try {
+    await api.admin.reindexPhoto(zoom.value.id);
+    editError.value = null;
+    reindexNote.value = 'Re-indexing this photo — results appear in a minute or two.';
+  } catch (e: any) { editError.value = e.message; }
+  finally { saving.value = false; }
+}
+const reindexNote = ref<string | null>(null);
+
 async function removeBib(key: string) {
   if (!zoom.value) return;
   saving.value = true; editError.value = null;
@@ -97,7 +109,7 @@ async function removeBib(key: string) {
 }
 
 function openZoom(p: Row) {
-  zoom.value = p; draft.value = ''; editError.value = null;
+  zoom.value = p; draft.value = ''; editError.value = null; reindexNote.value = null;
   editingFace.value = null; faceDraft.value = '';
   setTimeout(() => bibInput.value?.focus(), 50);
 }
@@ -217,6 +229,10 @@ const summary = computed(() => {
           <div class="row-actions">
             <button :disabled="!photos.length" @click="step(-1)" title="Previous photo">←</button>
             <button :disabled="!photos.length" @click="step(1)" title="Next photo">→</button>
+            <button :disabled="saving" title="Run detection and OCR on this photo again"
+                    @click="reindexPhoto">
+              <span v-if="saving" class="spinner" /> Re-index
+            </button>
             <a class="btn file-btn" :href="zoom.original_url" target="_blank" rel="noopener">Original</a>
             <button @click="zoom = null">Close</button>
           </div>
@@ -240,6 +256,7 @@ const summary = computed(() => {
           </button>
         </form>
         <p v-if="editError" class="notice err" style="margin-top: var(--s-3)">{{ editError }}</p>
+        <p v-if="reindexNote" class="notice" style="margin-top: var(--s-3)">{{ reindexNote }}</p>
         <p class="muted small" style="margin: var(--s-3) 0 0">
           Numbers you add or remove are kept as corrections — re-indexing will not overwrite them.
         </p>

@@ -69,6 +69,17 @@ def run(args: argparse.Namespace) -> int:
 
     images: list[DriveImage] = drive.walk(args.folder_id)
     discovered = len(images)
+
+    # Single-photo mode: re-process exactly one file. Used by the admin's
+    # per-photo Re-index button, so a photo the detector fumbled can be redone
+    # in seconds instead of re-running the whole folder.
+    if args.only_file:
+        images = [i for i in images if i.id == args.only_file]
+        if not images:
+            up.progress(args.job_id, status="failed",
+                        error=f"{args.only_file} is not in this folder")
+            return 1
+        log.info("Single-photo mode: %s", args.only_file)
     journal: list[dict] = []
 
     def note(level: str, code: str, message: str, drive_file_id: str | None = None) -> None:
@@ -86,7 +97,9 @@ def run(args: argparse.Namespace) -> int:
     # and stalls at exactly the same place.
     if args.bibs_only:
         args.no_resume = True
-    if not args.no_resume:
+    if args.only_file:
+        pass          # never skip the photo we were explicitly asked to redo
+    elif not args.no_resume:
         # --rebuild resumes on "has faces" so a wiped index refills without
         # re-processing photos an earlier pass already rebuilt.
         have = up.already_indexed(args.event_id, complete_only=args.rebuild)
@@ -341,6 +354,10 @@ def main() -> int:
         help="Re-read bib numbers for photos already indexed and write only the "
              "bibs table. Leaves photos, faces and shards untouched — use after "
              "changing OCR tuning. Implies --no-resume.",
+    )
+    p.add_argument(
+        "--only-file", default="",
+        help="Re-process a single drive_file_id and nothing else.",
     )
     p.add_argument(
         "--image-source", choices=("original", "thumb"), default="original",

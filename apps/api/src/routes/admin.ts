@@ -491,6 +491,48 @@ adminRoutes.post('/photos/:id/bibs', async (c) => {
  * the face<->bib association the torso-crop pass produces automatically, so a
  * runner found by face can also be told their number.
  */
+/** Re-run the pipeline on ONE photo. Seconds, rather than a whole-folder pass. */
+adminRoutes.post('/photos/:id/reindex', async (c) => {
+  const photoId = c.req.param('id');
+  const photo = await c.env.DB.prepare(
+    `SELECT p.drive_file_id, p.event_id, p.source_id, s.drive_folder_id, s.image_source
+       FROM photos p JOIN sources s ON s.id = p.source_id WHERE p.id = ?`,
+  ).bind(photoId).first<any>();
+  if (!photo) throw new HttpError(404, 'Photo not found', 'no_photo');
+
+  // Clear this photo's machine-derived rows so the re-read is authoritative.
+  // Manual corrections survive: they are the one thing a re-run must not undo.
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM faces WHERE photo_id = ?').bind(photoId),
+    c.env.DB.prepare("DELETE FROM bibs WHERE photo_id = ? AND source = 'ocr'").bind(photoId),
+  ]);
+
+  const jobId = newId();
+  await c.env.DB.prepare(
+    'INSERT INTO jobs (id, event_id, source_id, status, total, updated_at) VALUES (?, ?, ?, ?, 1, ?)',
+  ).bind(jobId, photo.event_id, photo.source_id, 'queued', nowIso()).run();
+
+  const res = await fetch(`https://api.github.com/repos/${c.env.GH_REPO}/dispatches`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${c.env.GH_DISPATCH_TOKEN}`,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'race-lens-worker', 'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      event_type: 'index-event',
+      client_payload: {
+        event_id: photo.event_id, source_id: photo.source_id,
+        folder_id: photo.drive_folder_id, job_id: jobId,
+        only_file: photo.drive_file_id,
+        image_source: photo.image_source ?? 'original',
+      },
+    }),
+  });
+  if (!res.ok) throw new HttpError(502, `Could not start (GitHub ${res.status})`, 'dispatch_failed');
+  return c.json({ job_id: jobId }, 202);
+});
+
 adminRoutes.post('/faces/:id/bib', async (c) => {
   const faceId = c.req.param('id');
   const { bib } = await c.req.json<{ bib?: string }>();

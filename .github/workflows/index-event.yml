@@ -110,7 +110,8 @@ jobs:
             ${{ (github.event.client_payload.bibs_only || inputs.bibs_only) && '--bibs-only' || '' }} \
             ${{ (github.event.client_payload.no_resume || inputs.no_resume) && '--no-resume' || '' }} \
             ${{ (github.event.client_payload.rebuild || inputs.rebuild) && '--rebuild' || '' }} \
-            --image-source "${{ github.event.client_payload.image_source || inputs.image_source || 'original' }}"
+            --image-source "${{ github.event.client_payload.image_source || inputs.image_source || 'original' }}" \
+            --only-file "${{ github.event.client_payload.only_file || '' }}"
 
       - name: Report failure
         # main.py reports its own exceptions, but this also catches the cases it
