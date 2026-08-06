@@ -182,5 +182,11 @@ class Uploader:
         except Exception as exc:  # noqa: BLE001
             log.warning("Could not record discovered count: %s", exc)
 
+    def benchmark(self, benchmark_id: str, **fields: Any) -> None:
+        try:
+            self._post(f"/api/internal/benchmarks/{benchmark_id}", fields)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("benchmark update failed: %s", exc)
+
     def finalize(self, event_id: str, status: str) -> dict:
         return self._post(f"/api/internal/events/{event_id}/finalize", {"status": status})

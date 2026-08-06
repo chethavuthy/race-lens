@@ -129,7 +129,10 @@ def run(args: argparse.Namespace) -> int:
         for img in batch:
             dest = os.path.join(work, img.id)
             try:
-                drive.download(img.id, dest)
+                if args.image_source == "thumb":
+                    drive.download_thumb(img.id, dest)
+                else:
+                    drive.download(img.id, dest)
                 local.append((img, dest))
                 downloaded += 1
                 # Downloading dominates wall time on full-size originals, so
@@ -338,6 +341,11 @@ def main() -> int:
         help="Re-read bib numbers for photos already indexed and write only the "
              "bibs table. Leaves photos, faces and shards untouched — use after "
              "changing OCR tuning. Implies --no-resume.",
+    )
+    p.add_argument(
+        "--image-source", choices=("original", "thumb"), default="original",
+        help="'thumb' uses Drive's resized copy: ~12x smaller, so ~12x more "
+             "photos before Drive's download quota stops the pass.",
     )
     p.add_argument(
         "--rebuild", action="store_true",

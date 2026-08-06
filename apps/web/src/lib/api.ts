@@ -145,11 +145,27 @@ export const api = {
         method: 'PATCH',
       }),
 
-    ingest: (eventId: string, driveUrl: string) =>
+    ingest: (eventId: string, driveUrl: string, imageSource: 'original' | 'thumb' = 'original') =>
       req<{ job_id: string; source_id: string; folder_id: string }>(
         '/api/admin/ingest',
-        json({ event_id: eventId, drive_url: driveUrl }),
+        json({ event_id: eventId, drive_url: driveUrl, image_source: imageSource }),
       ),
+
+    startBenchmark: (url: string, sample = 6) =>
+      req<{ benchmark_id: string; folder_id: string; sample: number }>(
+        '/api/admin/drive/benchmark', json({ url, sample })),
+
+    getBenchmark: (id: string) =>
+      req<{ benchmark: {
+        id: string; status: string; error: string | null;
+        result: null | {
+          sampled: number; folder_images: number; size_ratio: number;
+          thumb: { bytes: number; faces: number; bibs: number };
+          original: { bytes: number; faces: number; bibs: number };
+          bibs_only_in_original: string[]; bibs_only_in_thumb: string[];
+          est_photos_per_pass: { thumb: number; original: number };
+        };
+      } }>(`/api/admin/benchmarks/${id}`),
 
     getJob: (jobId: string) => req<{ job: Job }>(`/api/admin/jobs/${jobId}`),
 

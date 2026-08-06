@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS sources (
   drive_folder_id TEXT NOT NULL,
   drive_url       TEXT NOT NULL,
   discovered      INTEGER NOT NULL DEFAULT 0,  -- images the walk found in this folder
+  -- 'original' downloads the full-size file; 'thumb' uses Drive's resized
+  -- endpoint (~12x smaller, so ~12x more photos per Drive download quota).
+  -- Chosen per source by the organizer, after benchmarking that folder.
+  image_source    TEXT NOT NULL DEFAULT 'original',
   added_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sources_event ON sources(event_id);
@@ -94,6 +98,19 @@ CREATE INDEX IF NOT EXISTS idx_jobs_event ON jobs(event_id, updated_at);
 -- Per-event ingest journal. The organizer pastes a link and walks away; when
 -- an album comes back short they need to know which link, how many photos, and
 -- why — without reading CI logs they have no access to.
+-- One-off quality comparison for a folder: same photos, thumbnail vs original.
+-- Deliberately on demand, never automatic — it costs a CI run.
+CREATE TABLE IF NOT EXISTS benchmarks (
+  id          TEXT PRIMARY KEY,
+  folder_id   TEXT NOT NULL,
+  status      TEXT NOT NULL,            -- queued|running|done|failed
+  sample      INTEGER NOT NULL DEFAULT 6,
+  result      TEXT,                     -- JSON written by the runner
+  error       TEXT,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS ingest_log (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id      TEXT NOT NULL,

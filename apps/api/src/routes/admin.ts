@@ -50,6 +50,54 @@ adminRoutes.post('/drive/inspect', async (c) => {
   });
 });
 
+/**
+ * Start a thumbnail-vs-original comparison for a folder.
+ *
+ * On demand only. It costs a CI run, and the answer is per folder: a race shot
+ * wider, or with runners further from the camera, may lose small faces at
+ * 3200px where the 20 MB original would not.
+ */
+adminRoutes.post('/drive/benchmark', async (c) => {
+  const { url, sample } = await c.req.json<{ url?: string; sample?: number }>();
+  if (!url) throw new HttpError(400, 'Missing url', 'bad_request');
+  const folderId = parseFolderId(url);
+  const id = newId();
+  const n = Math.min(Math.max(Number(sample) || 6, 2), 12);
+
+  await c.env.DB.prepare(
+    `INSERT INTO benchmarks (id, folder_id, status, sample, created_at, updated_at)
+     VALUES (?, ?, 'queued', ?, ?, ?)`,
+  ).bind(id, folderId, n, nowIso(), nowIso()).run();
+
+  const res = await fetch(`https://api.github.com/repos/${c.env.GH_REPO}/dispatches`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${c.env.GH_DISPATCH_TOKEN}`,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'race-lens-worker', 'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      event_type: 'benchmark-folder',
+      client_payload: { benchmark_id: id, folder_id: folderId, sample: n },
+    }),
+  });
+  if (!res.ok) {
+    await c.env.DB.prepare("UPDATE benchmarks SET status='failed', error=? WHERE id=?")
+      .bind(`dispatch failed: ${res.status}`, id).run();
+    throw new HttpError(502, `Could not start the benchmark (GitHub ${res.status})`, 'dispatch_failed');
+  }
+  return c.json({ benchmark_id: id, folder_id: folderId, sample: n }, 202);
+});
+
+adminRoutes.get('/benchmarks/:id', async (c) => {
+  const row = await c.env.DB.prepare('SELECT * FROM benchmarks WHERE id = ?')
+    .bind(c.req.param('id')).first<any>();
+  if (!row) throw new HttpError(404, 'Benchmark not found', 'no_benchmark');
+  return c.json({
+    benchmark: { ...row, result: row.result ? JSON.parse(row.result) : null },
+  });
+});
+
 adminRoutes.get('/events', async (c) => {
   const { results } = await c.env.DB.prepare(
     'SELECT * FROM events ORDER BY created_at DESC',
@@ -116,7 +164,10 @@ adminRoutes.post('/events/:id/banner', async (c) => {
 
 /** Bind a Drive folder to an event and fire the CI indexing job. */
 adminRoutes.post('/ingest', async (c) => {
-  const { event_id, drive_url } = await c.req.json<{ event_id?: string; drive_url?: string }>();
+  const { event_id, drive_url, image_source } = await c.req.json<{
+    event_id?: string; drive_url?: string; image_source?: string;
+  }>();
+  const imgSrc = image_source === 'thumb' ? 'thumb' : 'original';
   if (!event_id || !drive_url) throw new HttpError(400, 'event_id and drive_url are required', 'bad_request');
 
   const event = await c.env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(event_id).first<EventRow>();
@@ -140,10 +191,11 @@ adminRoutes.post('/ingest', async (c) => {
 
   await c.env.DB.batch([
     c.env.DB.prepare(
-      `INSERT INTO sources (id, event_id, drive_folder_id, drive_url, added_at)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT (event_id, drive_folder_id) DO UPDATE SET drive_url = excluded.drive_url`,
-    ).bind(sourceId, event_id, folderId, drive_url, ts),
+      `INSERT INTO sources (id, event_id, drive_folder_id, drive_url, added_at, image_source)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (event_id, drive_folder_id) DO UPDATE SET
+         drive_url = excluded.drive_url, image_source = excluded.image_source`,
+    ).bind(sourceId, event_id, folderId, drive_url, ts, imgSrc),
     c.env.DB.prepare(
       'INSERT INTO jobs (id, event_id, source_id, status, updated_at) VALUES (?, ?, ?, ?, ?)',
     ).bind(jobId, event_id, sourceId, 'queued', ts),
@@ -167,7 +219,10 @@ adminRoutes.post('/ingest', async (c) => {
     },
     body: JSON.stringify({
       event_type: 'index-event',
-      client_payload: { event_id, source_id: sourceId, folder_id: folderId, job_id: jobId },
+      client_payload: {
+        event_id, source_id: sourceId, folder_id: folderId, job_id: jobId,
+        image_source: imgSrc,
+      },
     }),
   });
 

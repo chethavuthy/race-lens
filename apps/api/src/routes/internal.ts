@@ -333,6 +333,17 @@ internalRoutes.post('/sources/:id/discovered', async (c) => {
   return c.json({ ok: true });
 });
 
+internalRoutes.post('/benchmarks/:id', async (c) => {
+  const b = await c.req.json<{ status?: string; result?: string; error?: string }>();
+  await c.env.DB.prepare(
+    `UPDATE benchmarks SET status = COALESCE(?, status),
+                           result = COALESCE(?, result),
+                           error  = COALESCE(?, error),
+                           updated_at = ? WHERE id = ?`,
+  ).bind(b.status ?? null, b.result ?? null, b.error ?? null, nowIso(), c.req.param('id')).run();
+  return c.json({ ok: true });
+});
+
 internalRoutes.post('/events/:id/finalize', async (c) => {
   const eventId = c.req.param('id');
   const { status } = await c.req.json<{ status?: 'ready' | 'partial' }>().catch(() => ({ status: undefined }));

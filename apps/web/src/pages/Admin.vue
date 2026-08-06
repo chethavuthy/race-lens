@@ -20,6 +20,38 @@ const newDate = ref('');
 const newSlug = ref('');
 const bannerFile = ref<File | null>(null);
 
+const imageSource = ref<'original' | 'thumb'>('original');
+
+// Benchmark is opt-in: it costs a CI run, and the answer differs per folder.
+type Bench = Awaited<ReturnType<typeof api.admin.getBenchmark>>['benchmark'];
+const bench = ref<Bench | null>(null);
+const benchBusy = ref(false);
+const benchError = ref<string | null>(null);
+let benchPoll: number | undefined;
+
+async function runBenchmark() {
+  benchError.value = null; benchBusy.value = true; bench.value = null;
+  try {
+    const { benchmark_id } = await api.admin.startBenchmark(driveUrl.value);
+    clearInterval(benchPoll);
+    benchPoll = setInterval(async () => {
+      try {
+        const r = await api.admin.getBenchmark(benchmark_id);
+        bench.value = r.benchmark;
+        if (['done', 'failed'].includes(r.benchmark.status)) {
+          clearInterval(benchPoll); benchBusy.value = false;
+          // Only preselect when the sample shows no loss — never silently.
+          if (r.benchmark.result && !r.benchmark.result.bibs_only_in_original.length) {
+            imageSource.value = 'thumb';
+          }
+        }
+      } catch { /* transient; the next tick retries */ }
+    }, 5000) as unknown as number;
+  } catch (e: any) { benchError.value = e.message; benchBusy.value = false; }
+}
+
+const mb = (n: number) => `${(n / 1e6).toFixed(1)} MB`;
+
 const starting = ref(false);
 const startError = ref<string | null>(null);
 const job = ref<Job | null>(null);
@@ -80,7 +112,7 @@ async function start() {
       mode.value = 'existing';
     }
 
-    const { job_id } = await api.admin.ingest(eventId, driveUrl.value);
+    const { job_id } = await api.admin.ingest(eventId, driveUrl.value, imageSource.value);
     startPolling(job_id);
   } catch (e: any) {
     startError.value = e.message;
@@ -167,6 +199,71 @@ async function publish(ev: EventSummary) {
         <figure v-for="s in inspection.samples" :key="s.id">
           <img class="thumb" :src="s.thumb" :alt="s.name" referrerpolicy="no-referrer" loading="lazy" />
         </figure>
+      </div>
+
+      <h2 style="margin-top: var(--s-5)">Image quality vs speed</h2>
+      <p class="muted small" style="margin-top: 0">
+        Full originals are ~21 MB each. Drive also serves a resized copy about 12×
+        smaller, which on one album found identical faces and bibs — and because
+        Drive's download quota is what stops a pass, that is roughly 12× more
+        photos per pass. Whether it holds for <em>this</em> folder is worth checking.
+      </p>
+      <div class="btn-row">
+        <button :disabled="benchBusy" @click="runBenchmark">
+          <span v-if="benchBusy" class="spinner" /> Compare on {{ 6 }} photos from this folder
+        </button>
+      </div>
+      <p v-if="benchError" class="notice err" style="margin-top: var(--s-3)">{{ benchError }}</p>
+      <p v-if="benchBusy" class="muted small" style="margin-top: var(--s-3)">
+        Running in CI — usually 2-4 minutes. You can keep working; the result appears here.
+      </p>
+      <p v-else-if="bench?.status === 'failed'" class="notice err" style="margin-top: var(--s-3)">
+        Benchmark failed: {{ bench.error }}
+      </p>
+
+      <template v-if="bench?.result">
+        <div class="stats" style="margin-top: var(--s-4)">
+          <div>
+            <div class="stat-label">Resized (thumb)</div>
+            <div class="stat-value">{{ bench.result.thumb.faces }} faces · {{ bench.result.thumb.bibs }} bibs</div>
+            <div class="muted small">{{ mb(bench.result.thumb.bytes) }} for {{ bench.result.sampled }} photos</div>
+          </div>
+          <div>
+            <div class="stat-label">Full original</div>
+            <div class="stat-value">{{ bench.result.original.faces }} faces · {{ bench.result.original.bibs }} bibs</div>
+            <div class="muted small">{{ mb(bench.result.original.bytes) }} for {{ bench.result.sampled }} photos</div>
+          </div>
+          <div>
+            <div class="stat-label">Photos per pass (est.)</div>
+            <div class="stat-value">
+              {{ bench.result.est_photos_per_pass.thumb }} vs {{ bench.result.est_photos_per_pass.original }}
+            </div>
+            <div class="muted small">before Drive's quota stops it</div>
+          </div>
+        </div>
+        <p v-if="bench.result.bibs_only_in_original.length" class="notice warn" style="margin-top: var(--s-3)">
+          The resized copy MISSED these bibs the original found:
+          <strong>{{ bench.result.bibs_only_in_original.join(', ') }}</strong>.
+          Use full originals for this folder unless the speed matters more.
+        </p>
+        <p v-else class="notice ok" style="margin-top: var(--s-3)">
+          No loss on this sample — the resized copy found every bib the original did,
+          about {{ bench.result.size_ratio }}× smaller.
+        </p>
+      </template>
+
+      <div class="field-group" style="margin-top: var(--s-4)">
+        <label>Download for indexing</label>
+        <div class="segmented" role="radiogroup" aria-label="Image source">
+          <button role="radio" :aria-checked="imageSource === 'original'"
+                  :aria-selected="imageSource === 'original'" @click="imageSource = 'original'">
+            Full originals
+          </button>
+          <button role="radio" :aria-checked="imageSource === 'thumb'"
+                  :aria-selected="imageSource === 'thumb'" @click="imageSource = 'thumb'">
+            Resized (faster)
+          </button>
+        </div>
       </div>
     </template>
   </div>

@@ -2,7 +2,7 @@ name: Index event
 
 on:
   repository_dispatch:
-    types: [index-event]
+    types: [index-event, benchmark-folder]
   workflow_dispatch:
     inputs:
       event_id: { description: Event id, required: true }
@@ -21,6 +21,11 @@ on:
         description: Resume on photos that already have faces (use after wiping)
         type: boolean
         default: false
+      image_source:
+        description: Download full originals, or Drive's ~12x smaller resized copy
+        type: choice
+        options: [original, thumb]
+        default: original
 
 # Two runs against the same event would race on row allocation and photo
 # upserts. Queue them instead of cancelling — a cancelled run leaves a job
@@ -70,7 +75,24 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
           df -h /
 
+      - name: Benchmark folder (thumbnail vs original)
+        if: github.event.action == 'benchmark-folder'
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          python -m indexer.benchmark \
+            --benchmark-id "${{ github.event.client_payload.benchmark_id }}" \
+            --folder-id    "${{ github.event.client_payload.folder_id }}" \
+            --sample       "${{ github.event.client_payload.sample || 6 }}"
+
       - name: Index
+        if: github.event.action != 'benchmark-folder'
         env:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           API_BASE_URL: ${{ secrets.API_BASE_URL }}
@@ -87,7 +109,8 @@ jobs:
             --job-id    "${{ github.event.client_payload.job_id    || inputs.job_id }}" \
             ${{ (github.event.client_payload.bibs_only || inputs.bibs_only) && '--bibs-only' || '' }} \
             ${{ (github.event.client_payload.no_resume || inputs.no_resume) && '--no-resume' || '' }} \
-            ${{ (github.event.client_payload.rebuild || inputs.rebuild) && '--rebuild' || '' }}
+            ${{ (github.event.client_payload.rebuild || inputs.rebuild) && '--rebuild' || '' }} \
+            --image-source "${{ github.event.client_payload.image_source || inputs.image_source || 'original' }}"
 
       - name: Report failure
         # main.py reports its own exceptions, but this also catches the cases it
