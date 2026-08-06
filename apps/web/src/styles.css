@@ -312,33 +312,66 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
 .inspect-tile.zoom {
   width: fit-content; max-width: 100%; margin: 0 auto; overflow: visible;
 }
-.inspect-tile.zoom img { width: auto; max-width: 100%; max-height: 74vh; }
+.inspect-tile.zoom img { width: auto; max-width: 100%; max-height: 56vh; }
+@media (max-height: 720px) {
+  .inspect-tile.zoom img { max-height: 44vh; }
+}
 
 /* Detection overlay. Green reads as "the machine saw this", distinct from the
    accent, which means "the user chose this" everywhere else in the app. */
 .face-box {
   position: absolute; border: 2px solid var(--ok); border-radius: 3px;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
-  pointer-events: none;
+  pointer-events: none;     /* read-only in the grid */
 }
+/* In the zoom view the box is the control: clicking a runner is how you say
+   WHICH runner a number belongs to, which photo-level entry cannot express. */
+.face-box.interactive { pointer-events: auto; }
+.face-box.interactive:hover { border-color: #7dffc4; box-shadow: 0 0 0 2px rgba(0,0,0,0.6); }
+.face-box.editing { border-color: var(--accent); }
+.face-box.tagged { border-color: var(--ok); }
 .face-tag {
   position: absolute; left: 0; top: 100%; transform: translateY(2px);
+  border: 0; cursor: pointer; min-height: 0;
   background: var(--ok); color: #06251a;
   font-size: 11px; font-weight: 700; line-height: 1.4;
   padding: 0 5px; border-radius: 3px; white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+.face-tag:hover:not(:disabled) { background: #7dffc4; }
+.face-edit { position: absolute; left: 0; top: 100%; transform: translateY(2px); }
+.face-edit input {
+  width: 84px; min-height: 0; padding: 1px var(--s-2);
+  font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums;
+  border-color: var(--accent); background: var(--surface);
+}
+
 .no-face-flag {
   position: absolute; left: var(--s-2); bottom: var(--s-2);
   background: rgba(0, 0, 0, 0.72); color: var(--warn);
   font-size: var(--t-xs); padding: 2px var(--s-2); border-radius: 999px;
 }
 
+/* The overlay must fit the viewport with the editor visible.
+   `place-items: center` centred a stack taller than the screen, so the image
+   overflowed off the top and the bib input was cut off at the bottom — the one
+   control the whole panel exists for. Now a scrollable column: the image gives
+   up space, the editor never does. */
 .zoom-backdrop {
-  position: fixed; inset: 0; z-index: 50; display: grid; place-items: center;
-  background: rgba(0, 0, 0, 0.82); padding: var(--s-5);
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; align-items: flex-start; justify-content: center;
+  background: rgba(0, 0, 0, 0.82);
+  padding: var(--s-4);
+  overflow-y: auto; overscroll-behavior: contain;
 }
-.zoom-inner { max-width: min(1100px, 94vw); width: 100%; }
+.zoom-inner {
+  max-width: min(1100px, 94vw); width: 100%;
+  margin: auto;                       /* centres when it fits, scrolls when not */
+  display: flex; flex-direction: column; gap: var(--s-3);
+}
+/* flex-shrink on the image, never on the editor */
+.zoom-inner > .inspect-tile.zoom { flex: 0 1 auto; min-height: 0; }
+.zoom-inner > .card { flex: 0 0 auto; }
 
 .bib-chips { display: flex; gap: var(--s-2); flex-wrap: wrap; align-items: center; margin-top: var(--s-3); }
 .bib-chip {

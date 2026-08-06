@@ -355,7 +355,7 @@ adminRoutes.get('/events/:id/photos', async (c) => {
   for (const part of chunk(ids, 90)) {
     const ph = part.map(() => '?').join(',');
     const f = await c.env.DB.prepare(
-      `SELECT photo_id, bbox, bib FROM faces WHERE photo_id IN (${ph})`).bind(...part).all<any>();
+      `SELECT id, photo_id, bbox, bib FROM faces WHERE photo_id IN (${ph})`).bind(...part).all<any>();
     faces.push(...f.results);
     const b = await c.env.DB.prepare(
       `SELECT photo_id, COALESCE(bib_raw, bib) AS bib, bib AS bib_key, conf, source
@@ -378,6 +378,7 @@ adminRoutes.get('/events/:id/photos', async (c) => {
         faces: (fMap[p.id] ?? []).map((f: any) => {
           const [x, y, bw, bh] = JSON.parse(f.bbox);
           return {
+            id: f.id,
             bib: f.bib,
             // clamped: a box can sit a pixel or two outside after rounding
             x: Math.max(0, Math.min(1, x / w)), y: Math.max(0, Math.min(1, y / h)),
@@ -423,6 +424,51 @@ adminRoutes.post('/photos/:id/bibs', async (c) => {
      ON CONFLICT (event_id, bib, photo_id) DO UPDATE SET
        conf = 1.0, bib_raw = excluded.bib_raw, source = 'manual'`,
   ).bind(photo.event_id, norm, photoId, raw).run();
+
+  return c.json({ ok: true, bib: norm, bib_raw: raw });
+});
+
+/**
+ * Assign a bib to ONE face.
+ *
+ * Photo-level entry cannot say which runner a number belongs to, and in a
+ * group shot that is most of the information. Writing faces.bib as well keeps
+ * the face<->bib association the torso-crop pass produces automatically, so a
+ * runner found by face can also be told their number.
+ */
+adminRoutes.post('/faces/:id/bib', async (c) => {
+  const faceId = c.req.param('id');
+  const { bib } = await c.req.json<{ bib?: string }>();
+  const raw = String(bib ?? '').trim().replace(/\D/g, '');
+
+  const face = await c.env.DB.prepare(
+    'SELECT event_id, photo_id, bib FROM faces WHERE id = ?',
+  ).bind(faceId).first<{ event_id: string; photo_id: string; bib: string | null }>();
+  if (!face) throw new HttpError(404, 'Face not found', 'no_face');
+
+  // Empty input clears the assignment rather than erroring — that is how you
+  // undo a mistake without hunting for a separate control.
+  if (!raw) {
+    await c.env.DB.prepare('UPDATE faces SET bib = NULL WHERE id = ?').bind(faceId).run();
+    return c.json({ ok: true, bib: null });
+  }
+  if (raw.length > 5) throw new HttpError(400, 'A bib is at most 5 digits', 'bad_bib');
+
+  const norm = raw.replace(/^0+(?=\d)/, '');
+  await c.env.DB.batch([
+    c.env.DB.prepare('UPDATE faces SET bib = ? WHERE id = ?').bind(norm, faceId),
+    // Photo-level row too, since that is what bib search actually queries.
+    c.env.DB.prepare(
+      `INSERT INTO bibs (event_id, bib, photo_id, conf, bib_raw, source)
+       VALUES (?, ?, ?, 1.0, ?, 'manual')
+       ON CONFLICT (event_id, bib, photo_id) DO UPDATE SET
+         conf = 1.0, bib_raw = excluded.bib_raw, source = 'manual'`,
+    ).bind(face.event_id, norm, face.photo_id, raw),
+    // A number assigned by hand is no longer rejected.
+    c.env.DB.prepare(
+      'DELETE FROM bib_rejects WHERE event_id = ? AND photo_id = ? AND bib = ?',
+    ).bind(face.event_id, face.photo_id, norm),
+  ]);
 
   return c.json({ ok: true, bib: norm, bib_raw: raw });
 });

@@ -162,11 +162,14 @@ export const api = {
     photos: (eventId: string, cursor: string | null, filter = 'all') =>
       req<{
         photos: (Photo & {
-          faces: { bib: string | null; x: number; y: number; w: number; h: number }[];
+          faces: { id: string; bib: string | null; x: number; y: number; w: number; h: number }[];
           bibs: { bib: string; bib_key: string; conf: number | null; source: string }[];
         })[];
         cursor: string | null;
       }>(`/api/admin/events/${eventId}/photos?filter=${filter}&cursor=${encodeURIComponent(cursor ?? '')}`),
+
+    setFaceBib: (faceId: string, bib: string) =>
+      req<{ ok: true; bib: string | null }>(`/api/admin/faces/${faceId}/bib`, json({ bib })),
 
     addBib: (photoId: string, bib: string) =>
       req<{ ok: true; bib: string; bib_raw: string }>(

@@ -32,6 +32,27 @@ const draft = ref('');
 const saving = ref(false);
 const editError = ref<string | null>(null);
 const bibInput = ref<HTMLInputElement | null>(null);
+// Which face box is being edited, and the value being typed into it.
+const editingFace = ref<string | null>(null);
+const faceDraft = ref('');
+const faceInput = ref<HTMLInputElement | null>(null);
+
+function startFace(f: { id: string; bib: string | null }) {
+  editingFace.value = f.id;
+  faceDraft.value = f.bib ?? '';
+  setTimeout(() => { faceInput.value?.focus(); faceInput.value?.select(); }, 30);
+}
+
+async function saveFace() {
+  if (!editingFace.value || !zoom.value) return;
+  saving.value = true; editError.value = null;
+  try {
+    await api.admin.setFaceBib(editingFace.value, faceDraft.value);
+    editingFace.value = null; faceDraft.value = '';
+    await patchPhoto(zoom.value.id);
+  } catch (e: any) { editError.value = e.message; }
+  finally { saving.value = false; }
+}
 
 /** Keep the zoomed row pointing at the live object after a reload. */
 function syncZoom() {
@@ -77,6 +98,7 @@ async function removeBib(key: string) {
 
 function openZoom(p: Row) {
   zoom.value = p; draft.value = ''; editError.value = null;
+  editingFace.value = null; faceDraft.value = '';
   setTimeout(() => bibInput.value?.focus(), 50);
 }
 
@@ -120,8 +142,10 @@ const summary = computed(() => {
   </p>
   <h1>Inspect photos</h1>
   <p class="lede">
-    Green boxes are detected faces. The label on a box is the bib read from that
-    runner's torso; <strong>?</strong> means a face was found but no number could be read.
+    Green boxes are detected faces. The label is the bib read from that runner's
+    torso; <strong>?</strong> means a face was found but no number could be read.
+    Open a photo and <strong>click any label to type that runner's bib</strong> —
+    Esc cancels, Enter saves.
   </p>
 
   <div class="segmented" role="tablist" aria-label="Filter photos">
@@ -171,13 +195,21 @@ const summary = computed(() => {
     <div class="zoom-inner" @click.stop>
       <div class="inspect-tile zoom">
         <img :src="zoom.thumb_url ?? ''" alt="" />
-        <span v-for="(f, i) in zoom.faces" :key="i" class="face-box"
+        <span v-for="f in zoom.faces" :key="f.id" class="face-box interactive"
+              :class="{ editing: editingFace === f.id, tagged: !!f.bib }"
               :style="{ left: pct(f.x), top: pct(f.y), width: pct(f.w), height: pct(f.h) }">
-          <span class="face-tag">{{ f.bib || '?' }}</span>
+          <button v-if="editingFace !== f.id" class="face-tag" :disabled="saving"
+                  :title="f.bib ? 'Change this runner\'s bib' : 'Add this runner\'s bib'"
+                  @click.stop="startFace(f)">{{ f.bib || '?' }}</button>
+          <form v-else class="face-edit" @click.stop @submit.prevent="saveFace()">
+            <input ref="faceInput" v-model="faceDraft" inputmode="numeric" pattern="[0-9]*"
+                   autocomplete="off" placeholder="bib"
+                   @keydown.esc="editingFace = null" />
+          </form>
         </span>
       </div>
       <!-- editor -->
-      <div class="card" style="margin-top: var(--s-3)">
+      <div class="card">
         <div class="row" style="border-bottom: 0; padding-top: 0">
           <div class="row-main small">
             <strong>{{ zoom.faces.length }}</strong> faces detected
