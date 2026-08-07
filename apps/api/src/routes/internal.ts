@@ -47,14 +47,38 @@ interface PhotoIn {
  * but without this the organizer has to notice and press the button again —
  * repeatedly, for one album. The runner asks for a continuation instead.
  *
- * Bounded by jobs.attempts: a folder that can never finish must not loop.
+ * Two independent guards, because a folder that can never finish must not loop:
+ *
+ *   1. A pass that indexed NOTHING ends the chain. This is the guard that
+ *      actually matters — it is measured, not guessed. If Drive's quota has not
+ *      recovered, the next run downloads nothing either, so continuing just
+ *      burns CI minutes to no effect.
+ *   2. A hard ceiling on attempts, as a backstop against a bug that reports
+ *      progress it did not make.
+ *
+ * The ceiling used to be 8, which was sized for albums of a few hundred photos.
+ * At ~25 photos per quota window on full originals that capped a chain at ~200
+ * photos, so a 31k-photo folder needed ~150 manual presses. Since guard 1 stops
+ * a chain the moment it stops progressing, the ceiling can be generous.
  */
 internalRoutes.post('/jobs/:id/continue', async (c) => {
   const id = c.req.param('id');
-  const MAX_ATTEMPTS = 8;
+  const MAX_ATTEMPTS = 60;
 
   const job = await c.env.DB.prepare('SELECT * FROM jobs WHERE id = ?').bind(id).first<any>();
   if (!job) throw new HttpError(404, 'Job not found', 'no_job');
+
+  // Guard 1: no progress means the quota has not recovered. Stop.
+  if ((job.done ?? 0) === 0) {
+    await c.env.DB.prepare(
+      `UPDATE jobs SET status = 'partial', error = ?, updated_at = ? WHERE id = ?`,
+    ).bind(
+      'Drive served no photos this pass — its download quota has not reset yet. ' +
+        'Press Re-index later to continue.',
+      nowIso(), id,
+    ).run();
+    return c.json({ dispatched: false, reason: 'no_progress' });
+  }
 
   if ((job.attempts ?? 0) >= MAX_ATTEMPTS) {
     await c.env.DB.prepare(
