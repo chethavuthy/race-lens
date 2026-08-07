@@ -248,7 +248,7 @@ adminRoutes.get('/events/:id/report', async (c) => {
   const eventId = c.req.param('id');
 
   const { results: sources } = await c.env.DB.prepare(
-    `SELECT s.id, s.drive_folder_id, s.drive_url, s.discovered, s.added_at,
+    `SELECT s.id, s.drive_folder_id, s.drive_url, s.discovered, s.added_at, s.image_source,
             (SELECT COUNT(*) FROM photos p WHERE p.source_id = s.id) AS indexed
        FROM sources s WHERE s.event_id = ? ORDER BY s.added_at`,
   ).bind(eventId).all<any>();

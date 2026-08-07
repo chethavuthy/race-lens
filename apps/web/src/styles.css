@@ -289,7 +289,26 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
 }
 .row:last-child { border-bottom: 0; }
 .row-main { flex: 1; min-width: 220px; }
-.row-actions { flex: none; display: flex; gap: var(--s-3); align-items: center; }
+/* `flex: none` with no wrapping pushed the last control off-screen on a 375px
+   phone — the photo inspector's Close button was the casualty, which is the one
+   control a modal can never afford to lose. Wrap instead, and let the group
+   take the full width once it has wrapped so the buttons align rather than
+   floating mid-row. */
+.row-actions {
+  display: flex; gap: var(--s-3); align-items: center; flex-wrap: wrap;
+  flex: 0 1 auto;
+}
+@media (max-width: 560px) {
+  .row { gap: var(--s-3); }
+  /* Take the full width once wrapped, but let the controls INSIDE share one
+     line — stacking each on its own line turned a two-control row into a
+     slab taller than the link it belongs to. */
+  .row-actions { flex: 1 0 100%; gap: var(--s-2); }
+  .row-actions > button,
+  .row-actions > .btn { flex: 1 1 auto; min-height: 40px; justify-content: center; }
+  .row-actions > .segmented { flex: 1 1 auto; }
+  .row-actions > .segmented button { flex: 1 1 0; min-height: 38px; }
+}
 .row-tight { padding: var(--s-2) 0; }
 
 .mono-id {
@@ -481,8 +500,19 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
 
 /* Compact segmented control for inline row actions, where the full-size
    control would dominate the row it belongs to. */
+/* Inline variant for row actions. The full-size control fills with the accent
+   when selected, which is right for a page-level tab strip but shouts on a
+   per-row setting — an orange slab next to "Re-index" reads as the primary
+   action when it is merely a preference. Selected state here is a quiet raised
+   surface with accent text instead. */
 .segmented.tiny { margin: 0; }
 .segmented.tiny button {
   padding: var(--s-1) var(--s-3);
   font-size: var(--t-xs);
+  white-space: nowrap;
+}
+.segmented.tiny button[aria-selected='true'] {
+  background: var(--surface-3, #262c36);
+  color: var(--accent);
+  font-weight: 600;
 }
