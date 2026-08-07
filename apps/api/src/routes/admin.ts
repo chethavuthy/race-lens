@@ -337,6 +337,31 @@ adminRoutes.get('/events/:id/report', async (c) => {
 });
 
 /** Re-run one source: a fresh job over the same folder. Resume skips what exists. */
+/**
+ * Switch a link between full originals and Drive's resized copies.
+ *
+ * This was only settable when the link was first added, which is exactly the
+ * wrong time: nobody knows a folder is too big to download until they watch it
+ * stall. A 31k-photo folder on originals moves ~25 photos per Drive quota
+ * window; the same folder on thumbnails moves ~12x that, for the same faces and
+ * bibs. Being unable to change it after the fact made the discovery useless.
+ *
+ * Photos already indexed are NOT re-fetched — the setting applies to whatever
+ * is still missing, so switching costs nothing already spent.
+ */
+adminRoutes.patch('/sources/:id', async (c) => {
+  const sourceId = c.req.param('id');
+  const { image_source } = await c.req.json<{ image_source?: string }>().catch(() => ({}) as any);
+  if (image_source !== 'thumb' && image_source !== 'original') {
+    throw new HttpError(400, "image_source must be 'thumb' or 'original'", 'bad_image_source');
+  }
+  const r = await c.env.DB.prepare(
+    'UPDATE sources SET image_source = ? WHERE id = ?',
+  ).bind(image_source, sourceId).run();
+  if (!r.meta.changes) throw new HttpError(404, 'Link not found', 'no_source');
+  return c.json({ ok: true, image_source });
+});
+
 adminRoutes.post('/sources/:id/reindex', async (c) => {
   const sourceId = c.req.param('id');
   const src = await c.env.DB.prepare('SELECT * FROM sources WHERE id = ?').bind(sourceId).first<any>();

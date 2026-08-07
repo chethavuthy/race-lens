@@ -70,6 +70,23 @@ async function run<T>(key: string, fn: () => Promise<T>, ok?: string) {
   finally { busy.value = null; }
 }
 
+/**
+ * Originals are what a photographer uploads, and for most albums they are the
+ * right choice. But Drive's download quota is measured in BYTES, so a folder of
+ * 20 MB originals moves ~25 photos per window while the same folder of ~1.6 MB
+ * resized copies moves roughly 12x that — for identical faces and bibs, which
+ * the benchmark measured rather than assumed.
+ */
+const setSource = (id: string, v: 'original' | 'thumb') =>
+  run(`src-${id}`, () => api.admin.setImageSource(id, v),
+      v === 'thumb'
+        ? 'Switched to resized copies — press Re-index to continue at the faster rate.'
+        : 'Switched to full originals — press Re-index to continue.');
+
+/** Passes needed for what is still missing, at the measured per-window rates. */
+const passesLeft = (s: { missing: number; image_source: string }) =>
+  Math.ceil(s.missing / (s.image_source === 'thumb' ? 300 : 25));
+
 const reindex = (id: string) =>
   run(id, () => api.admin.reindexSource(id), 'Re-indexing started — already-indexed photos are skipped.');
 
@@ -195,8 +212,21 @@ const when = (iso: string) => new Date(iso).toLocaleString();
             <span v-if="s.missing > 0" class="state warn"> · {{ s.missing }} missing</span>
             <span v-else-if="s.discovered_known" class="state ok"> · complete</span>
             <span v-else class="muted"> · total unknown until the next pass</span>
+            <span v-if="s.missing > 0" class="muted small" style="display: block">
+              ~{{ passesLeft(s) }} more {{ passesLeft(s) === 1 ? 'pass' : 'passes' }} at this setting
+            </span>
           </span>
           <div class="row-actions">
+            <div class="segmented tiny" role="group" aria-label="Image size to download">
+              <button :aria-selected="s.image_source !== 'thumb'"
+                      :disabled="busy === `src-${s.id}` || !!activeJob"
+                      title="Download the full-size original from Drive"
+                      @click="setSource(s.id, 'original')">Original</button>
+              <button :aria-selected="s.image_source === 'thumb'"
+                      :disabled="busy === `src-${s.id}` || !!activeJob"
+                      title="Download Drive's resized copy — same faces and bibs, ~12x more photos per pass"
+                      @click="setSource(s.id, 'thumb')">Resized</button>
+            </div>
             <button :disabled="busy === s.id || !!activeJob" @click="reindex(s.id)">
               <span v-if="busy === s.id" class="spinner" /> Re-index
             </button>

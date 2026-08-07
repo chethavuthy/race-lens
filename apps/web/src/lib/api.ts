@@ -172,6 +172,11 @@ export const api = {
     getEvent: (eventId: string) =>
       req<{ event: EventSummary }>(`/api/admin/events/${eventId}`),
 
+    setImageSource: (sourceId: string, imageSource: 'original' | 'thumb') =>
+      req<{ ok: true; image_source: string }>(`/api/admin/sources/${sourceId}`, {
+        ...json({ image_source: imageSource }), method: 'PATCH',
+      }),
+
     reindexSource: (sourceId: string) =>
       req<{ job_id: string }>(`/api/admin/sources/${sourceId}/reindex`, { method: 'POST' }),
 
@@ -202,7 +207,7 @@ export const api = {
       req<{
         sources: { id: string; drive_folder_id: string; drive_url: string;
                    discovered: number; discovered_known: boolean; indexed: number;
-                   missing: number; added_at: string }[];
+                   missing: number; added_at: string; image_source: string }[];
         totals: { links: number; found: number; found_known: boolean;
                   indexed: number; missing: number };
         jobs: { id: string; source_id: string | null; status: string; done: number; total: number;
