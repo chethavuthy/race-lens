@@ -52,8 +52,14 @@ onMounted(async () => {
     <RouterLink
       v-for="(e, i) in events" :key="e.id"
       :to="`/e/${e.slug}`" class="event-card" :style="{ '--i': i }">
-      <img v-if="e.banner_url" class="banner" :src="e.banner_url" alt="" loading="lazy" />
-      <div v-else class="banner" />
+      <div class="banner">
+        <!-- The blurred backdrop is the same picture, so it is decorative:
+             announcing it twice would only be noise to a screen reader. -->
+        <template v-if="e.banner_url">
+          <img class="banner-fill" :src="e.banner_url" alt="" aria-hidden="true" loading="lazy" />
+          <img class="banner-img" :src="e.banner_url" alt="" loading="lazy" />
+        </template>
+      </div>
       <div class="body">
         <div class="name">{{ e.name }}</div>
         <div class="muted small">

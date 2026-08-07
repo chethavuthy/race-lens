@@ -198,10 +198,34 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
 }
 .event-card:hover { border-color: #3a424e; transform: translateY(-2px); }
 .event-card:active { transform: translateY(0); }
+/* Event art arrives in wildly different shapes — a 4:5 portrait flyer next to a
+   16:9 landscape photo — but every card must share one silhouette or the grid
+   turns ragged.
+
+   `cover` kept the silhouette by cropping, which on a poster cuts off the
+   title: the Night Runners flyer lost the word "SOCIAL" off the top edge and
+   its meeting times off the bottom. On a flyer the text IS the content, so
+   cropping it is the one thing we cannot do.
+
+   `contain` alone fixes that and leaves dead letterbox bars. So: contain the
+   real image, and fill the bars with a blurred, overscanned copy of itself.
+   The gap reads as an extension of the artwork rather than a hole, and the
+   card keeps its 16:9 footprint. */
 .event-card .banner {
-  aspect-ratio: 16 / 9; width: 100%; object-fit: cover; display: block;
-  background: var(--surface-2);
+  position: relative; aspect-ratio: 16 / 9; width: 100%; display: block;
+  overflow: hidden; background: var(--surface-2);
 }
+.event-card .banner-fill,
+.event-card .banner-img {
+  position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+}
+.event-card .banner-fill {
+  object-fit: cover;
+  /* Overscan so the blur samples image instead of dragging in the edge. */
+  transform: scale(1.2);
+  filter: blur(28px) saturate(1.35) brightness(0.5);
+}
+.event-card .banner-img { object-fit: contain; }
 .event-card .body { padding: var(--s-3) var(--s-4) var(--s-4); }
 .event-card .name { font-weight: 600; margin-bottom: 2px; }
 
