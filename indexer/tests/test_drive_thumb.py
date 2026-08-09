@@ -111,6 +111,8 @@ def test_unshared_folder_error_page_is_not_a_quota_error(tmp_path):
         drive.download_thumb("f", str(tmp_path / "p.jpg"))
 
     assert "anyone with the link" in str(exc.value)
+    # The message must not assert a cause it cannot actually distinguish.
+    assert "transient" in str(exc.value)
 
 
 def test_unexpected_4xx_is_not_retried(tmp_path):

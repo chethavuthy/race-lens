@@ -188,12 +188,15 @@ class DriveClient:
                         fh.write(chunk)
                 # A Drive error page is small and HTML; a real photo is neither.
                 # This endpoint authorizes by the file's own sharing setting, so
-                # the usual cause is a folder that is not "anyone with the link"
-                # — a settled answer, and not the quota one it used to report.
+                # the usual cause is a folder that is not "anyone with the link".
+                # Drive can also serve a short page transiently, so the message
+                # names both rather than asserting the one it cannot distinguish
+                # — the photo is skipped either way and retried next pass.
                 if os.path.getsize(dest) < 20_000:
                     raise NotAccessible(
-                        f"{file_id}: Drive served an error page instead of an image "
-                        "— check the folder is shared with 'anyone with the link'"
+                        f"{file_id}: Drive served a {os.path.getsize(dest)}-byte page "
+                        "instead of an image — usually a folder that is not shared "
+                        "with 'anyone with the link', occasionally a transient Drive error"
                     )
                 return
 
