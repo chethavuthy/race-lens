@@ -383,9 +383,24 @@ internalRoutes.post('/events/:id/finalize', async (c) => {
             (SELECT COUNT(*) FROM faces  WHERE event_id = ?1) AS faces`,
   ).bind(eventId).first<{ photos: number; faces: number }>();
 
+  // 'ready' is a claim about the whole event, but the runner making it only ever
+  // saw one source. On a two-link event, the pass that finished link A marked
+  // the event ready while link B was still 260 photos short — and the "nothing
+  // left to index" early return fires exactly when someone re-indexes an
+  // already-complete link, so it took one button press to mislabel the event.
+  // Verify the claim against every source instead of taking the runner's word.
+  const short = await c.env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM sources s
+      WHERE s.event_id = ?
+        AND COALESCE(s.discovered, 0) >
+            (SELECT COUNT(*) FROM photos p WHERE p.source_id = s.id)`,
+  ).bind(eventId).first<{ n: number }>();
+
+  const resolved = status === 'partial' || (short?.n ?? 0) > 0 ? 'partial' : 'ready';
+
   await c.env.DB.prepare(
     'UPDATE events SET photo_count = ?, face_count = ?, status = ? WHERE id = ?',
-  ).bind(counts?.photos ?? 0, counts?.faces ?? 0, status ?? 'ready', eventId).run();
+  ).bind(counts?.photos ?? 0, counts?.faces ?? 0, resolved, eventId).run();
 
   invalidateIndex(eventId);
   return c.json({ ok: true, photo_count: counts?.photos ?? 0, face_count: counts?.faces ?? 0 });
