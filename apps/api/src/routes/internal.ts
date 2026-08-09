@@ -90,8 +90,13 @@ internalRoutes.post('/jobs/:id/continue', async (c) => {
     return c.json({ dispatched: false, reason: 'max_attempts' });
   }
 
-  const source = await c.env.DB.prepare('SELECT drive_folder_id FROM sources WHERE id = ?')
-    .bind(job.source_id).first<{ drive_folder_id: string }>();
+  // image_source has to come along: the workflow defaults to 'original' when the
+  // key is absent, so omitting it silently downgraded every continuation of a
+  // 'thumb' source back to full-size downloads — and straight back into the
+  // quota that ended the previous pass.
+  const source = await c.env.DB
+    .prepare('SELECT drive_folder_id, image_source FROM sources WHERE id = ?')
+    .bind(job.source_id).first<{ drive_folder_id: string; image_source: string | null }>();
   if (!source) throw new HttpError(400, 'Job has no source to continue', 'no_source');
 
   const res = await fetch(`https://api.github.com/repos/${c.env.GH_REPO}/dispatches`, {
@@ -107,6 +112,7 @@ internalRoutes.post('/jobs/:id/continue', async (c) => {
       client_payload: {
         event_id: job.event_id, source_id: job.source_id,
         folder_id: source.drive_folder_id, job_id: id,
+        image_source: source.image_source ?? 'original',
       },
     }),
   });

@@ -384,6 +384,7 @@ adminRoutes.post('/sources/:id/reindex', async (c) => {
       client_payload: {
         event_id: src.event_id, source_id: sourceId,
         folder_id: src.drive_folder_id, job_id: jobId,
+        image_source: src.image_source ?? 'original',
       },
     }),
   });
