@@ -28,6 +28,7 @@ from .bibs import BibReader
 from .config import Config
 from .drive import DriveClient, DriveImage, QuotaExceeded
 from .faces import FaceEngine, quantize
+from .resume import pending
 from .upload import Uploader
 
 log = logging.getLogger("indexer")
@@ -69,6 +70,11 @@ def run(args: argparse.Namespace) -> int:
 
     images: list[DriveImage] = drive.walk(args.folder_id)
     discovered = len(images)
+    # Snapshot before the resume filter rewrites `images`. The continuation
+    # check at the end needs "how many files in THIS folder are still missing",
+    # and every other count available there is either event-wide or
+    # already-filtered.
+    folder_ids = {i.id for i in images}
 
     # Single-photo mode: re-process exactly one file. Used by the admin's
     # per-photo Re-index button, so a photo the detector fumbled can be redone
@@ -129,6 +135,7 @@ def run(args: argparse.Namespace) -> int:
     processed = 0
     downloaded = 0
     skipped = 0
+    faces_indexed = 0
     quota_hit = False
 
     work = cfg.work_dir
@@ -242,7 +249,7 @@ def run(args: argparse.Namespace) -> int:
         up.progress(args.job_id, done=processed, total=total)
         log.info(
             "Batch %d: %d photos, %d faces so far, %d/%d done",
-            batch_no + 1, len(local), len(embeddings), processed, total,
+            batch_no + 1, len(local), faces_indexed + len(embeddings), processed, total,
         )
 
         # Flush vectors per batch.
@@ -261,6 +268,10 @@ def run(args: argparse.Namespace) -> int:
             for row in face_rows:
                 row["row_idx"] += row_base
             up.put_faces(args.event_id, shard_key, row_base, face_rows)
+            # Count before the reset — the summary used to report len(embeddings)
+            # after this loop, which is necessarily 0, so every pass in the log
+            # claimed "0 faces indexed" while the event accumulated thousands.
+            faces_indexed += len(embeddings)
             embeddings, face_rows = [], []
 
         if journal:
@@ -271,28 +282,11 @@ def run(args: argparse.Namespace) -> int:
         if quota_hit:
             break
 
-    # Whatever the last batch left unflushed.
-    #
-    # One shard per BATCH, not per run.
-    #
-    # Per-source was correct only while a source was always indexed in a single
-    # pass. With resume, a second run carries only the photos the first one
-    # missed — writing those to the source's existing shard key would replace
-    # the file with a shorter one and, because put_faces sends replace=True,
-    # delete the earlier run's face rows outright. The photos would survive and
-    # silently stop being findable by face.
-    #
-    # Distinct keys make every run purely additive; search already concatenates
-    # all of an event's shards by row_base.
-    shard_key = f"index/{args.event_id}/{args.source_id}-{args.run_id}-final.bin"
-    if embeddings:
-        row_base = up.reserve_rows(args.event_id, shard_key, len(embeddings))
-        buffer = np.stack(embeddings).astype(np.int8)
-        up.put_bytes(shard_key, buffer.tobytes(order="C"), "application/octet-stream")
-
-        for row in face_rows:
-            row["row_idx"] += row_base
-        up.put_faces(args.event_id, shard_key, row_base, face_rows)
+    # There is deliberately no trailing flush here. The batch loop flushes at the
+    # end of every iteration, including the one that breaks on a quota hit, so
+    # `embeddings` is always empty by this point. The block that used to sit here
+    # was unreachable, and reading it as a real safety net hid the fact that the
+    # per-batch flush is the only thing keeping vectors durable.
 
     # Any photo we could not fetch means the album is not fully represented.
     # Reporting "done" there is a lie the organizer cannot see through.
@@ -303,7 +297,15 @@ def run(args: argparse.Namespace) -> int:
     # ask for a continuation rather than making the organizer press the button
     # again. Only when the run actually hit the limit AND left work behind;
     # a run that merely skipped a few unreadable files must not loop.
-    remaining = discovered - len(up.already_indexed(args.event_id))
+    # Scoped to this folder's own files, NOT `discovered - event_total`.
+    #
+    # already_indexed is event-wide, so subtracting it from one source's
+    # discovered count goes negative the moment the event's other sources push
+    # the total past it. On a two-link event whose first link had finished
+    # (601 of 601) that made the second link's remaining -341, so `remaining > 0`
+    # was false forever and the continuation was never requested — the chain
+    # died silently while 260 photos were still missing.
+    remaining = len(pending(folder_ids, up.already_indexed(args.event_id)))
     if quota_hit and remaining > 0 and not args.bibs_only:
         if up.request_continue(args.job_id):
             log.info(
@@ -315,7 +317,7 @@ def run(args: argparse.Namespace) -> int:
         log.warning("Continuation was not dispatched; finishing as partial")
     note("info", "summary",
          f"Pass finished: {downloaded} downloaded, {skipped} could not be fetched, "
-         f"{len(embeddings)} faces indexed" + (" — Drive rate limit hit" if quota_hit else ""))
+         f"{faces_indexed} faces indexed" + (" — Drive rate limit hit" if quota_hit else ""))
     up.log(args.event_id, journal)
 
     up.progress(
@@ -327,7 +329,7 @@ def run(args: argparse.Namespace) -> int:
 
     log.info(
         "Finished: %s — %d downloaded, %d skipped, %d faces; event now %s photos / %s faces",
-        status, downloaded, skipped, len(embeddings),
+        status, downloaded, skipped, faces_indexed,
         counts.get("photo_count"), counts.get("face_count"),
     )
     return 0

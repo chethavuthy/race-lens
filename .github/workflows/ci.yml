@@ -58,3 +58,11 @@ jobs:
           python-version: '3.11'
       - name: Compile-check the indexer
         run: python -m compileall -q indexer tools/golden
+
+      # Only requests + pytest: the tests under indexer/tests deliberately avoid
+      # the CV stack (numpy, Pillow, onnxruntime, insightface) so they run in
+      # seconds here instead of minutes.
+      - name: Test the indexer
+        run: |
+          pip install -q pytest 'requests>=2.32'
+          python -m pytest indexer/tests -q
