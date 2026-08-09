@@ -64,10 +64,21 @@ onMounted(async () => {
 onBeforeUnmount(() => clearInterval(poll));
 
 async function run<T>(key: string, fn: () => Promise<T>, ok?: string) {
-  busy.value = key; notice.value = null;
-  try { await fn(); if (ok) notice.value = ok; await load(true); }
-  catch (e: any) { error.value = e.message; }
-  finally { busy.value = null; }
+  busy.value = key;
+  try {
+    await fn();
+    // Replace the notice in place; do NOT blank it before the request.
+    // Clearing it up front unmounts the banner for the whole round-trip, so the
+    // content below collapses and then re-expands — which reads as a flicker on
+    // every click of the image-source toggle, the one control people press
+    // repeatedly. Swapping the text leaves the element mounted and the layout still.
+    notice.value = ok ?? null;
+    error.value = null;
+    await load(true);
+  } catch (e: any) {
+    notice.value = null;
+    error.value = e.message;
+  } finally { busy.value = null; }
 }
 
 /**
