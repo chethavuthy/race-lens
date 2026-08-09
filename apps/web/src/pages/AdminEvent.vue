@@ -109,9 +109,24 @@ const setSource = (id: string, v: 'original' | 'thumb') =>
         ? 'Switched to resized copies — press Re-index to continue at the faster rate.'
         : 'Switched to full originals — press Re-index to continue.');
 
-/** Passes needed for what is still missing, at the measured per-window rates. */
+/**
+ * Passes needed for what is still missing, at the observed per-window rates.
+ *
+ * 600 for resized, not 300: a real pass moved 601 photos with no rate limit at
+ * all, so 300 overstated the work by 2x — on a 24k-photo folder that is the
+ * difference between "81 more passes" and "41", which is the number an organizer
+ * uses to decide whether resized is worth switching to.
+ *
+ * 25 for originals stays deliberately conservative. Observed passes ranged 25 to
+ * 50, and for "how much is left" it is better to over-estimate than to promise a
+ * finish that does not arrive.
+ *
+ * Both are estimates, and the resized one is a floor rather than a ceiling: no
+ * resized pass has ever actually been stopped by the quota — every one ended
+ * because its folder ran out — so the true rate may be well above 600.
+ */
 const passesLeft = (s: { missing: number; image_source: string }) =>
-  Math.ceil(s.missing / (s.image_source === 'thumb' ? 300 : 25));
+  Math.ceil(s.missing / (s.image_source === 'thumb' ? 600 : 25));
 
 const reindex = (id: string) =>
   run(id, () => api.admin.reindexSource(id), 'Re-indexing started — already-indexed photos are skipped.');
