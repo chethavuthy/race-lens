@@ -59,10 +59,11 @@ jobs:
       - name: Compile-check the indexer
         run: python -m compileall -q indexer tools/golden
 
-      # Only requests + pytest: the tests under indexer/tests deliberately avoid
-      # the CV stack (numpy, Pillow, onnxruntime, insightface) so they run in
-      # seconds here instead of minutes.
+      # numpy and Pillow are real because run() genuinely uses them; the heavy
+      # half of the CV stack (onnxruntime, insightface, opencv, rapidocr) is
+      # stubbed in the tests, which keeps this step at seconds rather than the
+      # several minutes a full requirements.txt install costs.
       - name: Test the indexer
         run: |
-          pip install -q pytest 'requests>=2.32'
+          pip install -q pytest 'requests>=2.32' 'numpy<2' 'pillow>=10.4'
           python -m pytest indexer/tests -q
