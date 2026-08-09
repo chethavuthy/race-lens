@@ -235,6 +235,11 @@ export const api = {
                    photos_with_bib: number; distinct_bibs: number;
                    photos_without_face: number; photos_without_bib: number };
         top_bibs: { bib: string; n: number }[];
+        /** How many exist server-side vs how many this response carries. */
+        jobs_total: number;
+        jobs_returned: number;
+        log_total: number;
+        log_returned: number;
       }>(`/api/admin/events/${eventId}/report`),
   },
 };

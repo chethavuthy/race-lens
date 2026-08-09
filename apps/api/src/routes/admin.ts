@@ -276,10 +276,24 @@ adminRoutes.get('/events/:id/report', async (c) => {
        FROM sources s WHERE s.event_id = ? ORDER BY s.added_at`,
   ).bind(eventId).all<any>();
 
+  // Bounded, and reported alongside the true total.
+  //
+  // This was unbounded, which was fine while an event had a handful of passes.
+  // A rate-limited folder produces one job per continuation — a 31k-photo album
+  // can run to hundreds — and every one of them was serialized into this
+  // response on every 6-second poll.
+  const JOBS_LIMIT = 100;
+  const LOG_LIMIT = 300;
+
   const { results: rawJobs } = await c.env.DB.prepare(
     `SELECT id, source_id, status, done, total, skipped, attempts, error, updated_at
-       FROM jobs WHERE event_id = ? ORDER BY updated_at DESC`,
-  ).bind(eventId).all<any>();
+       FROM jobs WHERE event_id = ? ORDER BY updated_at DESC LIMIT ?`,
+  ).bind(eventId, JOBS_LIMIT).all<any>();
+
+  const totals = await c.env.DB.prepare(
+    `SELECT (SELECT COUNT(*) FROM jobs WHERE event_id = ?1) AS jobs,
+            (SELECT COUNT(*) FROM ingest_log WHERE event_id = ?1) AS log`,
+  ).bind(eventId).first<{ jobs: number; log: number }>();
 
   // A runner can vanish — GitHub cancels or reclaims it — and then nothing ever
   // moves the row off 'queued'/'running'. The page then reports "a pass is
@@ -296,8 +310,8 @@ adminRoutes.get('/events/:id/report', async (c) => {
 
   const { results: log } = await c.env.DB.prepare(
     `SELECT level, code, message, drive_file_id, source_id, created_at
-       FROM ingest_log WHERE event_id = ? ORDER BY id DESC LIMIT 300`,
-  ).bind(eventId).all<any>();
+       FROM ingest_log WHERE event_id = ? ORDER BY id DESC LIMIT ?`,
+  ).bind(eventId, LOG_LIMIT).all<any>();
 
   const { results: counts } = await c.env.DB.prepare(
     `SELECT level, code, COUNT(*) AS n FROM ingest_log
@@ -356,6 +370,12 @@ adminRoutes.get('/events/:id/report', async (c) => {
     },
     top_bibs: topBibs,
     jobs, log, summary: counts,
+    // The client pages through what it was sent; these say how much exists, so
+    // "showing 100 of 412" can be honest about the tail it will never render.
+    jobs_total: totals?.jobs ?? jobs.length,
+    jobs_returned: jobs.length,
+    log_total: totals?.log ?? log.length,
+    log_returned: log.length,
   });
 });
 

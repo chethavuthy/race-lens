@@ -11,7 +11,7 @@
  *   Search quality — can a runner actually find themselves?
  * An album can be 100% indexed and still useless if no bibs were read.
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { RouterLink } from 'vue-router';
 import { api, type EventSummary } from '../lib/api';
 import { formatDate, plural } from '../lib/format';
@@ -41,10 +41,25 @@ const activeJob = computed(() =>
 
 const stalledJob = computed(() => (report.value?.jobs ?? []).find((j) => j.stale) ?? null);
 
-const visibleLog = computed(() => {
+const filteredLog = computed(() => {
   const log = report.value?.log ?? [];
   return levelFilter.value === 'all' ? log : log.filter((l) => l.level === levelFilter.value);
 });
+
+// Both lists grow without bound on a rate-limited album — one pass per
+// continuation, one log line per event — and rendering hundreds of rows buries
+// the few that matter. Show a page at a time, newest first, and let the reader
+// ask for more.
+const PAGE = 10;
+const jobsShown = ref(PAGE);
+const logShown = ref(PAGE);
+
+const visibleJobs = computed(() => (report.value?.jobs ?? []).slice(0, jobsShown.value));
+const visibleLog = computed(() => filteredLog.value.slice(0, logShown.value));
+
+// Narrowing the filter can leave the page size above the result count; reset so
+// "Show more" never appears with nothing left to show.
+watch(levelFilter, () => { logShown.value = PAGE; });
 
 const jobState = (s: string) =>
   s === 'failed' ? 'err' : s === 'partial' ? 'warn' : s === 'done' ? 'ok' : 'idle';
@@ -277,9 +292,9 @@ const when = (iso: string) => new Date(iso).toLocaleString();
 
       <!-- passes -->
       <div class="card">
-        <h2>Passes ({{ report?.jobs.length ?? 0 }})</h2>
+        <h2>Passes ({{ report?.jobs_total ?? 0 }})</h2>
         <p v-if="!report?.jobs.length" class="muted" style="margin: 0">No indexing passes yet.</p>
-        <div v-for="j in report?.jobs ?? []" :key="j.id" class="row row-tight">
+        <div v-for="j in visibleJobs" :key="j.id" class="row row-tight">
           <div class="row-main small">
             <span class="state" :class="j.stale ? 'err' : jobState(j.status)">
               {{ j.stale ? 'stalled' : j.status }}
@@ -290,6 +305,15 @@ const when = (iso: string) => new Date(iso).toLocaleString();
             <span class="muted"> · {{ when(j.updated_at) }}</span>
             <div v-if="j.error" class="muted small">{{ j.error }}</div>
           </div>
+        </div>
+        <div v-if="report?.jobs.length" class="pager">
+          <button v-if="visibleJobs.length < report.jobs.length"
+                  @click="jobsShown += PAGE">Show more</button>
+          <button v-if="jobsShown > PAGE" @click="jobsShown = PAGE">Show fewer</button>
+          <span class="muted small">
+            Showing {{ visibleJobs.length }} of {{ report.jobs.length }}<template
+              v-if="report.jobs_total > report.jobs_returned"> most recent ({{ report.jobs_total }} in total)</template>
+          </span>
         </div>
       </div>
 
@@ -308,7 +332,7 @@ const when = (iso: string) => new Date(iso).toLocaleString();
             {{ c.code || c.level }}: {{ c.n }}
           </span>
         </p>
-        <p v-if="!visibleLog.length" class="muted small" style="margin: 0">Nothing logged at this level.</p>
+        <p v-if="!filteredLog.length" class="muted small" style="margin: 0">Nothing logged at this level.</p>
         <div v-for="(l, i) in visibleLog" :key="i" class="row row-tight">
           <div class="row-main small">
             <span class="state" :class="l.level === 'error' ? 'err' : l.level === 'warn' ? 'warn' : 'idle'">
@@ -319,6 +343,15 @@ const when = (iso: string) => new Date(iso).toLocaleString();
                :href="`https://drive.google.com/file/d/${l.drive_file_id}/view`"
                target="_blank" rel="noopener">open photo</a>
           </div>
+        </div>
+        <div v-if="filteredLog.length" class="pager">
+          <button v-if="visibleLog.length < filteredLog.length"
+                  @click="logShown += PAGE">Show more</button>
+          <button v-if="logShown > PAGE" @click="logShown = PAGE">Show fewer</button>
+          <span class="muted small">
+            Showing {{ visibleLog.length }} of {{ filteredLog.length }}<template
+              v-if="report && report.log_total > report.log_returned"> most recent ({{ report.log_total }} in total)</template>
+          </span>
         </div>
       </div>
 
