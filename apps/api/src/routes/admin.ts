@@ -106,7 +106,9 @@ adminRoutes.get('/events', async (c) => {
 });
 
 adminRoutes.post('/events', async (c) => {
-  const body = await c.req.json<{ name?: string; event_date?: string; slug?: string }>();
+  const body = await c.req.json<{
+    name?: string; event_date?: string; slug?: string; bibs_enabled?: boolean;
+  }>();
   const name = (body.name ?? '').trim();
   if (!name) throw new HttpError(400, 'name is required', 'bad_request');
 
@@ -117,9 +119,13 @@ adminRoutes.post('/events', async (c) => {
   if (existing) throw new HttpError(409, `Slug "${slug}" is already taken`, 'dup_slug');
 
   const id = newId();
+  // Absent means bibs are expected — the overwhelmingly common case, and the
+  // behaviour every event had before this flag existed.
   await c.env.DB.prepare(
-    'INSERT INTO events (id, slug, name, event_date, status, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-  ).bind(id, slug, name, body.event_date ?? null, 'draft', nowIso()).run();
+    `INSERT INTO events (id, slug, name, event_date, status, bibs_enabled, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(id, slug, name, body.event_date ?? null, 'draft',
+         body.bibs_enabled === false ? 0 : 1, nowIso()).run();
 
   const row = await c.env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(id).first<EventRow>();
   return c.json({ event: publicEvent(c.env, row!) }, 201);
@@ -127,17 +133,24 @@ adminRoutes.post('/events', async (c) => {
 
 adminRoutes.patch('/events/:id', async (c) => {
   const id = c.req.param('id');
-  const body = await c.req.json<{ name?: string; event_date?: string; status?: string }>();
+  const body = await c.req.json<{
+    name?: string; event_date?: string; status?: string; bibs_enabled?: boolean;
+  }>();
   const allowed = ['draft', 'indexing', 'ready', 'partial'];
   if (body.status && !allowed.includes(body.status)) {
     throw new HttpError(400, 'Invalid status', 'bad_status');
   }
+  // Turning bibs off leaves any bibs already read in place rather than deleting
+  // them: the flag hides them and stops future passes reading more, so flipping
+  // it back on restores what was there instead of forcing a re-index.
   await c.env.DB.prepare(
     `UPDATE events SET name = COALESCE(?, name),
                        event_date = COALESCE(?, event_date),
-                       status = COALESCE(?, status)
+                       status = COALESCE(?, status),
+                       bibs_enabled = COALESCE(?, bibs_enabled)
       WHERE id = ?`,
-  ).bind(body.name ?? null, body.event_date ?? null, body.status ?? null, id).run();
+  ).bind(body.name ?? null, body.event_date ?? null, body.status ?? null,
+         body.bibs_enabled === undefined ? null : (body.bibs_enabled ? 1 : 0), id).run();
   const row = await c.env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(id).first<EventRow>();
   if (!row) throw new HttpError(404, 'Event not found', 'no_event');
   return c.json({ event: publicEvent(c.env, row) });

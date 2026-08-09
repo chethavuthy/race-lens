@@ -103,6 +103,22 @@ const reindex = (id: string) =>
 
 const setStatus = (s: EventSummary['status']) => run('status', () => api.admin.setStatus(props.id, s));
 
+// Defaults to true while the event is still loading, so the bib panels do not
+// flash out and back in on every page load.
+const bibsEnabled = computed(() => event.value?.bibs_enabled !== false);
+
+/**
+ * Turning bibs off does not delete bibs already read — it stops future passes
+ * reading more and hides the ones that exist, so turning it back on restores
+ * them without a re-index. Photos already indexed are not re-fetched either
+ * way; the change applies to whatever a later pass covers.
+ */
+const setBibs = (on: boolean) =>
+  run('bibs', () => api.admin.setBibsEnabled(props.id, on),
+      on
+        ? 'Bib numbers on — the next pass will read bibs. Re-index to read them for photos already done.'
+        : 'Bib numbers off — bib search is hidden and later passes skip OCR. Existing bibs are kept.');
+
 function addLink() {
   const url = newLink.value.trim();
   if (!url) return;
@@ -179,24 +195,31 @@ const when = (iso: string) => new Date(iso).toLocaleString();
             <div class="stat-label">Photos with a face</div>
             <div class="stat-value">{{ quality.photos_with_face }}</div>
           </div>
-          <div>
-            <div class="stat-label">Photos with a bib</div>
-            <div class="stat-value">{{ quality.photos_with_bib }}</div>
-          </div>
-          <div><div class="stat-label">Distinct bib numbers</div><div class="stat-value">{{ quality.distinct_bibs }}</div></div>
+          <template v-if="bibsEnabled">
+            <div>
+              <div class="stat-label">Photos with a bib</div>
+              <div class="stat-value">{{ quality.photos_with_bib }}</div>
+            </div>
+            <div><div class="stat-label">Distinct bib numbers</div><div class="stat-value">{{ quality.distinct_bibs }}</div></div>
+          </template>
         </div>
-        <p class="muted small" style="margin-top: var(--s-3)">
+        <p v-if="bibsEnabled" class="muted small" style="margin-top: var(--s-3)">
           {{ quality.photos_without_bib }} photos have no readable bib and
           {{ quality.photos_without_face }} have no detected face. Some of that is real —
           backs turned, bibs folded or hidden — so treat it as a ceiling on bib search, not a fault.
           Face search is unaffected by a missing bib.
+        </p>
+        <p v-else class="muted small" style="margin-top: var(--s-3)">
+          This event has no bib numbers, so runners find themselves by face.
+          {{ quality.photos_without_face }} photos have no detected face — backs turned or
+          too distant — and those are the only ones face search cannot return.
         </p>
         <p style="margin-top: var(--s-3)">
           <RouterLink :to="`/admin/e/${id}/photos`" class="btn file-btn">
             Inspect photos — see faces and bibs drawn on each frame
           </RouterLink>
         </p>
-        <template v-if="report?.top_bibs.length">
+        <template v-if="bibsEnabled && report?.top_bibs.length">
           <div class="muted small" style="margin-top: var(--s-3)">Most-photographed bibs — use one to sanity-check search:</div>
           <div class="btn-row" style="margin-top: var(--s-2)">
             <a v-for="b in report.top_bibs" :key="b.bib" class="btn small"
@@ -313,9 +336,31 @@ const when = (iso: string) => new Date(iso).toLocaleString();
           <input id="ev-banner" type="file" accept="image/*" class="sr-only" @change="onBanner" />
         </div>
         <img v-if="event.banner_url" class="banner-preview" :src="event.banner_url" alt="" />
-        <p class="muted small" style="margin-bottom: 0">
+        <p class="muted small">
           Unpublishing hides the event from runners. Photos and search data are kept.
         </p>
+
+        <div class="field-group" style="margin-top: var(--s-4)">
+          <label>Bib numbers</label>
+          <div class="segmented" role="radiogroup" aria-label="Does this event use bib numbers?">
+            <button role="radio" :aria-checked="bibsEnabled" :aria-selected="bibsEnabled"
+                    :disabled="busy === 'bibs'"
+                    @click="setBibs(true)">Runners wear bibs</button>
+            <button role="radio" :aria-checked="!bibsEnabled" :aria-selected="!bibsEnabled"
+                    :disabled="busy === 'bibs'"
+                    @click="setBibs(false)">No bibs</button>
+          </div>
+          <p class="muted small" style="margin: var(--s-2) 0 0">
+            <template v-if="bibsEnabled">
+              Bib numbers are read from each photo so runners can search by number.
+            </template>
+            <template v-else>
+              Bib search is hidden and later passes skip OCR entirely — faster, and no numbers
+              invented from signage. Face search is unaffected. Bibs already read are kept, so
+              turning this back on restores them without a re-index.
+            </template>
+          </p>
+        </div>
       </div>
     </div>
   </template>

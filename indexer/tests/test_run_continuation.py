@@ -101,11 +101,16 @@ class FakeDrive:
 
 
 class FakeUploader:
-    def __init__(self, indexed_event_wide):
+    def __init__(self, indexed_event_wide, bibs_enabled=True):
         self._indexed = set(indexed_event_wide)
         self.continue_requested = False
         self.finalized = []
         self.progress_calls = []
+        self.bibs_enabled = bibs_enabled
+        self.bib_writes = 0
+
+    def event_config(self, _event_id):
+        return {"bibs_enabled": self.bibs_enabled}
 
     def progress(self, job_id, **fields):
         self.progress_calls.append(fields)
@@ -127,7 +132,7 @@ class FakeUploader:
         pass
 
     def put_bibs(self, *_a, **_k):
-        pass
+        self.bib_writes += 1
 
     def reserve_rows(self, _event_id, _shard_key, _count):
         return 0
@@ -169,9 +174,9 @@ def _images(prefix, n):
 @pytest.fixture
 def wired(monkeypatch, tmp_path):
     """Patch run()'s collaborators, keeping numpy/Pillow real."""
-    def _build(folder_images, indexed_event_wide, quota_after):
+    def _build(folder_images, indexed_event_wide, quota_after, bibs_enabled=True):
         drive = FakeDrive(folder_images, quota_after)
-        up = FakeUploader(indexed_event_wide)
+        up = FakeUploader(indexed_event_wide, bibs_enabled=bibs_enabled)
 
         cfg = types.SimpleNamespace(
             google_api_key="k", batch_size=25, thumb_max_edge=1000,
@@ -242,3 +247,46 @@ def test_summary_reports_the_faces_it_actually_indexed(wired):
     # "30 faces indexed" contains "0 faces indexed".
     assert " 30 faces indexed" in summary[0]["message"]
     assert " 0 faces indexed" not in summary[0]["message"]
+
+
+def test_an_event_with_no_bibs_skips_bib_work_entirely(wired, monkeypatch):
+    """No OCR reader is built and no bib row is written or cleared.
+
+    put_bibs must not be called at all: it sends replace_photos, so calling it
+    with an empty payload would delete bibs read before the organizer turned the
+    flag off — and those have to survive so turning it back on does not require
+    a full re-index.
+    """
+    built = []
+    monkeypatch.setattr(run_mod, "BibReader", lambda: built.append(1))
+
+    _, up = wired(_images("src2", 10), set(), quota_after=1000, bibs_enabled=False)
+    assert run_mod.run(_args()) == 0
+
+    assert built == [], "the OCR model must not be loaded when bibs are off"
+    assert up.bib_writes == 0, "no bib row may be written or cleared"
+    assert up.finalized == ["ready"]
+
+
+def test_an_event_with_bibs_still_writes_them(wired):
+    """The control: the same path with the flag on behaves as before."""
+    _, up = wired(_images("src2", 10), set(), quota_after=1000, bibs_enabled=True)
+    assert run_mod.run(_args()) == 0
+
+    assert up.bib_writes > 0
+
+
+def test_bibs_only_pass_refuses_an_event_with_no_bibs(wired):
+    _, up = wired(_images("src2", 10), set(), quota_after=1000, bibs_enabled=False)
+
+    assert run_mod.run(_args(bibs_only=True)) == 1
+    assert up.finalized == []
+
+
+def test_config_failure_leaves_bib_reading_on(wired):
+    """Fail safe: losing the config call must not silently drop bib data."""
+    _, up = wired(_images("src2", 5), set(), quota_after=1000, bibs_enabled=True)
+    up.event_config = lambda _e: {}          # as returned when the fetch fails
+
+    assert run_mod.run(_args()) == 0
+    assert up.bib_writes > 0

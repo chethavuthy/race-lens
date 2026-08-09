@@ -107,6 +107,22 @@ class Uploader:
             log.warning("Could not fetch indexed ids (%s); processing everything", exc)
             return set()
 
+    def event_config(self, event_id: str) -> dict:
+        """Per-event indexing settings.
+
+        Falls back to bibs enabled if the call fails: reading bibs nobody wanted
+        costs some CPU, while skipping bibs an event does want loses data that
+        only a full re-index brings back.
+        """
+        try:
+            res = self.session.get(
+                f"{self.cfg.api_base_url}/api/internal/events/{event_id}/config", timeout=60)
+            res.raise_for_status()
+            return res.json()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not fetch event config (%s); assuming bibs are enabled", exc)
+            return {"bibs_enabled": True}
+
     def put_bibs(self, event_id: str, bibs: list[dict],
                  replace_photos: list[str] | None = None) -> None:
         """Write bibs. `replace_photos` clears those photos' existing bibs first,

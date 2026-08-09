@@ -9,7 +9,7 @@ import { plural } from '../lib/format';
 const props = defineProps<{ slug: string }>();
 
 type Tab = 'bib' | 'selfie' | 'upload';
-const TABS: { id: Tab; label: string }[] = [
+const ALL_TABS: { id: Tab; label: string }[] = [
   { id: 'bib', label: 'Bib' },
   { id: 'selfie', label: 'Selfie' },
   { id: 'upload', label: 'Upload' },
@@ -46,10 +46,19 @@ const showScore = import.meta.env.DEV;
 
 const usesCamera = computed(() => tab.value !== 'bib');
 
+// Events that hand out no bibs drop the tab entirely rather than showing a
+// search that can only ever return nothing. Defaults to true so the tab does not
+// flash away while the event is still loading.
+const bibsEnabled = computed(() => event.value?.bibs_enabled !== false);
+const TABS = computed(() => ALL_TABS.filter((t) => t.id !== 'bib' || bibsEnabled.value));
+
 onMounted(async () => {
   try {
     const r = await api.getEvent(props.slug);
     event.value = r.event;
+    // 'bib' is the initial tab because it is the right default for a race. If
+    // this event has no bibs, move off it before anything renders a dead search.
+    if (r.event.bibs_enabled === false && tab.value === 'bib') tab.value = 'selfie';
     browse.value = r.photos;
     cursor.value = r.cursor;
   } catch (e: any) {
@@ -100,8 +109,8 @@ function onTabKey(e: KeyboardEvent, i: number) {
   const delta = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
   if (!delta) return;
   e.preventDefault();
-  const next = (i + delta + TABS.length) % TABS.length;
-  selectTab(TABS[next].id);
+  const next = (i + delta + TABS.value.length) % TABS.value.length;
+  selectTab(TABS.value[next].id);
   tabRefs.value[next]?.focus();
 }
 
@@ -322,10 +331,10 @@ async function onFile(e: Event) {
           <ul class="muted small" style="padding-left: 1.1em; margin-bottom: var(--s-4)">
             <li>Use a photo where your face is large, lit from the front, and not in sunglasses.</li>
             <li>Race photos are often taken side-on — try a second, different photo.</li>
-            <li>If you know your bib number, that search is exact.</li>
+            <li v-if="bibsEnabled">If you know your bib number, that search is exact.</li>
           </ul>
           <div class="btn-row">
-            <button class="primary" @click="selectTab('bib')">Search by bib number</button>
+            <button v-if="bibsEnabled" class="primary" @click="selectTab('bib')">Search by bib number</button>
             <button @click="resetSearch">Show all photos</button>
           </div>
         </template>

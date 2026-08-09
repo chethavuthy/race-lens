@@ -16,6 +16,10 @@ const inspectError = ref<string | null>(null);
 const mode = ref<'existing' | 'new'>('new');
 const targetEventId = ref('');
 const newName = ref('');
+// Most races pin a number on every runner, so bibs default to on. Fun runs and
+// community runs often hand out none at all, and for those the bib pipeline can
+// only waste OCR time and invent numbers off signage.
+const bibsEnabled = ref(true);
 const newDate = ref('');
 const newSlug = ref('');
 const bannerFile = ref<File | null>(null);
@@ -104,6 +108,7 @@ async function start() {
         name: newName.value.trim(),
         event_date: newDate.value || undefined,
         slug: newSlug.value.trim() || undefined,
+        bibs_enabled: bibsEnabled.value,
       });
       eventId = created.event.id;
       if (bannerFile.value) await api.admin.uploadBanner(eventId, bannerFile.value);
@@ -306,6 +311,20 @@ async function publish(ev: EventSummary) {
       <div class="field-group">
         <label for="banner">Banner image (optional)</label>
         <input id="banner" type="file" accept="image/*" @change="onBanner" />
+      </div>
+      <div class="field-group">
+        <label>Bib numbers</label>
+        <div class="segmented" role="radiogroup" aria-label="Does this event use bib numbers?">
+          <button role="radio" :aria-checked="bibsEnabled" :aria-selected="bibsEnabled"
+                  @click="bibsEnabled = true">Runners wear bibs</button>
+          <button role="radio" :aria-checked="!bibsEnabled" :aria-selected="!bibsEnabled"
+                  @click="bibsEnabled = false">No bibs</button>
+        </div>
+        <p class="muted small" style="margin: var(--s-2) 0 0">
+          {{ bibsEnabled
+            ? 'Bib numbers are read from each photo so runners can search by number.'
+            : 'Skips bib reading entirely — faster indexing, and no numbers invented from signage. Face search still works.' }}
+        </p>
       </div>
     </template>
 

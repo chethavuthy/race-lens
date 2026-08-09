@@ -1,0 +1,14 @@
+-- Adds events.bibs_enabled for events that hand out no bibs (fun runs).
+--
+-- schema.sql is written with CREATE TABLE IF NOT EXISTS, which is idempotent for
+-- new tables but cannot add a column to a table that already exists — so an
+-- existing database needs this ALTER. SQLite has no ADD COLUMN IF NOT EXISTS, so
+-- running this twice errors with "duplicate column name"; that error is safe to
+-- ignore and means the migration is already applied.
+--
+--   npx wrangler d1 execute race-lens --remote \
+--     --config apps/api/wrangler.toml --file=./migrations/001_events_bibs_enabled.sql
+--
+-- DEFAULT 1 backfills every existing row, so events created before this keep
+-- doing bib detection exactly as they did.
+ALTER TABLE events ADD COLUMN bibs_enabled INTEGER NOT NULL DEFAULT 1;

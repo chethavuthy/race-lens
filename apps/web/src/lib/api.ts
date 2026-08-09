@@ -7,6 +7,8 @@ export interface EventSummary {
   status: 'draft' | 'indexing' | 'ready' | 'partial';
   photo_count: number;
   face_count: number;
+  /** False for events that hand out no bibs; bib search is unavailable. */
+  bibs_enabled: boolean;
   created_at?: string;
 }
 
@@ -130,7 +132,7 @@ export const api = {
 
     listEvents: () => req<{ events: EventSummary[] }>('/api/admin/events'),
 
-    createEvent: (body: { name: string; event_date?: string; slug?: string }) =>
+    createEvent: (body: { name: string; event_date?: string; slug?: string; bibs_enabled?: boolean }) =>
       req<{ event: EventSummary }>('/api/admin/events', json(body)),
 
     uploadBanner: (eventId: string, file: File) => {
@@ -142,6 +144,12 @@ export const api = {
     setStatus: (eventId: string, status: EventSummary['status']) =>
       req<{ event: EventSummary }>(`/api/admin/events/${eventId}`, {
         ...json({ status }),
+        method: 'PATCH',
+      }),
+
+    setBibsEnabled: (eventId: string, bibsEnabled: boolean) =>
+      req<{ event: EventSummary }>(`/api/admin/events/${eventId}`, {
+        ...json({ bibs_enabled: bibsEnabled }),
         method: 'PATCH',
       }),
 

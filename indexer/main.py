@@ -127,8 +127,26 @@ def run(args: argparse.Namespace) -> int:
         up.progress(args.job_id, status="failed", error="No images found in that folder")
         return 1
 
+    # Some events hand out no bibs at all — fun runs, community runs. Reading
+    # them is then pure cost: OCR is the most expensive stage per photo, and the
+    # only thing it can produce is false positives off race signage and kit
+    # numbers. Skipping it also avoids loading the OCR model entirely.
+    read_bibs = bool(up.event_config(args.event_id).get("bibs_enabled", True))
+    if args.bibs_only and not read_bibs:
+        # A bibs-only pass over an event with no bibs would download and decode
+        # every photo to write nothing at all.
+        up.progress(args.job_id, status="failed",
+                    error="This event is marked as having no bib numbers, so there "
+                          "is nothing for a bibs-only pass to read.")
+        return 1
+    if not read_bibs:
+        log.info("Bib detection is off for this event — face search only")
+        note("info", "no_bibs",
+             "This event is marked as having no bib numbers, so bib detection "
+             "was skipped. Face search is unaffected.")
+
     engine = FaceEngine(det_size=cfg.det_size)
-    reader = BibReader()
+    reader = BibReader() if read_bibs else None
 
     embeddings: list[np.ndarray] = []
     face_rows: list[dict] = []
@@ -211,7 +229,7 @@ def run(args: argparse.Namespace) -> int:
 
             faces = engine.detect(bgr)
             for face in faces:
-                hit = reader.read_torso(bgr, face.bbox)
+                hit = reader.read_torso(bgr, face.bbox) if reader else None
                 if hit:
                     face.bib = hit.bib
                     bib_payload.append({"photo_id": photo_id, "bib": hit.bib, "bib_raw": hit.raw, "conf": hit.conf})
@@ -236,13 +254,17 @@ def run(args: argparse.Namespace) -> int:
             # detection miss costs a bib as well. Measured union over 12 photos:
             # 21 -> 27 distinct bibs. Tiling alone is a regression, so it runs
             # alongside the torso pass rather than instead of it.
-            for hit in reader.read_tiles(bgr):
-                bib_payload.append({"photo_id": photo_id, "bib": hit.bib,
-                                    "bib_raw": hit.raw, "conf": hit.conf})
+            if reader:
+                for hit in reader.read_tiles(bgr):
+                    bib_payload.append({"photo_id": photo_id, "bib": hit.bib,
+                                        "bib_raw": hit.raw, "conf": hit.conf})
 
         # Every photo in this batch is authoritative for its own bibs, including
-        # ones that produced none.
-        if photo_ids:
+        # ones that produced none. Skipped entirely when the event has no bibs:
+        # the call would clear rows without writing any, which would silently
+        # destroy bibs read before the organizer turned the flag off — and those
+        # must survive so turning it back on does not require a re-index.
+        if photo_ids and read_bibs:
             up.put_bibs(args.event_id, bib_payload, replace_photos=list(photo_ids.values()))
 
         processed += len(local)

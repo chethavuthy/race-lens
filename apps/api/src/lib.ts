@@ -55,6 +55,9 @@ export function publicEvent(env: Env, e: EventRow) {
     status: e.status,
     photo_count: e.photo_count,
     face_count: e.face_count,
+    // Exposed publicly so the event page knows not to offer bib search. Sent as
+    // a boolean because SQLite has no bool and every consumer wants one.
+    bibs_enabled: e.bibs_enabled !== 0,
   };
 }
 

@@ -199,6 +199,22 @@ internalRoutes.get('/events/:id/indexed', async (c) => {
   return c.json({ drive_file_ids: results.map((r) => r.drive_file_id) });
 });
 
+/**
+ * Per-event indexing settings, fetched by the runner at startup.
+ *
+ * Deliberately NOT part of the dispatch payload. image_source is passed that
+ * way and it cost us: two of the three dispatch sites forgot the field, the
+ * workflow silently defaulted it, and a whole album re-downloaded at full size
+ * for days before anyone could see why. One endpoint the runner always calls
+ * cannot be forgotten by a caller that does not exist.
+ */
+internalRoutes.get('/events/:id/config', async (c) => {
+  const row = await c.env.DB.prepare('SELECT bibs_enabled FROM events WHERE id = ?')
+    .bind(c.req.param('id')).first<{ bibs_enabled: number }>();
+  if (!row) throw new HttpError(404, 'Event not found', 'no_event');
+  return c.json({ bibs_enabled: row.bibs_enabled !== 0 });
+});
+
 internalRoutes.post('/events/:id/bibs', async (c) => {
   const eventId = c.req.param('id');
   const { bibs, replace_photos } = await c.req.json<{

@@ -53,6 +53,12 @@ publicRoutes.get('/events/:slug/photos', async (c) => {
 
 publicRoutes.get('/events/:slug/bib/:bib', async (c) => {
   const event = await getEventBySlug(c.env, c.req.param('slug'));
+  // Enforced here, not only in the UI: an event with no bibs may still hold bib
+  // rows from before the organizer turned the flag off, and a hidden search box
+  // is not the same as an unavailable one.
+  if (event.bibs_enabled === 0) {
+    throw new HttpError(404, 'This event does not use bib numbers', 'no_bibs');
+  }
   // Strip non-digits, then leading zeros — the indexer stores bibs normalized
   // the same way, so "0123" and "123" resolve to the same row.
   const digits = c.req.param('bib').replace(/\D/g, '');

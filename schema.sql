@@ -12,6 +12,10 @@ CREATE TABLE IF NOT EXISTS events (
   status       TEXT NOT NULL DEFAULT 'draft',  -- draft|indexing|ready|partial
   photo_count  INTEGER NOT NULL DEFAULT 0,
   face_count   INTEGER NOT NULL DEFAULT 0,
+  -- 0 for events that hand out no bibs at all (fun runs, community runs).
+  -- Turns off bib OCR during indexing and bib search on the event page; face
+  -- search is unaffected. Defaults to 1 so existing events keep their behaviour.
+  bibs_enabled INTEGER NOT NULL DEFAULT 1,
   created_at   TEXT NOT NULL
 );
 

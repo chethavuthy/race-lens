@@ -20,6 +20,8 @@ export interface EventRow {
   status: 'draft' | 'indexing' | 'ready' | 'partial';
   photo_count: number;
   face_count: number;
+  /** 0 for events with no bibs at all; turns off bib OCR and bib search. */
+  bibs_enabled: number;
   created_at: string;
 }
 
