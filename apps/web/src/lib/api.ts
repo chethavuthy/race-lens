@@ -145,10 +145,17 @@ export const api = {
         method: 'PATCH',
       }),
 
-    ingest: (eventId: string, driveUrl: string, imageSource: 'original' | 'thumb' = 'original') =>
+    // imageSource is optional on purpose: omitting it keeps whatever an existing
+    // link is already set to. Defaulting it here to 'original' meant the Add-link
+    // form, which never passes one, reset the row toggle every time it ran.
+    ingest: (eventId: string, driveUrl: string, imageSource?: 'original' | 'thumb') =>
       req<{ job_id: string; source_id: string; folder_id: string }>(
         '/api/admin/ingest',
-        json({ event_id: eventId, drive_url: driveUrl, image_source: imageSource }),
+        json({
+          event_id: eventId,
+          drive_url: driveUrl,
+          ...(imageSource ? { image_source: imageSource } : {}),
+        }),
       ),
 
     startBenchmark: (url: string, sample = 6) =>

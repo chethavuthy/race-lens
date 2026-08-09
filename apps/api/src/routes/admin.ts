@@ -167,7 +167,6 @@ adminRoutes.post('/ingest', async (c) => {
   const { event_id, drive_url, image_source } = await c.req.json<{
     event_id?: string; drive_url?: string; image_source?: string;
   }>();
-  const imgSrc = image_source === 'thumb' ? 'thumb' : 'original';
   if (!event_id || !drive_url) throw new HttpError(400, 'event_id and drive_url are required', 'bad_request');
 
   const event = await c.env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(event_id).first<EventRow>();
@@ -183,8 +182,19 @@ adminRoutes.post('/ingest', async (c) => {
   // The admin page then listed the same link several times, most with zero
   // photos, and any per-source total became nonsense.
   const existing = await c.env.DB.prepare(
-    'SELECT id FROM sources WHERE event_id = ? AND drive_folder_id = ?',
-  ).bind(event_id, folderId).first<{ id: string }>();
+    'SELECT id, image_source FROM sources WHERE event_id = ? AND drive_folder_id = ?',
+  ).bind(event_id, folderId).first<{ id: string; image_source: string }>();
+
+  // An omitted image_source means "leave it alone", not "reset to original".
+  //
+  // The upsert below overwrites image_source unconditionally, and the Add-link
+  // form on the event page posts no image_source at all — so re-adding a link
+  // silently threw away a 'thumb' setting the organizer had chosen from the row
+  // toggle, sending the next pass back to full-size downloads and the quota wall
+  // that made them change it in the first place.
+  const imgSrc = image_source === 'thumb' || image_source === 'original'
+    ? image_source
+    : existing?.image_source ?? 'original';
 
   const sourceId = existing?.id ?? newId();
   const jobId = newId();
