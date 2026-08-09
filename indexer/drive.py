@@ -6,6 +6,7 @@ account. Quota is charged to our key.
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -30,6 +31,16 @@ FIELDS = (
 
 class QuotaExceeded(Exception):
     """Drive is refusing downloads for this file/folder right now."""
+
+
+class NotAccessible(Exception):
+    """This one file cannot be fetched, and retrying will not change that.
+
+    Distinct from QuotaExceeded because the caller treats the two oppositely:
+    a quota hit ends the pass, while an inaccessible file is skipped and the
+    pass carries on. Collapsing them meant one unshared or deleted photo
+    reported itself to the organizer as a Drive rate limit.
+    """
 
 
 @dataclass
@@ -153,21 +164,59 @@ class DriveClient:
     THUMB_WIDTH = 3200
 
     def download_thumb(self, file_id: str, dest: str) -> None:
-        """Fetch Drive's resized copy. Not the API, so no key and no API quota."""
-        res = self.session.get(
-            self.THUMB_URL,
-            params={"id": file_id, "sz": f"w{self.THUMB_WIDTH}"},
-            stream=True, timeout=120, allow_redirects=True,
-        )
-        if res.status_code >= 400:
-            raise QuotaExceeded(f"thumbnail {res.status_code} for {file_id}")
-        with open(dest, "wb") as fh:
-            for chunk in res.iter_content(chunk_size=1 << 20):
-                fh.write(chunk)
-        # A Drive error page is small and HTML; a real photo is neither.
-        import os
-        if os.path.getsize(dest) < 20_000:
-            raise QuotaExceeded(f"thumbnail for {file_id} came back too small")
+        """Fetch Drive's resized copy. Not the API, so no key and no API quota.
+
+        Retries on the transient classes, like _get. This used to raise
+        QuotaExceeded on the first error of any kind, with no retry: one
+        transient 503 on one photo ended the whole pass, and if it landed
+        before anything had been indexed, the continuation chain read that
+        as "quota has not recovered" and stopped re-dispatching too. A
+        1111-photo album gets 1111 chances to hit that.
+        """
+        delay = 1.0
+        last = 0
+        for attempt in range(8):
+            res = self.session.get(
+                self.THUMB_URL,
+                params={"id": file_id, "sz": f"w{self.THUMB_WIDTH}"},
+                stream=True, timeout=120, allow_redirects=True,
+            )
+
+            if res.status_code < 400:
+                with open(dest, "wb") as fh:
+                    for chunk in res.iter_content(chunk_size=1 << 20):
+                        fh.write(chunk)
+                # A Drive error page is small and HTML; a real photo is neither.
+                # This endpoint authorizes by the file's own sharing setting, so
+                # the usual cause is a folder that is not "anyone with the link"
+                # — a settled answer, and not the quota one it used to report.
+                if os.path.getsize(dest) < 20_000:
+                    raise NotAccessible(
+                        f"{file_id}: Drive served an error page instead of an image "
+                        "— check the folder is shared with 'anyone with the link'"
+                    )
+                return
+
+            last = res.status_code
+            # 404 is a settled answer; so is an outright permission refusal.
+            # Retrying either just spends the pass's time to reach the same place.
+            if res.status_code == 404:
+                raise NotAccessible(f"{file_id}: not found on Drive (404)")
+            if res.status_code not in (403, 429, 500, 502, 503, 504):
+                raise NotAccessible(f"{file_id}: thumbnail returned {res.status_code}")
+
+            sleep = delay + random.uniform(0, 0.5)
+            log.warning(
+                "Thumbnail %s for %s, retrying in %.1fs (attempt %d/8)",
+                res.status_code, file_id, sleep, attempt + 1,
+            )
+            time.sleep(sleep)
+            delay = min(delay * 2, 120)
+
+        # Out of retries. Sustained 403/429 across 8 backed-off attempts is the
+        # shape of a real throttle, so this one does end the pass — the resume
+        # path will pick the file up next time.
+        raise QuotaExceeded(f"thumbnail kept failing with {last} for {file_id} after 8 attempts")
 
     def download(self, file_id: str, dest: str) -> None:
         res = self._get(
