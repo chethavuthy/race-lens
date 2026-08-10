@@ -1,1 +1,13 @@
+# SPA fallback. Every real route is client-side.
+#
+# NOTE: do NOT add a public/404.html to this project. Pages then answers
+# unmatched paths with it and a 404 status, which takes precedence over this
+# rewrite and 404s every event page. That was tried on 2026-08-10 and took the
+# site down until it was reverted.
+#
+# The related hazard is in _headers: a missing hashed asset falls through to
+# this rule and is answered with index.html and a 200, and /assets/* is stamped
+# immutable — so a browser can cache an HTML document under a .js URL for a
+# year. That is guarded in main.ts instead, which reloads once when a dynamic
+# import fails.
 /*  /index.html  200

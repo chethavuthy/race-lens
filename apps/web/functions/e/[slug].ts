@@ -92,21 +92,26 @@ export const onRequestGet: PagesFunction<Env> = async (ctx) => {
 
   const url = new URL(request.url);
 
-  // Fetch the ORIGINAL url, not /index.html.
+  // Fetching the shell is deliberately defensive.
   //
-  // _redirects carries the SPA rule `/*  /index.html  200`, and asking the
-  // asset server for /index.html directly makes it strip the `/index.html`
-  // suffix and answer 308 to `/`. That redirect then became the response —
-  // every event link bounced to the home page. Requesting /e/<slug> instead
-  // lets the same rule resolve to the shell with a 200, which is what we want
-  // to rewrite.
-  const shell = await env.ASSETS.fetch(request);
+  // Asking the asset server for /index.html directly makes it strip the
+  // suffix and answer 308 to `/`. Asking for the original /e/<slug> depends on
+  // the SPA rule in _redirects resolving, and that turned out NOT to hold on
+  // the custom domain — it answered with a stale 404 page while pages.dev
+  // served the shell correctly, which 404'd every event page on the primary
+  // hostname while looking fine everywhere else.
+  //
+  // So: try the real path, and if that is not an HTML 200, fall back to `/`,
+  // which always maps to the shell. Metadata must never cost someone the page.
+  async function shellFor(target: string): Promise<Response> {
+    return env.ASSETS.fetch(new Request(new URL(target, url).toString(), { method: 'GET' }));
+  }
+  const isHtmlOk = (r: Response) =>
+    r.ok && (r.headers.get('content-type') ?? '').includes('text/html');
 
-  // Only rewrite an HTML page. If the asset server ever answers something else
-  // (a redirect, a 404), pass it through untouched rather than injecting a head
-  // into it.
-  const isHtml = (shell.headers.get('content-type') ?? '').includes('text/html');
-  if (!slug || !isHtml) return shell;
+  let shell = await shellFor(url.pathname);
+  if (!isHtmlOk(shell)) shell = await shellFor('/');
+  if (!slug || !isHtmlOk(shell)) return shell;
 
   const event = await loadEvent(env.API_BASE ?? DEFAULT_API, slug);
   if (!event) return shell;
