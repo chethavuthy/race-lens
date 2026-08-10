@@ -40,6 +40,22 @@ const browseError = ref<string | null>(null);
    a new one. */
 const sentinel = ref<HTMLElement | null>(null);
 const hasAutoLoad = typeof IntersectionObserver !== 'undefined';
+
+/**
+ * How far below the fold the next page starts loading.
+ *
+ * Measured in screens rather than pixels, because a fixed 800px is most of a
+ * phone and barely a third of a desktop — the same constant would mean two
+ * very different amounts of warning.
+ *
+ * Three screens is enough that a reader scrolling at a normal pace arrives at
+ * photographs rather than at skeletons, and because loadMore re-observes after
+ * every page, the grid keeps pulling until that much runway exists. It stops
+ * as soon as it does, so this buys lead time without walking the whole 8,523.
+ */
+const PREFETCH_SCREENS = 3;
+const prefetchMargin = () =>
+  `${Math.round(Math.max(1200, window.innerHeight * PREFETCH_SCREENS))}px 0px`;
 let moreObserver: IntersectionObserver | null = null;
 
 const results = ref<GridItem[] | null>(null);
@@ -133,9 +149,7 @@ watch(sentinel, (el) => {
   if (!el || !('IntersectionObserver' in window)) return;
   moreObserver = new IntersectionObserver(
     (entries) => { if (entries.some((e) => e.isIntersecting)) void loadMore(); },
-    // Start fetching a screen early, so the photos are already there by the
-    // time the reader scrolls to where they go.
-    { rootMargin: '800px 0px' },
+    { rootMargin: prefetchMargin() },
   );
   moreObserver.observe(el);
 });
