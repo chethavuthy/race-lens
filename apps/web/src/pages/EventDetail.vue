@@ -292,7 +292,8 @@ async function onFile(e: Event) {
       </template>
     </p>
 
-    <div class="segmented" role="tablist" aria-label="How to find your photos">
+    <div class="finder">
+      <div class="segmented" role="tablist" aria-label="How to find your photos">
       <button
         v-for="(t, i) in TABS"
         :key="t.id"
@@ -392,6 +393,7 @@ async function onFile(e: Event) {
       <p v-if="usesCamera && modelPhase && !modelsReady" class="muted small" style="margin-top: var(--s-3)">
         <span class="spinner" /> Getting the face model ready (one time, about 16 MB)…
       </p>
+      </div>
     </div>
 
     <p v-if="searchError" class="notice err" style="margin-top: var(--s-5)">{{ searchError }}</p>

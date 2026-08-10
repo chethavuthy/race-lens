@@ -755,3 +755,41 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
   [role='tabpanel'] > .alt-row,
   [role='tabpanel'] > input[type='file'] { max-width: 420px; }
 }
+
+/* ------------------------------------------------------- finder layout --
+   A segmented control is a compact thing. Stretched across a 1,300px desktop
+   card it stops reading as a control at all — three enormous slabs above a
+   panel that is 60% empty space.
+
+   So the strip only runs horizontally where width is scarce. From 768px up the
+   finder becomes two columns: the modes listed down the side, the panel beside
+   them, and the whole thing held to a measure a form should occupy rather than
+   stretched to whatever the viewport allows. */
+@media (min-width: 768px) {
+  .finder {
+    display: grid;
+    grid-template-columns: 190px minmax(0, 1fr);
+    gap: var(--s-5);
+    align-items: start;
+    max-width: 760px;
+  }
+  .finder .segmented {
+    grid-auto-flow: row;
+    grid-auto-columns: auto;
+    margin: 0;
+    position: sticky;
+    top: var(--s-4);
+  }
+  .finder .segmented button {
+    text-align: left;
+    padding-inline: var(--s-3);
+    min-height: var(--tap);
+  }
+  /* The panel already holds its controls to 420px; inside a 570px column that
+     leaves a sliver of dead space, so let them use the column. */
+  .finder [role='tabpanel'] > form,
+  .finder [role='tabpanel'] > .lens,
+  .finder [role='tabpanel'] > button,
+  .finder [role='tabpanel'] > .alt-row,
+  .finder [role='tabpanel'] > input[type='file'] { max-width: none; }
+}
