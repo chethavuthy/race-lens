@@ -237,6 +237,43 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
 .event-card .body { padding: var(--s-3) var(--s-4) var(--s-4); }
 .event-card .name { font-weight: 600; margin-bottom: 2px; }
 
+/* ------------------------------------------------------------ photo wall */
+/* Pinterest-style masonry for the public grids.
+ *
+ * Drive hands us whatever the photographer shot, and the albums are not one
+ * shape: the Angkor marathon is 3:2 landscape off a DSLR, while the Night
+ * Runners album is 3:4 portrait off phones — every single frame. Roughly two in
+ * five photos across the events are portrait.
+ *
+ * The fixed `aspect-ratio: 3/2` + `object-fit: cover` below forced both through
+ * one box, which on a vertical shot crops the runner's head or feet off. That is
+ * the one thing this product cannot do.
+ *
+ * Columns instead, so each photo keeps its own shape. The catch with masonry is
+ * that column heights jump as images decode — unless the box is reserved first.
+ * It is: `width` and `height` come off Drive's imageMediaMetadata at index time
+ * and already ride along on every Photo the client receives, so PhotoGrid sets
+ * --ar per tile and nothing reflows.
+ *
+ * Admin keeps .photo-grid: the inspector wants a uniform grid to compare face
+ * boxes across frames, which is the opposite of what a viewer wants.
+ */
+.masonry { columns: 4; column-gap: var(--s-3); }
+@media (max-width: 1100px) { .masonry { columns: 3; } }
+@media (max-width: 560px)  { .masonry { columns: 2; column-gap: var(--s-2); } }
+
+.masonry > figure {
+  margin: 0 0 var(--s-3);
+  /* All three are needed: Safari still honours only the legacy property. */
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  page-break-inside: avoid;
+  display: block;
+}
+@media (max-width: 560px) { .masonry > figure { margin-bottom: var(--s-2); } }
+
+.masonry .photo-tile { aspect-ratio: var(--ar, 3 / 2); }
+
 /* -------------------------------------------------------------- photo grid */
 .photo-grid {
   display: grid; gap: var(--s-3);
@@ -448,7 +485,6 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
   border-radius: var(--radius-sm);
 }
 @keyframes shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
-.skeleton-tile { aspect-ratio: 3 / 2; }
 .skeleton-line { height: 12px; margin-top: var(--s-2); }
 .skeleton-line.short { width: 55%; }
 

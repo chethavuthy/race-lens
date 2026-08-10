@@ -24,6 +24,20 @@ const failed = ref(new Set<string>());
 // event ever fires — mark it up front or its tile sits on the skeleton forever.
 props.items.forEach((it) => { if (!it.photo.thumb_url) failed.value.add(it.photo.id); });
 
+/**
+ * Reserve each tile's exact box before its image decodes.
+ *
+ * This is what keeps a masonry column stable: without it every photo resolves at
+ * its natural height and the columns re-flow underneath the reader's thumb as
+ * they scroll. width/height are indexed from Drive's imageMediaMetadata, so they
+ * are already here — nothing extra is fetched.
+ *
+ * Falls back to 3:2 when a row predates the dimensions being stored.
+ */
+function ratio(p: Photo): string {
+  return p.width && p.height ? `${p.width} / ${p.height}` : '3 / 2';
+}
+
 function label(item: { photo: Photo; score?: number }, i: number) {
   const n = `Photo ${i + 1} of ${props.items.length}`;
   return failed.value.has(item.photo.id)
@@ -33,10 +47,11 @@ function label(item: { photo: Photo; score?: number }, i: number) {
 </script>
 
 <template>
-  <div class="photo-grid" :class="{ stagger: animate }">
+  <div class="masonry" :class="{ stagger: animate }">
     <figure v-for="(item, i) in items" :key="item.photo.id" :style="{ '--i': i }">
       <a
         class="photo-tile"
+        :style="{ '--ar': ratio(item.photo) }"
         :href="item.photo.original_url"
         target="_blank"
         rel="noopener noreferrer"

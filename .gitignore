@@ -12,3 +12,8 @@ apps/web/public/golden/
 .venv-check/
 .venv-test/
 .env.deploy
+
+# Local Vite overrides (e.g. VITE_API_BASE) and editor/preview launch config
+.env.local
+.env.*.local
+.claude/launch.json
