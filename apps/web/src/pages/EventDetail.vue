@@ -28,6 +28,19 @@ const cursor = ref<string | null>(null);
 const loadingEvent = ref(true);
 const loadingMore = ref(false);
 const loadError = ref<string | null>(null);
+/** Set when a page fails; latches auto-loading off until the reader retries. */
+const browseError = ref<string | null>(null);
+
+/* ------------------------------------------------------- infinite scroll --
+   The grid loads as the reader approaches the end rather than making them hit
+   a button every 60 photos — 8,523 of them in the largest event.
+
+   The sentinel is watched rather than observed once, because it only exists
+   while browsing: running a search unmounts it, and clearing the search mounts
+   a new one. */
+const sentinel = ref<HTMLElement | null>(null);
+const hasAutoLoad = typeof IntersectionObserver !== 'undefined';
+let moreObserver: IntersectionObserver | null = null;
 
 const results = ref<GridItem[] | null>(null);
 const searchedBy = ref<Tab | null>(null);
@@ -111,18 +124,61 @@ onMounted(async () => {
   }
 });
 
-onBeforeUnmount(stopCamera);
+/* The sentinel only exists while browsing — running a search unmounts it and
+   clearing the search mounts a new one — so the observer follows the element
+   rather than being wired up once on mount. */
+watch(sentinel, (el) => {
+  moreObserver?.disconnect();
+  moreObserver = null;
+  if (!el || !('IntersectionObserver' in window)) return;
+  moreObserver = new IntersectionObserver(
+    (entries) => { if (entries.some((e) => e.isIntersecting)) void loadMore(); },
+    // Start fetching a screen early, so the photos are already there by the
+    // time the reader scrolls to where they go.
+    { rootMargin: '800px 0px' },
+  );
+  moreObserver.observe(el);
+});
 
+onBeforeUnmount(() => {
+  stopCamera();
+  moreObserver?.disconnect();
+});
+
+/**
+ * Load the next page of the browse grid.
+ *
+ * `browseError` is what stops a failure becoming a hot loop: the observer below
+ * fires whenever the sentinel is in view, so without a latch a failing endpoint
+ * would be re-requested on every intersection for as long as the reader sat
+ * there. Auto-loading stays off until they explicitly retry.
+ */
 async function loadMore() {
-  if (!cursor.value || loadingMore.value) return;
+  if (!cursor.value || loadingMore.value || browseError.value) return;
   loadingMore.value = true;
   try {
     const r = await api.getPhotos(props.slug, cursor.value);
     browse.value.push(...r.photos);
     cursor.value = r.cursor;
+  } catch (e: any) {
+    browseError.value = e?.message ?? 'Could not load more photos.';
   } finally {
     loadingMore.value = false;
+    // IntersectionObserver only reports CHANGES. If the page we just appended
+    // was short enough that the sentinel is still on screen, nothing further
+    // would fire and loading would stall halfway down. Re-observing makes it
+    // re-report the current state, so the grid keeps filling until the
+    // sentinel is genuinely pushed out of range.
+    if (moreObserver && sentinel.value) {
+      moreObserver.unobserve(sentinel.value);
+      moreObserver.observe(sentinel.value);
+    }
   }
+}
+
+function retryBrowse() {
+  browseError.value = null;
+  void loadMore();
 }
 
 /** Drop the current results without touching the URL. */
@@ -475,10 +531,33 @@ async function onFile(e: Event) {
       <h2 style="margin-top: var(--s-6)">All photos</h2>
       <PhotoGrid :items="browse.map((photo) => ({ photo }))" />
       <p v-if="!browse.length" class="muted">This event has no photos yet.</p>
-      <div v-if="cursor" style="margin-top: var(--s-5)">
-        <button :disabled="loadingMore" @click="loadMore">
-          <span v-if="loadingMore" class="spinner" /> {{ loadingMore ? 'Loading…' : 'Load more photos' }}
-        </button>
+
+      <!-- Sits a screen below the last row; crossing it fetches the next page. -->
+      <div v-if="cursor && !browseError" ref="sentinel" class="load-sentinel" aria-hidden="true" />
+
+      <div class="load-status">
+        <!-- Scrolling is what triggers loading, and a screen reader user has no
+             way to see that it happened — so it is announced. -->
+        <p class="sr-only" role="status">
+          {{ loadingMore ? 'Loading more photos' : cursor ? '' : 'All photos loaded' }}
+        </p>
+
+        <template v-if="browseError">
+          <p class="notice err" style="margin-bottom: var(--s-3)">{{ browseError }}</p>
+          <button @click="retryBrowse">Try again</button>
+        </template>
+
+        <p v-else-if="loadingMore" class="muted small">
+          <span class="spinner" /> Loading more photos…
+        </p>
+
+        <!-- The button is the fallback for a browser with no IntersectionObserver,
+             where nothing would ever trigger a fetch. -->
+        <button v-else-if="cursor && !hasAutoLoad" @click="loadMore">Load more photos</button>
+
+        <p v-else-if="!cursor && browse.length" class="muted small">
+          That's all {{ plural(browse.length, 'photo') }}.
+        </p>
       </div>
     </template>
   </template>

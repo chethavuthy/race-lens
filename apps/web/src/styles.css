@@ -810,3 +810,18 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
      In a left-aligned desktop column it just looks adrift. */
   .finder [role='tabpanel'] > .lens { margin-inline: 0; }
 }
+
+/* --------------------------------------------------- infinite scroll --
+   The sentinel is a zero-height marker, not a spacer: it must not add to the
+   page or it would push itself out of range and stall the very loading it
+   triggers. The margin that makes loading feel instant lives in the
+   observer's rootMargin, not here. */
+.load-sentinel { height: 1px; margin: 0; }
+
+.load-status {
+  display: flex; align-items: center; justify-content: center;
+  min-height: var(--tap);
+  margin-top: var(--s-5);
+  text-align: center;
+}
+.load-status > * { margin: 0; }
