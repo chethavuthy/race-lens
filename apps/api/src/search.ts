@@ -102,7 +102,20 @@ async function fetchShard(env: Env, key: string, ctx?: Waiter): Promise<Int8Arra
   const hit = await cache.match(cacheKey);
   if (hit) return new Int8Array(await hit.arrayBuffer());
 
-  const obj = await env.BUCKET.get(key);
+  // INDEX_BUCKET first, BUCKET second.
+  //
+  // Shards moved to their own private bucket so that BUCKET could be given a
+  // custom domain — an R2 custom domain publishes the entire bucket, and these
+  // objects are raw face embeddings, one row per detected face. Serving
+  // thumbnails without a Worker invocation is only safe once the biometrics are
+  // somewhere that domain cannot reach.
+  //
+  // The fallback covers events indexed before the split, whose shards may still
+  // exist only in the old bucket. It can be dropped once every event has been
+  // re-indexed or copied; until then a missing object must degrade to the old
+  // location rather than to "no matches", which is indistinguishable from a
+  // runner genuinely not being photographed.
+  const obj = (await env.INDEX_BUCKET.get(key)) ?? (await env.BUCKET.get(key));
   if (!obj) return null;
   const buf = await obj.arrayBuffer();
 

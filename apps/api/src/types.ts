@@ -1,6 +1,8 @@
 export interface Env {
   DB: D1Database;
   BUCKET: R2Bucket;
+  /** Private: face-embedding shards. Never given a custom domain. */
+  INDEX_BUCKET: R2Bucket;
   WEB_ORIGIN: string;
   R2_PUBLIC_BASE: string;
   /** "1" disables the Cloudflare Access check. Local dev only. */

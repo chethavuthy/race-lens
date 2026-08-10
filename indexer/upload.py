@@ -42,6 +42,25 @@ class Uploader:
 
     # --- R2 ---------------------------------------------------------------
 
+    def put_shard(self, key: str, data: bytes) -> None:
+        """Upload a face-embedding shard to the PRIVATE bucket, via the Worker.
+
+        Not written with S3 directly: this token is scoped to the public bucket,
+        and that bucket is now behind a custom domain, which publishes every
+        object in it. Shards are raw biometric vectors and must not live there.
+        """
+        url = f"{self.cfg.api_base_url}/api/internal/shards/{key}"
+        res = self.session.put(
+            url,
+            data=data,
+            headers={
+                "X-Ingest-Secret": self.cfg.ingest_secret,
+                "Content-Type": "application/octet-stream",
+            },
+            timeout=120,
+        )
+        res.raise_for_status()
+
     def put_bytes(self, key: str, data: bytes, content_type: str) -> None:
         self.s3.put_object(
             Bucket=self.cfg.r2_bucket,

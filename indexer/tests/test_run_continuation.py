@@ -108,6 +108,7 @@ class FakeUploader:
         self.progress_calls = []
         self.bibs_enabled = bibs_enabled
         self.bib_writes = 0
+        self.shard_writes: list[tuple[str, int]] = []
 
     def event_config(self, _event_id):
         return {"bibs_enabled": self.bibs_enabled}
@@ -130,6 +131,12 @@ class FakeUploader:
 
     def put_bytes(self, *_a, **_k):
         pass
+
+    def put_shard(self, key, data):
+        # Shards go to the private bucket via the Worker, not S3, so this is a
+        # separate call from put_bytes. Recorded so a test can assert that face
+        # embeddings never travel the public-bucket path.
+        self.shard_writes.append((key, len(data)))
 
     def put_bibs(self, *_a, **_k):
         self.bib_writes += 1

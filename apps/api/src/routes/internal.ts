@@ -421,3 +421,31 @@ internalRoutes.post('/events/:id/finalize', async (c) => {
   invalidateIndex(eventId);
   return c.json({ ok: true, photo_count: counts?.photos ?? 0, face_count: counts?.faces ?? 0 });
 });
+
+/**
+ * Upload a face-embedding shard into the private bucket.
+ *
+ * The indexer cannot write there directly: its R2 API token is scoped to the
+ * public `race-lens` bucket, and that bucket now sits behind a custom domain
+ * which publishes everything in it. Rather than rotate credentials, the shard
+ * bytes come through here and are written with the INDEX_BUCKET binding, which
+ * has no such scoping.
+ *
+ * Volume makes this cheap: shards average ~79 KB and three indexed events have
+ * produced ~700 of them in total, against millions of thumbnail requests.
+ */
+internalRoutes.put('/shards/*', async (c) => {
+  const key = c.req.path.replace(/^\/api\/internal\/shards\//, '');
+  // Confine writes to the shard namespace: this endpoint holds the only
+  // credential that can write to the private bucket, so it must not become a
+  // general-purpose upload for anything that reaches it.
+  if (!/^index\/[\w.-]+\/[\w.-]+$/.test(key)) {
+    throw new HttpError(400, 'Key must look like index/<event>/<shard>', 'bad_key');
+  }
+  const body = await c.req.arrayBuffer();
+  if (!body.byteLength) throw new HttpError(400, 'Empty shard', 'bad_request');
+  await c.env.INDEX_BUCKET.put(key, body, {
+    httpMetadata: { contentType: 'application/octet-stream' },
+  });
+  return c.json({ ok: true, key, bytes: body.byteLength });
+});

@@ -286,7 +286,9 @@ def run(args: argparse.Namespace) -> int:
             shard_key = f"index/{args.event_id}/{args.source_id}-{args.run_id}-b{batch_no}.bin"
             row_base = up.reserve_rows(args.event_id, shard_key, len(embeddings))
             buf = np.stack(embeddings).astype(np.int8)
-            up.put_bytes(shard_key, buf.tobytes(order="C"), "application/octet-stream")
+            # Private bucket, via the Worker: these are biometric vectors and
+            # the public bucket is served straight off a custom domain.
+            up.put_shard(shard_key, buf.tobytes(order="C"))
             for row in face_rows:
                 row["row_idx"] += row_base
             up.put_faces(args.event_id, shard_key, row_base, face_rows)

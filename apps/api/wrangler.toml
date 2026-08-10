@@ -28,7 +28,16 @@ WEB_ORIGIN = "https://racelens.runlytics.fit,https://race-lens.runlytics.fit,htt
 # Include the /r2 path: this points at the Worker's asset route, not at a custom
 # domain bound directly to the bucket. With an R2 custom domain the keys sit at
 # the root and this would have no path.
-R2_PUBLIC_BASE = "https://race-lens-api.jt7.workers.dev/r2"
+# Photos are served straight off R2's own custom domain, NOT through the Worker.
+#
+# Routing them through /r2/* meant one Worker invocation per thumbnail, and an
+# event page loads 60 at a time — that path, not face search, is what put CPU
+# over the included 30M ms. R2 egress is free and needs no compute.
+#
+# This bucket is public at that hostname, which is exactly why face-embedding
+# shards were moved to race-lens-index: a custom domain publishes an ENTIRE
+# bucket, so nothing private may ever live here.
+R2_PUBLIC_BASE = "https://img.runlytics.fit"
 # Set to "1" ONLY in .dev.vars for local work. Never in a deployed environment.
 DEV_ADMIN_BYPASS = "0"
 
@@ -40,6 +49,15 @@ database_id = "b2201d61-8877-4c6f-bf73-64b848c89db7"
 [[r2_buckets]]
 binding = "BUCKET"
 bucket_name = "race-lens"
+
+# Face-embedding shards live in their own bucket, and it must never be given a
+# custom domain. An R2 custom domain publishes the WHOLE bucket, and BUCKET now
+# has one (img.runlytics.fit) so thumbnails can be served without paying a
+# Worker invocation each. Keeping the index separate is what makes that safe:
+# these files are raw biometric vectors, one per detected face.
+[[r2_buckets]]
+binding = "INDEX_BUCKET"
+bucket_name = "race-lens-index"
 
 # Secrets (set with `wrangler secret put <NAME>`):
 #   GOOGLE_API_KEY    — Drive API key, used by /api/admin/drive/inspect
