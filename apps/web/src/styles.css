@@ -292,19 +292,35 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
  * Admin keeps .photo-grid: the inspector wants a uniform grid to compare face
  * boxes across frames, which is the opposite of what a viewer wants.
  */
-.masonry { columns: 4; column-gap: var(--s-3); }
-@media (max-width: 1100px) { .masonry { columns: 3; } }
-@media (max-width: 560px)  { .masonry { columns: 2; column-gap: var(--s-2); } }
-
-.masonry > figure {
-  margin: 0 0 var(--s-3);
-  /* All three are needed: Safari still honours only the legacy property. */
-  break-inside: avoid;
-  -webkit-column-break-inside: avoid;
-  page-break-inside: avoid;
-  display: block;
+/* Real columns, not CSS multi-column.
+ *
+ * `columns: 4` BALANCES its content: appending a page re-flows every item, so
+ * photos already on screen jump into different columns and half the grid
+ * reverts to skeletons that had already loaded. That is the one thing an
+ * infinite feed must never do, and it is why Pinterest positions each tile
+ * independently rather than letting the browser distribute them.
+ *
+ * Here each column is its own element and items are dealt into the shortest one
+ * (see PhotoGrid.vue). The assignment of the first N items never changes when
+ * item N+1 arrives, so nothing that is already rendered can move.
+ */
+.masonry {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
 }
-@media (max-width: 560px) { .masonry > figure { margin-bottom: var(--s-2); } }
+.masonry-col {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+@media (max-width: 560px) {
+  .masonry, .masonry-col { gap: var(--s-2); }
+}
+
+.masonry figure { margin: 0; display: block; }
 
 .masonry .photo-tile { aspect-ratio: var(--ar, 3 / 2); }
 
@@ -584,6 +600,14 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
   to   { opacity: 1; transform: none; }
 }
 .stagger > * {
+  animation: rise 380ms var(--ease) backwards;
+  animation-delay: calc(var(--i, 0) * 28ms);
+}
+/* In the masonry the direct children are the columns, and animating those would
+   slide four tall strips in rather than the photographs. The tiles carry the
+   index, so target them. */
+.masonry.stagger > * { animation: none; }
+.masonry.stagger figure {
   animation: rise 380ms var(--ease) backwards;
   animation-delay: calc(var(--i, 0) * 28ms);
 }
