@@ -1,0 +1,15 @@
+{
+  "_comment": [
+    "Which requests invoke the Pages Function. Everything matched by `include`",
+    "runs functions/e/[slug].ts and is BILLED AS A WORKER REQUEST; everything",
+    "else is served as a static asset, which is free and unmetered.",
+    "",
+    "Only the event page needs the Function (it injects per-event share tags).",
+    "Wrangler generates this file when it is absent, but the default is not",
+    "worth guessing at when the difference is every asset request on the site",
+    "turning into a paid invocation. Keep `include` as narrow as possible."
+  ],
+  "version": 1,
+  "include": ["/e/*"],
+  "exclude": []
+}
