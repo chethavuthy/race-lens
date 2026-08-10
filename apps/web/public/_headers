@@ -1,0 +1,53 @@
+# Cloudflare Pages response headers.
+
+# ------------------------------------------------------------------ models
+# 16.1 MB across two files, previously served as `max-age=0, must-revalidate`.
+# The bytes were spared on a 304, but only while the browser still held them —
+# and unhashed multi-megabyte files are the first thing a phone evicts, so
+# repeat visitors were re-downloading them. Every visit also paid two
+# revalidation round-trips before inference could start.
+#
+# These filenames are content-stable: the vector contract pins the exact model
+# revision, so det_500m.onnx and w600k_mbf.onnx cannot change meaning without
+# the whole index being rebuilt. That makes them safe to freeze.
+#
+# IF A MODEL IS EVER SWAPPED, RENAME THE FILE. Editing one in place would leave
+# clients on a year-old copy, producing embeddings that silently disagree with
+# the index — the exact failure tools/golden exists to catch.
+/models/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Vite fingerprints everything in /assets, so these are safe to freeze too.
+# Includes the 12.9 MB onnxruntime wasm binary.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+
+# ----------------------------------------------- why there is no COOP/COEP
+# face.ts asks onnxruntime for up to 4 wasm threads whenever
+# `self.crossOriginIsolated` is true, which needs:
+#
+#   Cross-Origin-Opener-Policy: same-origin
+#   Cross-Origin-Embedder-Policy: require-corp
+#
+# That was implemented and then backed out, because turning it on breaks face
+# search. Measured 2026-08-10 with both headers set: `crossOriginIsolated` went
+# true, ORT switched to its multithreaded path, and
+# `InferenceSession.create()` never settled — no error, no rejection, and the
+# model files were never requested. The search sat on "Searching…" forever.
+# Pinning numThreads to 1 with the same headers loaded both models instantly.
+#
+# The groundwork is done and is safe to leave in place, so a future attempt is
+# a small change rather than a risky one:
+#   - the Worker sends `Cross-Origin-Resource-Policy: cross-origin` on /r2/*
+#   - public asset URLs carry ?v=N (apps/api/src/lib.ts), so a browser holding
+#     a year-old `immutable` copy without CORP re-fetches instead of showing a
+#     broken photo
+#
+# To retry: remove the numThreads pin in face.ts, add the two headers here and
+# to `server.headers` in vite.config.ts, and verify an END-TO-END search
+# returns photos on a real phone. `crossOriginIsolated === true` is not
+# evidence that it works — that was true the whole time it was hanging.

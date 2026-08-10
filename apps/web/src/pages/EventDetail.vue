@@ -1,12 +1,17 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { api, ApiError, type EventSummary, type Photo } from '../lib/api';
 import { embedLargestFace, loadModels, NoFaceError, type LoadPhase } from '../lib/face';
 import PhotoGrid from '../components/PhotoGrid.vue';
+import type { GridItem } from '../lib/grid';
 import PhotoGridSkeleton from '../components/PhotoGridSkeleton.vue';
 import { plural } from '../lib/format';
 
 const props = defineProps<{ slug: string }>();
+
+const route = useRoute();
+const router = useRouter();
 
 type Tab = 'bib' | 'selfie' | 'upload';
 const ALL_TABS: { id: Tab; label: string }[] = [
@@ -24,13 +29,25 @@ const loadingEvent = ref(true);
 const loadingMore = ref(false);
 const loadError = ref<string | null>(null);
 
-const results = ref<{ photo: Photo; score?: number }[] | null>(null);
+const results = ref<GridItem[] | null>(null);
 const searchedBy = ref<Tab | null>(null);
 const searching = ref(false);
 const searchError = ref<string | null>(null);
 const searchNote = ref<string | null>(null);
 
 const bib = ref('');
+
+/**
+ * Crop face results to the runner who actually matched.
+ *
+ * On by default because it is the point: these albums average about nine faces
+ * per frame, so an uncropped result is a pack of runners and the person cannot
+ * tell which one is them. The photographer's full frame is never more than a
+ * tap away — the tile links to the untouched original either way — and the
+ * toggle beside the count switches the whole grid back.
+ */
+const cropToFace = ref(true);
+const faceSearched = computed(() => searchedBy.value === 'selfie' || searchedBy.value === 'upload');
 // Set when an exact search found nothing but a looser one might. Widening is
 // offered as a labelled choice, never done silently: a suffix match can return
 // a different runner's photos and the runner has no way to tell.
@@ -51,6 +68,30 @@ const usesCamera = computed(() => tab.value !== 'bib');
 // flash away while the event is still loading.
 const bibsEnabled = computed(() => event.value?.bibs_enabled !== false);
 const TABS = computed(() => ALL_TABS.filter((t) => t.id !== 'bib' || bibsEnabled.value));
+
+/**
+ * The URL drives the bib search — on first paint, on Back/Forward, and on every
+ * submit. Routing all of them through one watcher means a shared link and a
+ * typed search take exactly the same path, so there is no second code path to
+ * keep in step.
+ */
+watch(
+  () => [route.query.bib, route.query.fuzzy] as const,
+  ([rawBib, rawFuzzy]) => {
+    const value = typeof rawBib === 'string' ? rawBib.trim() : '';
+    if (!value) {
+      // Only the bib search is URL-backed. A face search puts nothing in the
+      // query, so clearing here on an empty param would wipe its results the
+      // moment it finished.
+      if (searchedBy.value === 'bib') clearResults();
+      return;
+    }
+    bib.value = value;
+    tab.value = 'bib';
+    void searchBib(value, rawFuzzy === '1');
+  },
+  { immediate: true },
+);
 
 onMounted(async () => {
   try {
@@ -82,12 +123,30 @@ async function loadMore() {
   }
 }
 
-function resetSearch() {
+/** Drop the current results without touching the URL. */
+function clearResults() {
   fuzzyOffered.value = false;
   results.value = null;
   searchedBy.value = null;
   searchError.value = null;
   searchNote.value = null;
+}
+
+/**
+ * Clear the results AND the query that produced them.
+ *
+ * The bib search lives in the URL (see the watcher below), so forgetting to
+ * clear it here would leave the address bar claiming a search that is no
+ * longer on screen — and a refresh would bring it straight back.
+ */
+function resetSearch() {
+  clearResults();
+  if (route.query.bib != null || route.query.fuzzy != null) {
+    const query = { ...route.query };
+    delete query.bib;
+    delete query.fuzzy;
+    router.replace({ query });
+  }
 }
 
 function selectTab(t: Tab) {
@@ -114,10 +173,24 @@ function onTabKey(e: KeyboardEvent, i: number) {
   tabRefs.value[next]?.focus();
 }
 
-async function searchBib(fuzzy = false) {
+/**
+ * Put the search in the URL and let the watcher run it.
+ *
+ * The URL is the single source of truth for bib search, which is what makes a
+ * result bookmarkable, shareable, and able to survive a refresh — a runner who
+ * finds their photos can send that link to whoever they ran with. It also means
+ * Back steps out of a search rather than off the page.
+ */
+function submitBib(fuzzy = false) {
   const value = bib.value.trim();
   if (!value) return;
-  resetSearch();
+  const query: Record<string, string> = { ...(route.query as Record<string, string>), bib: value };
+  if (fuzzy) query.fuzzy = '1'; else delete query.fuzzy;
+  router.push({ query });
+}
+
+async function searchBib(value: string, fuzzy: boolean) {
+  clearResults();
   searching.value = true;
   try {
     const r = await api.searchBib(props.slug, value, fuzzy);
@@ -146,7 +219,9 @@ async function runFaceSearch(source: Blob | HTMLVideoElement, via: Tab) {
     });
     const { vec, faceCount } = await embedLargestFace(source);
     const r = await api.searchFace(props.slug, vec);
-    results.value = r.matches.map((m) => ({ photo: m.photo, score: m.score }));
+    // bbox rides along so the grid can crop the tile to the face that matched.
+    results.value = r.matches.map((m) => ({ photo: m.photo, score: m.score, bbox: m.bbox }));
+    cropToFace.value = true;
     searchedBy.value = via;
     if (faceCount > 1 && r.matches.length) {
       searchNote.value = `Matched the largest of ${faceCount} faces in your photo.`;
@@ -239,7 +314,7 @@ async function onFile(e: Event) {
       tabindex="-1">
       <template v-if="tab === 'bib'">
         <label for="bib-input">Search by the number on your race bib</label>
-        <form style="display: flex; gap: var(--s-3)" @submit.prevent="searchBib()">
+        <form style="display: flex; gap: var(--s-3)" @submit.prevent="submitBib()">
           <input
             id="bib-input" v-model="bib" inputmode="numeric" pattern="[0-9]*"
             autocomplete="off" placeholder="e.g. 1274" />
@@ -295,7 +370,12 @@ async function onFile(e: Event) {
         <h2 style="margin: 0">
           {{ plural(results.length, 'photo') }} found
         </h2>
-        <button @click="resetSearch">Show all photos</button>
+        <div class="btn-row">
+          <button v-if="faceSearched" @click="cropToFace = !cropToFace">
+            {{ cropToFace ? 'Show full frames' : 'Crop to me' }}
+          </button>
+          <button @click="resetSearch">Show all photos</button>
+        </div>
       </div>
 
       <p v-if="searchNote" class="notice" style="margin: var(--s-3) 0">{{ searchNote }}</p>
@@ -304,7 +384,12 @@ async function onFile(e: Event) {
         <p class="muted small" style="margin: var(--s-3) 0 var(--s-4)">
           Tap a photo to open the full-size original from the photographer.
         </p>
-        <PhotoGrid :items="results" :show-score="showScore" animate />
+        <PhotoGrid
+          :items="results"
+          :show-score="showScore"
+          :crop="faceSearched && cropToFace"
+          show-time
+          animate />
       </template>
 
       <!-- An empty result is the moment the user is most likely to give up, so
@@ -319,7 +404,7 @@ async function onFile(e: Event) {
           <p class="muted small">Try finding yourself by face instead — it works even when your bib is hidden.</p>
           <div class="btn-row">
             <button class="primary" @click="selectTab('selfie')">Take a selfie</button>
-            <button v-if="fuzzyOffered" @click="searchBib(true)">Try similar numbers</button>
+            <button v-if="fuzzyOffered" @click="submitBib(true)">Try similar numbers</button>
             <button @click="selectTab('upload')">Upload a photo</button>
             <button @click="resetSearch">Show all photos</button>
           </div>

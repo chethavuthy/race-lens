@@ -20,6 +20,10 @@ export default defineConfig({
     },
   ],
   server: {
+    // NOTE: production deliberately does not send COOP/COEP — see the long
+    // note in public/_headers. If you re-enable them there, mirror them here
+    // too, or COEP failures (silently blocked images) will only ever show up
+    // after a deploy.
     proxy: {
       // Local wrangler dev on 8787; keeps the frontend same-origin in dev.
       '/api': { target: 'http://127.0.0.1:8787', changeOrigin: true },
