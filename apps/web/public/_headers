@@ -44,11 +44,17 @@
 # So this buys no speed and costs a constraint: under COEP every cross-origin
 # subresource must send CORP or it silently fails to load. Not worth it.
 #
-# The groundwork is kept anyway, so a future attempt is safe rather than cheap:
-#   - the Worker sends `Cross-Origin-Resource-Policy: cross-origin` on /r2/*
-#   - public asset URLs carry ?v=N (apps/api/src/lib.ts), so a browser holding a
-#     year-old `immutable` copy from before that header refetches instead of
-#     showing a broken photo
+# One piece of groundwork is kept: the Worker sends
+# `Cross-Origin-Resource-Policy: cross-origin` on /r2/*, which costs nothing
+# today and is required the day COEP is ever switched on.
+#
+# BEFORE ENABLING COEP, note that photos are cached in browsers for a year as
+# `immutable`. Anyone holding a copy fetched before that CORP header shipped
+# would see broken photos until it expired. Those copies do now carry CORP, but
+# verify that before flipping the switch — if any predate it, the asset URLs
+# need a one-off cache-buster, which is expensive: it forces every thumbnail
+# back through the Worker's R2-fetch-and-cache path, and that is what the
+# CPU bill is made of.
 #
 # lib/face.ts pins numThreads to 1 unconditionally, so turning these headers on
 # for some other reason cannot resurrect the hang.

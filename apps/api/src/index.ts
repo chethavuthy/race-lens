@@ -34,31 +34,12 @@ app.route('/api/internal', internalRoutes);
  * R2_PUBLIC_BASE is unset — with a custom domain on the bucket, R2 serves these
  * directly and this route never gets hit.
  */
-/**
- * Bump when the RESPONSE HEADERS below change.
- *
- * These responses are stored in the colo cache under `Cache-Control: immutable,
- * max-age=1 year`, so a header added today would not reach a client that
- * already has the old copy cached until 2027. The site now sends
- * `Cross-Origin-Embedder-Policy: require-corp`, which BLOCKS any cross-origin
- * subresource lacking `Cross-Origin-Resource-Policy` — so a stale cached
- * response is not a cosmetic problem, it is a missing photo.
- *
- * The version rides in the cache key only. It never appears in the URL the
- * browser requested, so thumbnail URLs stored in the database stay valid.
- */
-const ASSET_HEADER_VERSION = '2';
-
 app.get('/r2/*', async (c) => {
   const key = c.req.path.replace(/^\/r2\//, '');
   if (!/^(thumbs|banners)\//.test(key)) return c.notFound();
 
   const cache = caches.default;
-  const cacheUrl = new URL(c.req.url);
-  cacheUrl.searchParams.set('hv', ASSET_HEADER_VERSION);
-  const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
-
-  const cached = await cache.match(cacheKey);
+  const cached = await cache.match(c.req.raw);
   if (cached) return cached;
 
   const obj = await c.env.BUCKET.get(key);
@@ -69,13 +50,12 @@ app.get('/r2/*', async (c) => {
       'Content-Type': obj.httpMetadata?.contentType ?? 'image/webp',
       'Cache-Control': 'public, max-age=31536000, immutable',
       ETag: obj.httpEtag,
-      // The site is cross-origin-isolated so onnxruntime can use threads, which
-      // means every cross-origin subresource must opt in explicitly. Without
-      // this header the browser drops every thumbnail on the floor.
+      // Harmless today (the site does not send COEP — see apps/web/public/_headers)
+      // and required the day it ever does, without needing new asset URLs.
       'Cross-Origin-Resource-Policy': 'cross-origin',
     },
   });
-  c.executionCtx.waitUntil(cache.put(cacheKey, res.clone()));
+  c.executionCtx.waitUntil(cache.put(c.req.raw, res.clone()));
   return res;
 });
 
