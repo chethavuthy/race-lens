@@ -631,3 +631,127 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
   color: var(--accent);
   font-weight: 600;
 }
+
+/* ============================================================== finder ==
+   The panel where someone actually finds themselves.
+
+   What shipped before: a 260px empty grey rectangle above a secondary-styled
+   "Turn on camera", with the privacy line underneath in 11px grey. The largest
+   thing on screen explained nothing, the only way forward looked like a
+   cancel button, and the sentence that decides whether a stranger will point a
+   camera at their own face was placed where only people who had already
+   decided would read it.
+   ====================================================================== */
+
+/* The camera frame.
+   Two sizes, because the frame is doing two different jobs.
+
+   Before permission there is nothing to align to, so a tall 3:4 window is just
+   a large empty box again — and on a 375x812 phone it pushed the button and
+   the fallback routes below the fold, which is the whole problem restated. It
+   shrinks to a compact badge: enough to say "a face goes here", cheap in
+   vertical space.
+
+   Once the camera is live the frame IS the task, so it takes the room. */
+.lens {
+  position: relative;
+  margin-inline: auto;
+  overflow: hidden;
+  background: var(--surface-2);
+  /* idle */
+  width: 116px; height: 116px;
+  border-radius: 50%;
+  transition: width var(--dur) var(--ease), height var(--dur) var(--ease),
+              border-radius var(--dur) var(--ease);
+}
+.lens[data-live='true'] {
+  /* Height-capped rather than width-capped: a 3:4 frame at full phone width is
+     ~400px tall and would push the shutter button off-screen on a short
+     handset. Driving from height keeps the whole task on one screen.
+     dvh so the iOS URL bar collapsing does not resize it mid-capture. */
+  height: min(280px, 32vh);
+  height: min(280px, 32dvh);
+  aspect-ratio: 3 / 4;
+  width: auto; max-width: 100%;
+  border-radius: 120px 120px var(--radius) var(--radius);
+}
+.lens video {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; display: block;
+  /* Front cameras are mirrored in every consumer app. An unmirrored preview
+     makes people correct their framing in the wrong direction. */
+  transform: scaleX(-1);
+}
+
+/* The oval is the fix for our most common failure — NoFaceError from a photo
+   taken too far away, side-on, or in the dark. It only appears once there is a
+   live picture to line up against; drawn over a silhouette it would be
+   instructing you to align with nothing. */
+.lens .oval {
+  position: absolute; left: 11%; right: 11%; top: 8%; bottom: 24%;
+  border: 2px solid var(--accent);
+  border-radius: 50% 50% 46% 46%;
+  pointer-events: none;
+}
+
+/* Head-and-shoulders silhouette, from two shapes rather than shipping an asset
+   for something this simple. Clipped by the round frame, so the shoulders read
+   as a bust rather than a blob. */
+.lens .ghost {
+  position: absolute; left: 50%; top: 34%; transform: translate(-50%, -50%);
+  width: 34%; aspect-ratio: 1; border-radius: 50%;
+  background: var(--line-strong); opacity: 0.55; pointer-events: none;
+}
+.lens .ghost::after {
+  content: ""; position: absolute; left: 50%; top: 128%; transform: translateX(-50%);
+  width: 200%; aspect-ratio: 2 / 1; border-radius: 50% 50% 0 0;
+  background: var(--line-strong);
+}
+.lens .hint {
+  position: absolute; left: 0; right: 0; bottom: var(--s-2);
+  text-align: center; font-size: var(--t-xs); color: var(--text);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+}
+
+/* The reason, and the promise, both above the button that acts on them. */
+.ask-title { font-size: var(--t-md); letter-spacing: -0.01em; margin: 0 0 var(--s-1); }
+.ask-why { color: var(--muted); font-size: var(--t-sm); margin: 0 0 var(--s-4); max-width: 46ch; }
+.ask-why strong { color: var(--text); font-weight: 600; }
+
+/* Secondary routes, sized so neither competes with the primary action. */
+.alt-row { display: flex; gap: var(--s-3); margin-top: var(--s-3); }
+.alt-row > * { flex: 1 1 0; justify-content: center; }
+
+/* A bib number is a short number read off your own chest, not an email
+   address. Set at display size on a rule, the way a pump number or a locker
+   number is asked for. */
+.bib-entry {
+  display: block; width: 100%;
+  font: 700 var(--t-2xl)/1.1 inherit;
+  letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums;
+  background: transparent;
+  border: 0; border-bottom: 2px solid var(--line-strong);
+  border-radius: 0;
+  padding: var(--s-2) 0;
+  min-height: 0;
+}
+.bib-entry::placeholder { color: var(--line-strong); }
+.bib-entry:hover { border-color: var(--line-strong); }
+.bib-entry:focus { outline: none; border-bottom-color: var(--accent); }
+.bib-entry:focus-visible { outline: none; }
+@media (min-width: 640px) {
+  /* Display size is right on a phone and shouts on a desktop. */
+  .bib-entry { font-size: var(--t-xl); }
+}
+
+/* The ask is a single column of controls, sized for a thumb. Left unconstrained
+   it stretches to the full card on a desktop, where a 1,300px-wide "Find my
+   photos" button reads as a banner rather than a control. */
+@media (min-width: 640px) {
+  [role='tabpanel'] > form,
+  [role='tabpanel'] > .lens,
+  [role='tabpanel'] > button,
+  [role='tabpanel'] > .alt-row,
+  [role='tabpanel'] > input[type='file'] { max-width: 420px; }
+}

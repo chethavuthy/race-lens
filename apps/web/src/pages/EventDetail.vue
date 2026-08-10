@@ -55,6 +55,8 @@ const fuzzyOffered = ref(false);
 
 const video = ref<HTMLVideoElement | null>(null);
 const stream = ref<MediaStream | null>(null);
+/** True once there is a picture to align to, which is what the panel switches on. */
+const live = computed(() => !!stream.value);
 const cameraError = ref<string | null>(null);
 
 const modelPhase = ref<LoadPhase | null>(null);
@@ -313,42 +315,82 @@ async function onFile(e: Event) {
       :aria-labelledby="`tab-${tab}`"
       tabindex="-1">
       <template v-if="tab === 'bib'">
-        <label for="bib-input">Search by the number on your race bib</label>
-        <form style="display: flex; gap: var(--s-3)" @submit.prevent="submitBib()">
+        <h3 class="ask-title">What number did you wear?</h3>
+        <p class="ask-why">The number printed on your race bib. Usually 3–5 digits.</p>
+        <form @submit.prevent="submitBib()">
+          <label class="sr-only" for="bib-input">Race bib number</label>
           <input
-            id="bib-input" v-model="bib" inputmode="numeric" pattern="[0-9]*"
-            autocomplete="off" placeholder="e.g. 1274" />
-          <button class="primary" type="submit" :disabled="searching || !bib.trim()">Search</button>
+            id="bib-input" class="bib-entry" v-model="bib" inputmode="numeric" pattern="[0-9]*"
+            autocomplete="off" enterkeyhint="search" placeholder="1274" />
+          <button
+            class="primary" type="submit" style="width: 100%; margin-top: var(--s-4)"
+            :disabled="searching || !bib.trim()">
+            Find my photos
+          </button>
         </form>
       </template>
 
       <template v-else-if="tab === 'selfie'">
-        <video
-          ref="video" playsinline muted aria-label="Camera preview"
-          style="width: 100%; max-width: 420px; border-radius: var(--radius-sm);
-                 background: var(--surface-2); aspect-ratio: 4 / 3; object-fit: cover" />
-        <div class="btn-row" style="margin-top: var(--s-3)">
-          <button v-if="!stream" @click="startCamera">Turn on camera</button>
-          <template v-else>
-            <button class="primary" :disabled="searching" @click="capture">Find my photos</button>
-            <button @click="stopCamera">Turn off</button>
-          </template>
+        <!-- The reason and the promise sit ABOVE the control that acts on
+             them. "Never uploaded" is what decides whether a stranger will
+             point a camera at their own face, so it cannot be a footnote read
+             only by people who already said yes. -->
+        <h3 class="ask-title">{{ live ? 'Fill the oval' : 'Let’s find you' }}</h3>
+        <!-- Once the camera is live the guidance moves into the frame itself,
+             where the person is already looking. Repeating it above as well
+             costs ~36px, which on a 667px handset is the difference between
+             the shutter button being reachable and being below the fold. -->
+        <p v-if="!live" class="ask-why">
+          Matched <strong>on this phone</strong> — never uploaded, never stored.
+        </p>
+
+        <div class="lens" :data-live="live">
+          <video ref="video" playsinline muted aria-label="Camera preview" />
+          <!-- Before permission there is no video, so the frame previews what
+               will fill it rather than sitting empty. -->
+          <div v-if="!live" class="ghost" aria-hidden="true" />
+          <div v-else class="oval" aria-hidden="true" />
+          <span v-if="live" class="hint">Good light, no sunglasses</span>
         </div>
+
+        <button
+          v-if="!live" class="primary" style="width: 100%; margin-top: var(--s-4)"
+          @click="startCamera">
+          Turn on camera
+        </button>
+        <button
+          v-else class="primary" style="width: 100%; margin-top: var(--s-4)"
+          :disabled="searching" @click="capture">
+          Find my photos
+        </button>
+
+        <!-- The other routes are offered here, so nobody has to discover a tab
+             to escape a camera they do not want to grant. -->
+        <div class="alt-row">
+          <button v-if="live" @click="stopCamera">Turn off camera</button>
+          <button v-else @click="selectTab('upload')">Upload a photo</button>
+          <button v-if="bibsEnabled" @click="selectTab('bib')">Use bib number</button>
+        </div>
+
         <p v-if="cameraError" class="notice warn" style="margin-top: var(--s-3)">{{ cameraError }}</p>
       </template>
 
       <template v-else>
-        <label for="photo-upload">Pick a clear, front-facing photo of yourself</label>
+        <h3 class="ask-title">Pick a photo of yourself</h3>
+        <p class="ask-why">
+          Face large in the frame, looking at the camera. Matched <strong>on this phone</strong> —
+          never uploaded, never stored.
+        </p>
+        <label class="sr-only" for="photo-upload">Photo of yourself</label>
         <input id="photo-upload" type="file" accept="image/*" :disabled="searching" @change="onFile" />
+        <div class="alt-row">
+          <button @click="selectTab('selfie')">Use the camera</button>
+          <button v-if="bibsEnabled" @click="selectTab('bib')">Use bib number</button>
+        </div>
       </template>
 
       <p v-if="usesCamera && modelPhase && !modelsReady" class="muted small" style="margin-top: var(--s-3)">
         <span class="spinner" /> Getting the face model ready (one time, about 16 MB)…
-      </p>
-      <!-- Only true when a photo is actually involved. On the bib tab there is
-           no image, and claiming otherwise is just noise. -->
-      <p v-if="usesCamera" class="muted small" style="margin: var(--s-3) 0 0">
-        Your photo is matched on your device and is never uploaded.
       </p>
     </div>
 
