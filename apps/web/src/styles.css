@@ -760,39 +760,53 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
 }
 
 /* ------------------------------------------------------- finder layout --
-   A segmented control is a compact thing. Stretched across a 1,300px desktop
-   card it stops reading as a control at all — three enormous slabs above a
-   panel that is 60% empty space.
+   On a phone the finder is a card, because a card is how you group a task when
+   width is scarce.
 
-   So the strip only runs horizontally where width is scarce. From 768px up the
-   finder becomes two columns: the modes listed down the side, the panel beside
-   them, and the whole thing held to a measure a form should occupy rather than
-   stretched to whatever the viewport allows. */
+   On a desktop it stops being a card. Every dense photo library worth copying —
+   Savee, Cosmos, Magnific, Air — puts search in a compact bar and lets the grid
+   be the page; not one of them wraps it in a bordered panel floating in the
+   content column. A card there reads as a form bolted onto a gallery, which is
+   exactly what it looked like.
+
+   So from 768px up: the mode chips shrink to their content, the controls sit
+   directly on the page, and the photographs start immediately underneath. */
 @media (min-width: 768px) {
   .finder {
-    display: grid;
-    grid-template-columns: 190px minmax(0, 1fr);
-    gap: var(--s-5);
-    align-items: start;
-    max-width: 760px;
+    display: flex; flex-direction: column; align-items: flex-start;
+    gap: var(--s-4);
+    max-width: 720px;
   }
+
+  /* Chips, not a stretched strip. A segmented control is sized by its labels. */
   .finder .segmented {
-    grid-auto-flow: row;
-    grid-auto-columns: auto;
+    width: max-content; max-width: 100%;
     margin: 0;
-    position: sticky;
-    top: var(--s-4);
   }
-  .finder .segmented button {
-    text-align: left;
-    padding-inline: var(--s-3);
-    min-height: var(--tap);
+  .finder .segmented button { padding-inline: var(--s-5); }
+
+  /* The panel dissolves into the page. */
+  .finder [role='tabpanel'] {
+    background: none; border: 0; padding: 0;
+    width: 100%;
   }
-  /* The panel already holds its controls to 420px; inside a 570px column that
-     leaves a sliver of dead space, so let them use the column. */
-  .finder [role='tabpanel'] > form,
+  .finder .ask-title { font-size: var(--t-lg); }
+
+  /* The bib ask is one line on a desktop: a number and the button that acts on
+     it, rather than a stacked mobile form stretched across the width. */
+  .finder .bib-form {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--s-4); align-items: end;
+    max-width: 520px;
+  }
+  .finder .bib-form .bib-entry { font-size: var(--t-2xl); }
+  .finder .bib-form button { margin-top: 0; width: auto; padding-inline: var(--s-6); }
+
   .finder [role='tabpanel'] > .lens,
   .finder [role='tabpanel'] > button,
   .finder [role='tabpanel'] > .alt-row,
-  .finder [role='tabpanel'] > input[type='file'] { max-width: none; }
+  .finder [role='tabpanel'] > input[type='file'] { max-width: 420px; }
+  /* Centred is right on a phone, where the frame is the width of the screen.
+     In a left-aligned desktop column it just looks adrift. */
+  .finder [role='tabpanel'] > .lens { margin-inline: 0; }
 }

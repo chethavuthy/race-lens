@@ -318,7 +318,7 @@ async function onFile(e: Event) {
       <template v-if="tab === 'bib'">
         <h3 class="ask-title">What number did you wear?</h3>
         <p class="ask-why">The number printed on your race bib. Usually 3–5 digits.</p>
-        <form @submit.prevent="submitBib()">
+        <form class="bib-form" @submit.prevent="submitBib()">
           <label class="sr-only" for="bib-input">Race bib number</label>
           <input
             id="bib-input" class="bib-entry" v-model="bib" inputmode="numeric" pattern="[0-9]*"
