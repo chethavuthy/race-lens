@@ -661,8 +661,11 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
   /* idle */
   width: 116px; height: 116px;
   border-radius: 50%;
-  transition: width var(--dur) var(--ease), height var(--dur) var(--ease),
-              border-radius var(--dur) var(--ease);
+  /* Deliberately not transitioned. Going from the compact badge to the full
+     frame changes width and height, and animating those two properties is a
+     layout-thrash every frame — the CI anti-pattern scan flags it, correctly.
+     It is also a state change the person just caused by granting camera
+     access, not something that benefits from being eased. */
 }
 .lens[data-live='true'] {
   /* Height-capped rather than width-capped: a 3:4 frame at full phone width is
