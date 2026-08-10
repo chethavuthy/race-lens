@@ -1,13 +1,25 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import type { Photo } from '../lib/api';
+import type { GridItem } from '../lib/grid';
+import { clockTime } from '../lib/format';
 
-const props = defineProps<{
-  items: { photo: Photo; score?: number }[];
-  showScore?: boolean;
-  /** Stagger the tiles in. Only for search results — never for the browse grid. */
-  animate?: boolean;
-}>();
+const props = withDefaults(
+  defineProps<{
+    items: GridItem[];
+    showScore?: boolean;
+    /** Stagger the tiles in. Only for search results — never for the browse grid. */
+    animate?: boolean;
+    /**
+     * Crop each tile to the matched face instead of showing the whole frame.
+     * Only meaningful when items carry a bbox.
+     */
+    crop?: boolean;
+    /** Show the capture time under each tile. */
+    showTime?: boolean;
+  }>(),
+  { showScore: false, animate: false, crop: false, showTime: false },
+);
 
 const loaded = ref(new Set<string>());
 // Thumbnails live in OUR R2 bucket. If one fails to load that is our problem —
@@ -25,20 +37,58 @@ const failed = ref(new Set<string>());
 props.items.forEach((it) => { if (!it.photo.thumb_url) failed.value.add(it.photo.id); });
 
 /**
- * Reserve each tile's exact box before its image decodes.
+ * Reserve the tile's exact box before the image decodes.
  *
- * This is what keeps a masonry column stable: without it every photo resolves at
- * its natural height and the columns re-flow underneath the reader's thumb as
- * they scroll. width/height are indexed from Drive's imageMediaMetadata, so they
- * are already here — nothing extra is fetched.
- *
- * Falls back to 3:2 when a row predates the dimensions being stored.
+ * This is what makes a masonry column stable: without it every image resolves
+ * at its natural height and the columns re-flow underneath the reader's thumb.
+ * width/height come off Drive's imageMediaMetadata at index time and are
+ * already on the Photo the client receives, so it costs nothing.
  */
 function ratio(p: Photo): string {
   return p.width && p.height ? `${p.width} / ${p.height}` : '3 / 2';
 }
 
-function label(item: { photo: Photo; score?: number }, i: number) {
+/**
+ * Position the image inside a square tile so the matched face fills it.
+ *
+ * Around nine faces are detected per frame in these albums, so a result is
+ * usually a pack of runners and the person cannot tell at thumbnail size which
+ * one matched. The search already tells us — it returns the winning face's box
+ * — and nothing was using it.
+ *
+ * PAD pulls back from the box so the crop is a head-and-shoulders portrait
+ * rather than a tight cut at the hairline. The region is then clamped inside
+ * the frame, because a face near an edge would otherwise crop past it and leave
+ * a transparent wedge.
+ */
+const PAD = 2.4;
+
+function cropStyle(item: GridItem): Record<string, string> | null {
+  const { width: W, height: H } = item.photo;
+  const box = item.bbox;
+  if (!box || !W || !H) return null;
+
+  const [x, y, bw, bh] = box;
+  if (!(bw > 0 && bh > 0)) return null;
+
+  const side = Math.min(Math.max(bw, bh) * PAD, W, H);
+  const half = side / 2;
+  const cx = Math.min(Math.max(x + bw / 2, half), W - half);
+  const cy = Math.min(Math.max(y + bh / 2, half), H - half);
+
+  return {
+    width: `${(W / side) * 100}%`,
+    left: `${(-(cx - half) / side) * 100}%`,
+    top: `${(-(cy - half) / side) * 100}%`,
+  };
+}
+
+/** True only when this item can actually be cropped. */
+function cropped(item: GridItem): boolean {
+  return props.crop && cropStyle(item) !== null;
+}
+
+function label(item: GridItem, i: number) {
   const n = `Photo ${i + 1} of ${props.items.length}`;
   return failed.value.has(item.photo.id)
     ? `${n} — preview unavailable`
@@ -50,8 +100,8 @@ function label(item: { photo: Photo; score?: number }, i: number) {
   <div class="masonry" :class="{ stagger: animate }">
     <figure v-for="(item, i) in items" :key="item.photo.id" :style="{ '--i': i }">
       <a
-        class="photo-tile"
-        :style="{ '--ar': ratio(item.photo) }"
+        :class="cropped(item) ? 'crop-tile' : 'photo-tile'"
+        :style="cropped(item) ? undefined : { '--ar': ratio(item.photo) }"
         :href="item.photo.original_url"
         target="_blank"
         rel="noopener noreferrer"
@@ -65,6 +115,7 @@ function label(item: { photo: Photo; score?: number }, i: number) {
         <img
           v-if="item.photo.thumb_url"
           :src="item.photo.thumb_url"
+          :style="cropped(item) ? cropStyle(item)! : undefined"
           :class="{ loaded: loaded.has(item.photo.id) }"
           alt=""
           loading="lazy"
@@ -75,8 +126,13 @@ function label(item: { photo: Photo; score?: number }, i: number) {
           {{ item.score.toFixed(3) }}
         </span>
       </a>
+
       <figcaption v-if="failed.has(item.photo.id)" class="muted small" style="margin-top: 6px">
         Preview unavailable — the full-size photo may still open
+      </figcaption>
+      <figcaption v-else-if="showTime && clockTime(item.photo.taken_at)" class="tile-cap">
+        <span class="t">{{ clockTime(item.photo.taken_at) }}</span>
+        <span v-if="cropped(item)">cropped to you</span>
       </figcaption>
     </figure>
   </div>

@@ -38,11 +38,32 @@ export function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+/**
+ * Cache-buster for every public asset URL. Bump when the RESPONSE HEADERS on
+ * /r2/* change in a way browsers must not miss.
+ *
+ * These assets are served `immutable, max-age=31536000`, so a browser that has
+ * one cached will not revalidate it for a year. That is the point — until a
+ * header has to change. The site now sends
+ * `Cross-Origin-Embedder-Policy: require-corp`, and a cached response predating
+ * `Cross-Origin-Resource-Policy` is blocked outright:
+ * `ERR_BLOCKED_BY_RESPONSE.NotSameOriginAfterDefaultedToSameOriginByCoep`.
+ * Every returning visitor would have seen broken photos for a year.
+ *
+ * Versioning the colo cache key alone does not fix it — that never reaches the
+ * copy already sitting in someone's browser. The URL itself has to change.
+ *
+ * The cost is one re-download of each thumbnail per returning visitor, once.
+ * The route keys off the path and ignores this parameter.
+ */
+const ASSET_URL_VERSION = '2';
+
 /** Public URL for an R2 key: custom domain if configured, else through the Worker. */
 export function r2Url(env: Env, key: string | null): string | null {
   if (!key) return null;
   const base = (env.R2_PUBLIC_BASE || '').replace(/\/+$/, '');
-  return base ? `${base}/${key}` : `/r2/${key}`;
+  const path = base ? `${base}/${key}` : `/r2/${key}`;
+  return `${path}?v=${ASSET_URL_VERSION}`;
 }
 
 export function publicEvent(env: Env, e: EventRow) {

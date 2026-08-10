@@ -24,11 +24,16 @@
   --text: #e8eaee;           /* 15.7:1 on --bg */
   --muted: #949cab;          /* 6.8:1 on --bg, 5.5:1 on --field */
 
-  /* accent — primary action and current selection only, never decoration */
-  --accent: #ff5c39;
-  --accent-hover: #ff6f50;
-  --accent-press: #e8492a;
-  --accent-ink: #1b0d07;     /* 6.2:1 on --accent. White would be 3.07:1 and fails. */
+  /* Accent — primary action and current selection only, never decoration.
+     Moved off orange. Every frame in these albums is full of the event's own
+     hot orange: kit, finish banners, sponsor flags. The old #ff5c39 was that
+     same hue, so on a page made of these photos the one colour reserved for
+     "this is interactive" was also the most common colour in the content, and
+     it stopped carrying the meaning. Blue is the hue the frames do not contain. */
+  --accent: #7c8cff;         /* 6.35:1 on --bg, 5.09:1 on --field */
+  --accent-hover: #93a0ff;   /* 7.84:1 on --bg */
+  --accent-press: #6674e8;   /* 4.70:1 on --bg — press is transient, AA only */
+  --accent-ink: #0a0e2a;     /* 6.36:1 on --accent. White would be 2.98:1 and fails. */
 
   /* status */
   --ok: #3ddc97;
@@ -194,6 +199,35 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
 .notice.ok   { border-color: color-mix(in srgb, var(--ok) 45%, var(--line));   color: var(--ok); }
 .notice.warn { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); color: var(--warn); }
 
+/* ---------------------------------------------------------------- front door */
+/* The busiest page on the site used to be a list of cards and one sentence. A
+   runner arriving from an organizer's link had no way to learn that the search
+   costs nothing, needs no account, or that their selfie is matched on their own
+   phone — which is the fact that decides whether they will use it at all. */
+.masthead { padding: var(--s-2) 0 var(--s-6); }
+.masthead h1 {
+  font-size: clamp(1.875rem, 6vw, 3rem);
+  letter-spacing: -0.035em; line-height: 1.04;
+  max-width: 18ch;
+}
+.masthead .lede { font-size: var(--t-md); max-width: 54ch; margin-top: var(--s-4); }
+
+.assurances {
+  display: grid; gap: var(--s-5);
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  margin: 0 0 var(--s-7);
+  padding-top: var(--s-5);
+  border-top: 1px solid var(--line);
+}
+.assurances h3 { font-size: var(--t-base); margin: 0 0 var(--s-1); }
+.assurances p { margin: 0; color: var(--muted); font-size: var(--t-sm); }
+
+.section-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: var(--s-4); flex-wrap: wrap; margin-bottom: var(--s-4);
+}
+.section-head h2 { margin: 0; }
+
 /* -------------------------------------------------------------- event cards */
 .event-grid {
   display: grid; gap: var(--s-5);
@@ -274,6 +308,38 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
 
 .masonry .photo-tile { aspect-ratio: var(--ar, 3 / 2); }
 
+/* ---------------------------------------------------------- face crops --
+ * These albums average about nine detected faces per frame (78,382 faces
+ * across 8,523 photos on the Angkor marathon), so a face-search result is
+ * usually a pack of runners photographed side-on at distance, and at
+ * thumbnail size a person genuinely cannot tell which one is them.
+ *
+ * The search response already carries the winning face's bbox and nothing was
+ * using it. The tile crops to that box; the link underneath still opens the
+ * photographer's untouched original, watermark intact.
+ */
+.crop-tile {
+  position: relative; overflow: hidden; display: block;
+  aspect-ratio: 1; border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.crop-tile img {
+  position: absolute;
+  max-width: none;          /* the crop math sets an explicit width */
+  opacity: 0;
+  transition: opacity 320ms var(--ease);
+}
+.crop-tile img.loaded { opacity: 1; }
+
+/* Caption under a result: when the frame was taken. Tabular so a column of
+   times lines up down the page. */
+.tile-cap {
+  display: flex; justify-content: space-between; align-items: baseline;
+  gap: var(--s-2); margin-top: 6px;
+  font-size: var(--t-xs); color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 /* -------------------------------------------------------------- photo grid */
 .photo-grid {
   display: grid; gap: var(--s-3);
@@ -306,8 +372,13 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
 .photo-tile img.loaded { opacity: 1; }
 .photo-tile:hover img.loaded { transform: scale(1.04); }
 
+/* Top-right, not bottom-left.
+   Every frame in these albums is a photographer's proof: the © mark sits in the
+   bottom-left corner and the studio URL runs across the base. Pinned
+   bottom-left, this printed straight on top of the copyright on every tile.
+   Nothing of ours goes along the bottom edge of a photo. */
 .badge {
-  position: absolute; left: var(--s-2); bottom: var(--s-2);
+  position: absolute; right: var(--s-2); top: var(--s-2);
   background: rgba(0, 0, 0, 0.72); color: #fff;
   border-radius: 999px; padding: 2px var(--s-2);
   font-size: var(--t-xs); font-variant-numeric: tabular-nums;

@@ -61,6 +61,22 @@ export function loadModels(onPhase?: (p: LoadPhase) => void): Promise<void> {
     // silently falls back, so only ask for threads when it will actually work.
     if (!self.crossOriginIsolated) ort.env.wasm.numThreads = 1;
 
+    // ...and do not ask for them even then, for now.
+    //
+    // Measured 2026-08-10: with COOP/COEP set so `crossOriginIsolated` is true,
+    // this branch requested 4 threads and `InferenceSession.create` never
+    // settled — no error, no rejection, and det_500m.onnx was never even
+    // fetched. Face search hung on "Searching…" forever. Forcing 1 thread with
+    // isolation still on loaded both models immediately, which pins the cause
+    // on ORT's worker pool rather than on the headers or the model files.
+    //
+    // So the site deliberately does NOT send COOP/COEP (see
+    // apps/web/public/_headers): isolation with this line removed would silently
+    // switch every visitor onto the path that hangs. Anyone re-attempting this
+    // must verify a real end-to-end search on a real device, not just that
+    // `crossOriginIsolated` is true.
+    ort.env.wasm.numThreads = 1;
+
     const opts: ort.InferenceSession.SessionOptions = {
       executionProviders: ['wasm'],
       graphOptimizationLevel: 'all',

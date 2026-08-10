@@ -20,8 +20,44 @@ onMounted(async () => {
 </script>
 
 <template>
-  <h1>Find your race photos</h1>
-  <p class="lede">Pick your event, then search by bib number, selfie, or a photo of yourself.</p>
+  <!--
+    The front door.
+
+    This page gets more traffic than any other and used to do the least work: a
+    list of cards and one sentence. The three facts below are the ones that
+    decide whether a stranger will try the search at all — that it is free, that
+    their face never leaves their phone, and that it still works when their bib
+    doesn't. None of them were stated anywhere.
+  -->
+  <header class="masthead">
+    <h1>Find yourself in the race photos.</h1>
+    <p class="lede">
+      Pick your event, then search by the number you wore or by your own face.
+      It takes about ten seconds.
+    </p>
+  </header>
+
+  <div class="assurances">
+    <div>
+      <h3>Free, and no account</h3>
+      <p>Every photo opens full-size from the photographer's own album. There is nothing to sign up for.</p>
+    </div>
+    <div>
+      <h3>Your face stays on your phone</h3>
+      <p>The matching runs in your browser. Your selfie is never uploaded and never stored.</p>
+    </div>
+    <div>
+      <h3>Works when your bib doesn't</h3>
+      <p>Numbers get folded, covered, or turned away from the camera. Face search doesn't mind.</p>
+    </div>
+  </div>
+
+  <div class="section-head">
+    <h2>Events</h2>
+    <span v-if="!loading && events.length" class="muted small">
+      {{ plural(events.length, 'album') }} published
+    </span>
+  </div>
 
   <!-- Skeleton cards hold the grid's real shape so nothing reflows on arrival. -->
   <div v-if="loading" class="event-grid" aria-hidden="true">
@@ -65,6 +101,7 @@ onMounted(async () => {
         <div class="muted small">
           <span v-if="e.event_date">{{ formatDate(e.event_date) }} · </span>
           {{ plural(e.photo_count, 'photo') }}
+          · {{ e.bibs_enabled ? 'Bib or face' : 'Face search' }}
           <span v-if="e.status === 'partial'"> · still growing</span>
         </div>
       </div>

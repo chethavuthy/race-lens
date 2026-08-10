@@ -49,6 +49,44 @@ const memCache = new Map<string, CachedIndex>();
 const CACHE_TTL_MS = 10 * 60 * 1000;
 
 /**
+ * How many event indexes may sit in isolate memory at once.
+ *
+ * These are big: one row is 512 int8, so an event costs `faces × 512` bytes.
+ * The Angkor marathon is 78,382 faces = 38.3 MB, and a Worker isolate gets
+ * 128 MB total. The TTL above governs freshness, not residency — an entry is
+ * only ever re-read or overwritten under its own key, so without eviction every
+ * event ever searched in a warm isolate stays resident forever. Three events
+ * the size of Angkor would exceed the limit and the isolate would be killed
+ * mid-search.
+ *
+ * Two, because the realistic worst case is a runner comparing themselves across
+ * a pair of races; anything beyond that is better served by the colo-wide Cache
+ * API in fetchShard, which has no such ceiling.
+ */
+const MAX_CACHED_INDEXES = 2;
+
+/**
+ * Evict least-recently-used entries until the cache is within budget.
+ *
+ * Map iterates in insertion order, and `touch` re-inserts on every hit, so the
+ * first key is always the least recently used.
+ */
+function evictTo(limit: number): void {
+  while (memCache.size > limit) {
+    const oldest = memCache.keys().next();
+    if (oldest.done) break;
+    memCache.delete(oldest.value);
+  }
+}
+
+/** Move an entry to the most-recently-used end of the map. */
+function touch(eventId: string, idx: CachedIndex): CachedIndex {
+  memCache.delete(eventId);
+  memCache.set(eventId, idx);
+  return idx;
+}
+
+/**
  * Fetch one shard, preferring the colo's edge cache over R2.
  *
  * Module scope only helps when the same warm isolate serves the next request,
@@ -81,7 +119,10 @@ async function fetchShard(env: Env, key: string, ctx?: Waiter): Promise<Int8Arra
 
 async function loadIndex(env: Env, eventId: string, ctx?: Waiter): Promise<CachedIndex | null> {
   const hit = memCache.get(eventId);
-  if (hit && Date.now() - hit.loadedAt < CACHE_TTL_MS) return hit;
+  if (hit && Date.now() - hit.loadedAt < CACHE_TTL_MS) return touch(eventId, hit);
+  // Stale but still resident: drop it now rather than holding 38 MB of dead
+  // weight while the replacement is fetched.
+  if (hit) memCache.delete(eventId);
 
   const { results: shards } = await env.DB.prepare(
     'SELECT shard_key, row_base, row_count FROM face_shards WHERE event_id = ? ORDER BY row_base',
@@ -110,6 +151,9 @@ async function loadIndex(env: Env, eventId: string, ctx?: Waiter): Promise<Cache
 
   const idx: CachedIndex = { rows, rowCount: total, loadedAt: Date.now() };
   memCache.set(eventId, idx);
+  // Evict AFTER inserting, so the entry this request needs is never the one
+  // dropped — it is now the most recently used.
+  evictTo(MAX_CACHED_INDEXES);
   return idx;
 }
 
