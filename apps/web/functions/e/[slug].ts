@@ -91,9 +91,22 @@ export const onRequestGet: PagesFunction<Env> = async (ctx) => {
   const slug = Array.isArray(params.slug) ? params.slug[0] : params.slug;
 
   const url = new URL(request.url);
-  const shell = await env.ASSETS.fetch(new Request(new URL('/index.html', url), request));
 
-  if (!slug) return shell;
+  // Fetch the ORIGINAL url, not /index.html.
+  //
+  // _redirects carries the SPA rule `/*  /index.html  200`, and asking the
+  // asset server for /index.html directly makes it strip the `/index.html`
+  // suffix and answer 308 to `/`. That redirect then became the response —
+  // every event link bounced to the home page. Requesting /e/<slug> instead
+  // lets the same rule resolve to the shell with a 200, which is what we want
+  // to rewrite.
+  const shell = await env.ASSETS.fetch(request);
+
+  // Only rewrite an HTML page. If the asset server ever answers something else
+  // (a redirect, a 404), pass it through untouched rather than injecting a head
+  // into it.
+  const isHtml = (shell.headers.get('content-type') ?? '').includes('text/html');
+  if (!slug || !isHtml) return shell;
 
   const event = await loadEvent(env.API_BASE ?? DEFAULT_API, slug);
   if (!event) return shell;
