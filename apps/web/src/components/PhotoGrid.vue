@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import type { Photo } from '../lib/api';
 import type { GridItem } from '../lib/grid';
 import { clockTime } from '../lib/format';
@@ -20,6 +20,70 @@ const props = withDefaults(
   }>(),
   { showScore: false, animate: false, crop: false, showTime: false },
 );
+
+/* ------------------------------------------------------------ columns --
+   Items are dealt into whichever column is currently shortest, and the deal is
+   recomputed from the full list every time. That sounds wasteful and is the
+   whole point: the algorithm is deterministic and order-dependent, so the
+   placement of the first N items is identical before and after item N+1
+   arrives. Nothing already on screen can move when a page is appended.
+
+   Predicted height, not measured height. Every photo carries its real pixel
+   dimensions, so a column's height is known before a single image has decoded —
+   which is what lets the balance be right on first paint instead of settling
+   after the images land. */
+const BREAKPOINTS = [
+  { min: 1101, columns: 4 },
+  { min: 561, columns: 3 },
+  { min: 0, columns: 2 },
+];
+
+const columnCount = ref(BREAKPOINTS[0].columns);
+
+function measureColumns() {
+  const w = window.innerWidth;
+  columnCount.value = (BREAKPOINTS.find((b) => w >= b.min) ?? BREAKPOINTS[2]).columns;
+}
+
+let frame = 0;
+function onResize() {
+  cancelAnimationFrame(frame);
+  frame = requestAnimationFrame(measureColumns);
+}
+
+onMounted(() => {
+  measureColumns();
+  window.addEventListener('resize', onResize, { passive: true });
+});
+onBeforeUnmount(() => {
+  cancelAnimationFrame(frame);
+  window.removeEventListener('resize', onResize);
+});
+
+interface Placed { item: GridItem; index: number }
+
+const columns = computed<Placed[][]>(() => {
+  const n = columnCount.value;
+  const cols: Placed[][] = Array.from({ length: n }, () => []);
+  // Height relative to column width, so it is unit-free and needs no measuring.
+  const heights = new Array<number>(n).fill(0);
+
+  props.items.forEach((item, index) => {
+    let shortest = 0;
+    for (let i = 1; i < n; i++) if (heights[i] < heights[shortest]) shortest = i;
+    cols[shortest].push({ item, index });
+    const { width, height } = item.photo;
+    // A cropped tile is always square; otherwise fall back to 3:2, the ratio
+    // the tile itself falls back to when a row predates the stored dimensions.
+    heights[shortest] += props.crop
+      ? 1
+      : width && height
+        ? height / width
+        : 2 / 3;
+  });
+
+  return cols;
+});
 
 const loaded = ref(new Set<string>());
 // Thumbnails live in OUR R2 bucket. If one fails to load that is our problem —
@@ -98,14 +162,15 @@ function label(item: GridItem, i: number) {
 
 <template>
   <div class="masonry" :class="{ stagger: animate }">
-    <figure v-for="(item, i) in items" :key="item.photo.id" :style="{ '--i': i }">
+    <div v-for="(col, c) in columns" :key="c" class="masonry-col">
+      <figure v-for="{ item, index } in col" :key="item.photo.id" :style="{ '--i': index }">
       <a
         :class="cropped(item) ? 'crop-tile' : 'photo-tile'"
         :style="cropped(item) ? undefined : { '--ar': ratio(item.photo) }"
         :href="item.photo.original_url"
         target="_blank"
         rel="noopener noreferrer"
-        :aria-label="label(item, i)">
+        :aria-label="label(item, index)">
         <!-- Skeleton sits underneath and is revealed by the image's own
              transparency until it decodes, so tiles never flash empty. -->
         <div v-if="!loaded.has(item.photo.id)" class="skeleton" style="position: absolute; inset: 0" />
@@ -133,7 +198,8 @@ function label(item: GridItem, i: number) {
       <figcaption v-else-if="showTime && clockTime(item.photo.taken_at)" class="tile-cap">
         <span class="t">{{ clockTime(item.photo.taken_at) }}</span>
         <span v-if="cropped(item)">cropped to you</span>
-      </figcaption>
-    </figure>
+        </figcaption>
+      </figure>
+    </div>
   </div>
 </template>
