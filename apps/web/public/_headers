@@ -27,27 +27,28 @@
   Referrer-Policy: strict-origin-when-cross-origin
 
 # ----------------------------------------------- why there is no COOP/COEP
-# face.ts asks onnxruntime for up to 4 wasm threads whenever
-# `self.crossOriginIsolated` is true, which needs:
+# onnxruntime uses wasm threads only when `self.crossOriginIsolated` is true,
+# which needs `Cross-Origin-Opener-Policy: same-origin` and
+# `Cross-Origin-Embedder-Policy: require-corp`. Both were implemented, and the
+# hang they appeared to cause was traced and fixed — Vite never emitted
+# `ort-wasm-simd-threaded.mjs`, so Emscripten's pthread pool waited forever on
+# workers that could not boot. Pointing `ort.env.wasm.wasmPaths` at a directory
+# holding that script makes threads work in ~65 ms.
 #
-#   Cross-Origin-Opener-Policy: same-origin
-#   Cross-Origin-Embedder-Policy: require-corp
+# They are still not enabled, because with the bug fixed threads made no
+# difference. Measured warm, 10-core, Angkor album: 992/993 ms on one thread vs
+# 989/994 ms on four, of which ~280 ms is the API round-trip. The client does
+# one detection and one embedding on a single image — there is nothing to
+# parallelise. Cold start was much worse with threads (11,990 ms vs 1,902 ms).
 #
-# That was implemented and then backed out, because turning it on breaks face
-# search. Measured 2026-08-10 with both headers set: `crossOriginIsolated` went
-# true, ORT switched to its multithreaded path, and
-# `InferenceSession.create()` never settled — no error, no rejection, and the
-# model files were never requested. The search sat on "Searching…" forever.
-# Pinning numThreads to 1 with the same headers loaded both models instantly.
+# So this buys no speed and costs a constraint: under COEP every cross-origin
+# subresource must send CORP or it silently fails to load. Not worth it.
 #
-# The groundwork is done and is safe to leave in place, so a future attempt is
-# a small change rather than a risky one:
+# The groundwork is kept anyway, so a future attempt is safe rather than cheap:
 #   - the Worker sends `Cross-Origin-Resource-Policy: cross-origin` on /r2/*
-#   - public asset URLs carry ?v=N (apps/api/src/lib.ts), so a browser holding
-#     a year-old `immutable` copy without CORP re-fetches instead of showing a
-#     broken photo
+#   - public asset URLs carry ?v=N (apps/api/src/lib.ts), so a browser holding a
+#     year-old `immutable` copy from before that header refetches instead of
+#     showing a broken photo
 #
-# To retry: remove the numThreads pin in face.ts, add the two headers here and
-# to `server.headers` in vite.config.ts, and verify an END-TO-END search
-# returns photos on a real phone. `crossOriginIsolated === true` is not
-# evidence that it works — that was true the whole time it was hanging.
+# lib/face.ts pins numThreads to 1 unconditionally, so turning these headers on
+# for some other reason cannot resurrect the hang.

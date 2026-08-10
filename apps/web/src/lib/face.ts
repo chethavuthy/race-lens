@@ -61,20 +61,29 @@ export function loadModels(onPhase?: (p: LoadPhase) => void): Promise<void> {
     // silently falls back, so only ask for threads when it will actually work.
     if (!self.crossOriginIsolated) ort.env.wasm.numThreads = 1;
 
-    // ...and do not ask for them even then, for now.
+    // ...and then pin to 1 regardless. This is measured, not cargo-culted.
     //
-    // Measured 2026-08-10: with COOP/COEP set so `crossOriginIsolated` is true,
-    // this branch requested 4 threads and `InferenceSession.create` never
-    // settled — no error, no rejection, and det_500m.onnx was never even
-    // fetched. Face search hung on "Searching…" forever. Forcing 1 thread with
-    // isolation still on loaded both models immediately, which pins the cause
-    // on ORT's worker pool rather than on the headers or the model files.
+    // Threads genuinely were broken: Emscripten boots each pthread from
+    // `ort-wasm-simd-threaded.mjs` at runtime, nothing imports that file, so
+    // Vite never emitted it and `InferenceSession.create()` waited forever on
+    // workers that could not start — no error, no rejection, models never even
+    // fetched. Setting `ort.env.wasm.wasmPaths` to a directory containing that
+    // script fixes it completely; threads then boot in ~65 ms.
     //
-    // So the site deliberately does NOT send COOP/COEP (see
-    // apps/web/public/_headers): isolation with this line removed would silently
-    // switch every visitor onto the path that hangs. Anyone re-attempting this
-    // must verify a real end-to-end search on a real device, not just that
-    // `crossOriginIsolated` is true.
+    // It is pinned anyway because fixing it bought nothing. Measured on a
+    // 10-core machine against the Angkor album, warm (models already cached):
+    //
+    //     1 thread   992 / 993 ms      4 threads   989 / 994 ms
+    //
+    // of which ~280 ms is the API round-trip, so client inference is ~710 ms
+    // either way. This workload is one detection and one embedding on a single
+    // image; there is nothing for a thread pool to divide. Cold start was
+    // materially WORSE with threads (11,990 ms vs 1,902 ms) from compiling and
+    // spinning up the pool.
+    //
+    // So the site also does not send COOP/COEP (see public/_headers). Pinning
+    // here rather than relying on that means enabling those headers later — for
+    // any reason — cannot silently resurrect the hang.
     ort.env.wasm.numThreads = 1;
 
     const opts: ort.InferenceSession.SessionOptions = {
