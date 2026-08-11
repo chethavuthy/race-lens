@@ -124,6 +124,17 @@ const TELEGRAM = 'https://t.me/chethavuthy';
 const namedCredits = computed(() => credits.value.filter((c) => !!c.name));
 
 /**
+ * What to call a source with no name recorded.
+ *
+ * Numbered once there is more than one, because every live event today is
+ * unnamed — Angkor has five folders, and five rows all reading "Album from
+ * Google Drive" is a list nobody can tell apart. The number at least says which
+ * row is which until the credits are filled in.
+ */
+const creditLabel = (c: Credit, i: number) =>
+  c.name || (credits.value.length > 1 ? `Album ${i + 1} from Google Drive` : 'Album from Google Drive');
+
+/**
  * The byline for the meta line: "Sok Dara and Chan Nita".
  *
  * Truncates past three, because this shares one line with the photo count and a
@@ -646,11 +657,11 @@ async function onFile(e: Event) {
       <h2>Photos by</h2>
       <div class="card">
         <ul class="credit-list">
-          <li v-for="c in credits" :key="c.album_url" class="credit">
+          <li v-for="(c, i) in credits" :key="c.album_url" class="credit">
             <span class="who">
               <!-- An unnamed source is not given an invented byline; its album
                    link is the whole of what we can honestly say about it. -->
-              <span class="name">{{ c.name || 'Album from Google Drive' }}</span>
+              <span class="name">{{ creditLabel(c, i) }}</span>
               <span class="count muted small">{{ plural(c.photo_count, 'photo') }}</span>
             </span>
             <a class="btn" :href="c.album_url" target="_blank" rel="noopener">Open album ↗</a>
