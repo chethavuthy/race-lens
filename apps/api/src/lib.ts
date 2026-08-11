@@ -87,6 +87,44 @@ export function chunk<T>(items: T[], size: number): T[][] {
   return out;
 }
 
+/**
+ * A page size from an untrusted query param that cannot become "no limit".
+ *
+ * `Math.min(Number(q) || fallback, max)` reads as safe and is not. SQLite treats a
+ * NEGATIVE LIMIT as unbounded, and `Number('-1')` is truthy, so `?limit=-1`
+ * survived the `||`, survived `Math.min(-1, 200)`, and reached SQL as `LIMIT -1` —
+ * one unauthenticated GET returning every photo row in the event. The 200 ceiling
+ * was defeated by a minus sign.
+ *
+ * Floor, because `LIMIT 1.5` is not a thing, and reject anything below 1 rather
+ * than clamping up to it: a caller asking for 0 rows has made a mistake, and the
+ * fallback is the more useful answer than an empty page that also ends pagination.
+ */
+export function clampLimit(raw: string | undefined, fallback: number, max: number): number {
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n) || n < 1) return fallback;
+  return Math.min(n, max);
+}
+
+/**
+ * Cosine threshold from an untrusted query param, clamped to a usable band.
+ *
+ * `Number.isFinite` alone is not enough in either direction. Below zero the scan's
+ * cutoff goes negative, every row in the index becomes a candidate, and the
+ * candidate array is fully sorted — on a public, unauthenticated, unrated endpoint
+ * that already does 40M multiply-adds per call. And anything near zero returns
+ * strangers as matches, which is the one thing this product must never do; a
+ * shared URL carrying `?t=0` would do it silently.
+ *
+ * 0.2 is comfortably below the 0.38 default the UI uses, so widening a search by
+ * hand still works — it just cannot reach "match everyone".
+ */
+export function clampThreshold(raw: string | undefined, fallback: number): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(n, 0.2), 1);
+}
+
 export class HttpError extends Error {
   constructor(public status: number, message: string, public code?: string) {
     super(message);
