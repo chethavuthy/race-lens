@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env } from '../types';
 import { HttpError, chunk, newId, nowIso, timingSafeEqual } from '../lib';
-import { D1_MAX_PARAMS, invalidateIndex } from '../search';
+import { D1_MAX_PARAMS, DIM, invalidateIndex } from '../search';
 
 export const internalRoutes = new Hono<{ Bindings: Env }>();
 
@@ -575,4 +575,193 @@ internalRoutes.put('/shards/*', async (c) => {
     httpMetadata: { contentType: 'application/octet-stream' },
   });
   return c.json({ ok: true, key, bytes: body.byteLength });
+});
+
+/**
+ * Compact an event's face shards into a single R2 object.
+ *
+ * The indexer writes one shard per BATCH of 25 photos, so a large album accumulates
+ * a thousand of them — Angkor had 1006 at 81 KB average — and the count grows with
+ * every continuation pass, because run_id is fresh per invocation. Every cold face
+ * search then issues that many R2 GETs, which is the ~1 s loadMs floor measured in
+ * production and three orders of magnitude more class-B operations than one read.
+ *
+ * WHY THIS IS A SEPARATE PASS AND NOT PART OF THE WRITE PATH
+ *
+ * The per-batch flush is the durability guarantee: it is what makes an interrupted
+ * run recoverable rather than losing every embedding it had computed. Compaction
+ * must not weaken it, so it runs after the fact and leaves the write path alone.
+ * Until the D1 swap at the very end, nothing here is observable — fail anywhere
+ * earlier and the per-batch shards remain authoritative.
+ *
+ * WHY faces.row_idx NEEDS NO MIGRATION
+ *
+ * Concatenating in row_base order preserves global row order exactly, so every
+ * existing row_idx -> byte offset mapping stays valid. That is what makes this cheap
+ * enough to be worth doing at all.
+ *
+ * Body: { dry_run?: boolean, delete_old?: boolean }
+ */
+internalRoutes.post('/events/:id/compact', async (c) => {
+  const eventId = c.req.param('id');
+  const { dry_run: dryRun, delete_old: deleteOld } =
+    await c.req.json<{ dry_run?: boolean; delete_old?: boolean }>().catch(() => ({} as any));
+
+  const { results: shards } = await c.env.DB.prepare(
+    'SELECT shard_key, row_base, row_count FROM face_shards WHERE event_id = ? ORDER BY row_base',
+  ).bind(eventId).all<{ shard_key: string; row_base: number; row_count: number }>();
+  if (!shards.length) throw new HttpError(404, 'No shards for that event', 'no_shards');
+  if (shards.length === 1) {
+    return c.json({ ok: true, skipped: 'already a single shard', shards: 1 });
+  }
+
+  // The rows must tile [0, total) exactly. A gap or an overlap would shift every row
+  // after it, silently repointing thousands of faces at the wrong vector — the kind
+  // of corruption that shows up as "search returns strangers" weeks later.
+  let expectedBase = 0;
+  for (const s of shards) {
+    if (s.row_base !== expectedBase) {
+      throw new HttpError(
+        409,
+        `Shards are not contiguous: expected row_base ${expectedBase}, found ${s.row_base} ` +
+          `at ${s.shard_key}. Refusing to compact.`,
+        'not_contiguous',
+      );
+    }
+    if (!Number.isInteger(s.row_count) || s.row_count <= 0) {
+      throw new HttpError(409, `Bad row_count on ${s.shard_key}`, 'bad_row_count');
+    }
+    expectedBase += s.row_count;
+  }
+  const totalRows = expectedBase;
+  const totalBytes = totalRows * DIM;
+
+  // Verify every object exists and is exactly its declared size BEFORE writing
+  // anything. loadIndex tolerates a short shard by taking what is there and leaving
+  // the rest zeroed, which is right for a live search — one bad source should not
+  // break the event. It is wrong here: compaction would bake those zeros in
+  // permanently, where today re-uploading the shard still fixes it. So this aborts
+  // and names the offenders instead of quietly making the loss durable.
+  const bad: { key: string; expected: number; actual: number | null }[] = [];
+  for (const part of chunk(shards, 32)) {
+    const heads = await Promise.all(
+      part.map(async (s) => ({ s, head: await c.env.INDEX_BUCKET.head(s.shard_key) })),
+    );
+    for (const { s, head } of heads) {
+      const expected = s.row_count * DIM;
+      if (!head) bad.push({ key: s.shard_key, expected, actual: null });
+      else if (head.size !== expected) bad.push({ key: s.shard_key, expected, actual: head.size });
+    }
+  }
+  if (bad.length) {
+    throw new HttpError(
+      409,
+      `${bad.length} shard(s) missing or the wrong size; refusing to compact. ` +
+        bad.slice(0, 5).map((b) => `${b.key} expected ${b.expected} got ${b.actual ?? 'MISSING'}`).join('; '),
+      'bad_shards',
+    );
+  }
+
+  if (dryRun) {
+    return c.json({
+      ok: true, dry_run: true, shards: shards.length,
+      rows: totalRows, bytes: totalBytes, contiguous: true, all_present: true,
+    });
+  }
+
+  // Streamed as a multipart upload so peak memory is one part, not the whole index.
+  // 82 MB buffered in a 128 MB isolate is how the loadIndex bug happened; there is no
+  // reason to repeat it here.
+  //
+  // FIXED-SIZE parts, and this is not a style choice: R2 rejects
+  // completeMultipartUpload with "All non-trailing parts must have the same length"
+  // (10048). That is stricter than S3, which only requires >= 5 MB. Accumulating
+  // whole shards until a 5 MB threshold produced parts of differing sizes and failed
+  // at the very last call, after streaming all 83 MB. So the shards are treated as one
+  // byte stream and cut at exact PART_SIZE boundaries, which means a shard can and
+  // will straddle two parts.
+  const PART_SIZE = 8 * 1024 * 1024;
+  const key = `index/${eventId}/compact-${newId(8)}.bin`;
+  const upload = await c.env.INDEX_BUCKET.createMultipartUpload(key, {
+    httpMetadata: { contentType: 'application/octet-stream' },
+  });
+
+  const uploaded: R2UploadedPart[] = [];
+  let part = new Uint8Array(PART_SIZE);
+  let filled = 0;
+  let written = 0;
+
+  const flushFull = async () => {
+    uploaded.push(await upload.uploadPart(uploaded.length + 1, part));
+    written += PART_SIZE;
+    part = new Uint8Array(PART_SIZE);
+    filled = 0;
+  };
+
+  try {
+    for (const s of shards) {
+      const obj = await c.env.INDEX_BUCKET.get(s.shard_key);
+      if (!obj) throw new Error(`${s.shard_key} vanished mid-compaction`);
+      const bytes = new Uint8Array(await obj.arrayBuffer());
+      if (bytes.length !== s.row_count * DIM) {
+        throw new Error(`${s.shard_key} changed size mid-compaction`);
+      }
+      let at = 0;
+      while (at < bytes.length) {
+        const room = PART_SIZE - filled;
+        const take = Math.min(room, bytes.length - at);
+        part.set(bytes.subarray(at, at + take), filled);
+        filled += take;
+        at += take;
+        if (filled === PART_SIZE) await flushFull();
+      }
+    }
+    // The trailing part is the only one allowed a different length.
+    if (filled > 0) {
+      uploaded.push(await upload.uploadPart(uploaded.length + 1, part.subarray(0, filled)));
+      written += filled;
+    }
+
+    if (written !== totalBytes) {
+      throw new Error(`assembled ${written} bytes, expected ${totalBytes}`);
+    }
+    await upload.complete(uploaded);
+
+    const head = await c.env.INDEX_BUCKET.head(key);
+    if (!head || head.size !== totalBytes) {
+      throw new Error(`compact object is ${head?.size ?? 'missing'}, expected ${totalBytes}`);
+    }
+  } catch (err) {
+    // Nothing is referenced yet, so abandoning the upload leaves the event exactly as
+    // it was, still served by its per-batch shards.
+    await upload.abort().catch(() => {});
+    throw new HttpError(500, `Compaction failed, nothing changed: ${(err as Error).message}`, 'compact_failed');
+  }
+
+  // The only observable moment. One batch, so a reader either sees the thousand rows
+  // or the one — never a mixture, which would double-count every row.
+  const oldKeys = shards.map((s) => s.shard_key);
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM face_shards WHERE event_id = ?').bind(eventId),
+    c.env.DB.prepare(
+      'INSERT INTO face_shards (event_id, shard_key, row_base, row_count) VALUES (?, ?, 0, ?)',
+    ).bind(eventId, key, totalRows),
+  ]);
+  invalidateIndex(eventId);
+
+  // Off by default. The originals are unreferenced now, so keeping them costs a
+  // little storage and buys a way back if the compact object turns out wrong.
+  let deleted = 0;
+  if (deleteOld) {
+    for (const part of chunk(oldKeys, 100)) {
+      await c.env.INDEX_BUCKET.delete(part);
+      deleted += part.length;
+    }
+  }
+
+  return c.json({
+    ok: true, key, rows: totalRows, bytes: totalBytes,
+    shards_before: shards.length, parts: uploaded.length,
+    old_objects_deleted: deleted, old_objects_kept: deleteOld ? 0 : oldKeys.length,
+  });
 });

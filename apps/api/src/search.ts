@@ -63,7 +63,7 @@ const CACHE_TTL_MS = 10 * 60 * 1000;
  * budget was already blown before anything transient was counted.
  *
  * At 82 MB apiece there is no honest way to hold two. The colo-wide Cache API in
- * fetchShard is what actually serves the runner comparing two races: it has no
+ * fetchSegment is what actually serves the runner comparing two races: it has no
  * such ceiling, and a second event's shards come back from the edge rather than
  * from R2.
  *
@@ -95,16 +95,30 @@ function touch(eventId: string, idx: CachedIndex): CachedIndex {
 }
 
 /**
- * Fetch one shard, preferring the colo's edge cache over R2.
+ * Fetch one SEGMENT of a shard, preferring the colo's edge cache over R2.
  *
- * Module scope only helps when the same warm isolate serves the next request,
- * which is far from guaranteed — measured cold, a 14.65 MB R2 read costs
- * 400-1200 ms versus ~25 ms for the scan itself. The Cache API is shared by
- * every isolate in the colo, so it turns most of those misses into local reads.
+ * A segment rather than a whole object, because object size and read latency are not
+ * the same problem. Compacting Angkor's 1023 shards into one 83 MB object cut the
+ * operation count by three orders of magnitude and made cold search WORSE — measured
+ * 2281/4033/11650 ms against 1056-1297 for the shards it replaced. One object is one
+ * sequential stream; a thousand were a thousand parallel ones. Bandwidth, not
+ * per-request overhead, is what dominates here.
+ *
+ * So large objects are read as parallel ranges, which keeps compaction's win (far
+ * fewer objects, no unbounded growth per continuation pass) without paying for it in
+ * latency. Small shards are a single segment and behave exactly as before.
+ *
+ * The cache key includes the range, so a segment is cacheable independently. Shards
+ * are immutable per (event, source) — a re-index writes a new key — so a long TTL is
+ * safe.
  */
-async function fetchShard(env: Env, key: string, ctx?: Waiter): Promise<Int8Array | null> {
+async function fetchSegment(
+  env: Env, key: string, offset: number, length: number, ctx?: Waiter,
+): Promise<Int8Array | null> {
   // Synthetic key: shards are not reachable over HTTP, we only need a stable URL.
-  const cacheKey = new Request(`https://shards.race-lens.internal/${encodeURIComponent(key)}`);
+  const cacheKey = new Request(
+    `https://shards.race-lens.internal/${encodeURIComponent(key)}?o=${offset}&l=${length}`,
+  );
   const cache = caches.default;
 
   const hit = await cache.match(cacheKey);
@@ -119,19 +133,16 @@ async function fetchShard(env: Env, key: string, ctx?: Waiter): Promise<Int8Arra
   // There used to be a `?? env.BUCKET.get(key)` fallback here for events indexed
   // before that split. Verified on 2026-08-11 with `ListObjectsV2` on the public
   // bucket: zero objects under `index/`. So the fallback could only ever return
-  // null, which makes removing it a no-op for behaviour and one fewer wasted R2 GET
-  // per shard miss.
+  // null, which makes removing it a no-op for behaviour.
   //
   // Do not reintroduce it. It was the one code path that could serve a biometric
   // vector out of a bucket published at img.runlytics.fit, and its existence was
   // also the reason nobody would have noticed a leftover sitting there.
   // tools/check-index-leak.py re-runs that check.
-  const obj = await env.INDEX_BUCKET.get(key);
+  const obj = await env.INDEX_BUCKET.get(key, { range: { offset, length } });
   if (!obj) return null;
   const buf = await obj.arrayBuffer();
 
-  // Shards are immutable per (event, source): a re-index writes a new object or
-  // the same bytes, so a long TTL is safe.
   const store = new Response(buf, {
     headers: { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' },
   });
@@ -139,6 +150,34 @@ async function fetchShard(env: Env, key: string, ctx?: Waiter): Promise<Int8Arra
   else await cache.put(cacheKey, store);
 
   return new Int8Array(buf);
+}
+
+/** One contiguous read: which object, which byte range, and where it lands in `rows`. */
+interface Segment { key: string; offset: number; length: number; destByte: number }
+
+/**
+ * Split the shard list into read units of at most SEGMENT_BYTES.
+ *
+ * 4 MB is a deliberate middle: large enough that per-request overhead is amortised,
+ * small enough that a 83 MB index becomes ~21 parallel reads rather than one stream.
+ */
+const SEGMENT_BYTES = 4 * 1024 * 1024;
+
+function planSegments(shards: ShardMeta[]): Segment[] {
+  const out: Segment[] = [];
+  for (const s of shards) {
+    const total = s.row_count * DIM;
+    const base = s.row_base * DIM;
+    for (let off = 0; off < total; off += SEGMENT_BYTES) {
+      out.push({
+        key: s.shard_key,
+        offset: off,
+        length: Math.min(SEGMENT_BYTES, total - off),
+        destByte: base + off,
+      });
+    }
+  }
+  return out;
 }
 
 async function loadIndex(env: Env, eventId: string, ctx?: Waiter): Promise<CachedIndex | null> {
@@ -167,42 +206,36 @@ async function loadIndex(env: Env, eventId: string, ctx?: Waiter): Promise<Cache
   evictTo(MAX_CACHED_INDEXES - 1);
   const rows = new Int8Array(total * DIM);
 
-  // Windowed, but the window has to be WIDE — and the width is measured, not chosen.
+  // Windowed, and the window has to be WIDE. Measured on production, cold, loadMs:
   //
-  // Promise.all over every shard held all of their ArrayBuffers at once: for Angkor
-  // that is 1006 buffers totalling another 82 MB, a second full copy of the index on
-  // top of the one just allocated.
+  //     unbounded (1023 objects at once)   23865, 1089, 1409, 938
+  //     IN_FLIGHT = 64                      7193, 22161, 2159
+  //     IN_FLIGHT = 256                     1001, 1064, 1417, 0*, 1417   (* memCache hit)
   //
-  // The obvious fix is a small window, and it is a trap that cost a production
-  // outage. The comment that used to sit here claimed "shard count is small (one per
-  // source folder)". It is not: the indexer names shards
-  // `index/<event>/<source>-<run>-b<batch>.bin` — one per BATCH of 25 photos — so
-  // Angkor has 1006. A window of 2 is therefore 503 sequential R2 round trips, and a
-  // cold face search stopped answering inside 120 s.
+  // A narrow window is a trap that cost a production outage: the comment that used to
+  // sit here claimed shard count was "small (one per source folder)", when the indexer
+  // writes one per BATCH of 25 photos — 1023 for Angkor. A window of 2 is 500+
+  // sequential round trips and a cold search stopped answering inside 120 s.
   //
-  // Measured on production, cold, loadMs over repeated runs:
-  //
-  //     unbounded (1006 at once)   23865, 1089, 1409, 938
-  //     IN_FLIGHT = 64             7193, 22161, 2159
-  //     IN_FLIGHT = 256            1001, 1064, 1417, 0*, 1417
-  //
-  //     * 0 ms is an in-isolate memCache hit, i.e. the cache above working.
-  //
-  // 256 is indistinguishable from unbounded while capping transient buffers at
-  // ~256 x 81 KB = 20 MB instead of 82 MB. Do not lower it without re-measuring:
-  // the shard count, not the byte count, is what sets the floor here.
-  const IN_FLIGHT = 256;
-  for (let i = 0; i < shards.length; i += IN_FLIGHT) {
-    const window = shards.slice(i, i + IN_FLIGHT);
-    const bufs = await Promise.all(window.map((s) => fetchShard(env, s.shard_key, ctx)));
+  // Reads are now segments rather than whole objects, so this bounds concurrent
+  // in-flight bytes at IN_FLIGHT * SEGMENT_BYTES worst case. With 4 MB segments that
+  // is why the count is lower than the 256 measured above: 32 * 4 MB = 128 MB of
+  // potential buffers would be as bad as the bug this replaced, so keep the product
+  // modest and let the segment count supply the parallelism.
+  const IN_FLIGHT = 16;
+  const segments = planSegments(shards);
+  for (let i = 0; i < segments.length; i += IN_FLIGHT) {
+    const window = segments.slice(i, i + IN_FLIGHT);
+    const bufs = await Promise.all(
+      window.map((seg) => fetchSegment(env, seg.key, seg.offset, seg.length, ctx)),
+    );
     for (let j = 0; j < window.length; j++) {
       const buf = bufs[j];
       if (!buf) continue;
-      const s = window[j];
-      const expected = s.row_count * DIM;
-      // A short shard means a truncated upload; take what is there rather than
+      const seg = window[j];
+      // A short read means a truncated upload; take what is there rather than
       // throwing, so one bad source cannot break search for the whole event.
-      rows.set(buf.subarray(0, Math.min(buf.length, expected)), s.row_base * DIM);
+      rows.set(buf.subarray(0, Math.min(buf.length, seg.length)), seg.destByte);
     }
   }
 

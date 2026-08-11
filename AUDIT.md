@@ -916,18 +916,62 @@ A stale comment was treated as a fact by both the audit and the fix. The shard c
 
 ---
 
-## P9 · One R2 object per 25 photos — NEW, found during deployment
+## P9 · One R2 object per 25 photos — FIXED, and the obvious fix was wrong
 
-**Severity: Medium** (architectural; not addressed)
-**Location:** [indexer/main.py:305](indexer/main.py#L305)
+**Severity: Medium** — **resolved**
+**Location:** [indexer/main.py:305](indexer/main.py#L305), [search.ts](apps/api/src/search.ts), [internal.ts](apps/api/src/routes/internal.ts)
 
-```python
-shard_key = f"index/{args.event_id}/{args.source_id}-{args.run_id}-b{batch_no}.bin"
-```
+The indexer names shards `index/<event>/<source>-<run>-b<batch>.bin` — one per batch of
+25 photos — so Angkor accumulated **1,023**, and the count grows with every
+continuation pass because `run_id` is fresh per invocation.
 
-Angkor has **1006 shards averaging 81 KB**. Every cold face search issues 1006 R2 GETs, which is what makes `loadMs` ~1 s at best and what made a narrow fetch window catastrophic. It also means 1006 class-B operations per cold load, and the count grows without bound: every continuation pass adds more, since `run_id` is fresh per invocation.
+### The obvious fix made it worse
 
-Compacting an event's shards into one object after indexing finishes would turn 1006 GETs into 1, and is the single largest available win on this path. Deliberately **not** done here — it changes the durability story the per-batch flush exists to provide (C4), so it needs its own design rather than being folded into a fix for something else.
+Compacting into a single 83 MB object cut the object count by three orders of
+magnitude and **increased** cold latency. Measured on production:
+
+| layout | cold `loadMs` |
+|---|---|
+| 1,023 shards, 256-way parallel | 1056, 1211, 1297, 5854 |
+| 1 object, read sequentially | **2281, 4033, 11650** |
+| 1 object, ~21 parallel 4 MB ranges | **232, 350, 434, 470, 675** |
+
+The premise — that per-request overhead across a thousand objects was the cost driver
+— was wrong. **Bandwidth is.** A thousand shards were a thousand parallel streams; one
+object was one. Object count was never the thing to optimise; concurrency was.
+
+### What shipped
+
+Reads are now **segments**, not objects: `planSegments` splits every shard into ≤4 MB
+ranges and `fetchSegment` reads them with `range:` and caches each independently. Small
+shards are one segment and behave exactly as before; a large compact object becomes ~21
+parallel reads. That keeps compaction's real benefits — bounded object count, no
+unbounded growth per pass, 21 operations instead of 1,023 — without paying latency for
+them. Net against the original sharded layout: **~2–4× faster cold.**
+
+`POST /api/internal/events/:id/compact` performs the compaction. It refuses unless the
+shard rows tile `[0, total)` exactly and every object is present at its declared size —
+`loadIndex` tolerates a short shard by zero-filling, which is right for a live search
+but would bake the loss in permanently here. It streams through a multipart upload so
+peak memory is one part, swaps the D1 rows in a single batch (so a reader sees the
+thousand rows or the one, never a mixture), and keeps the originals unless
+`delete_old` is passed.
+
+Two things learned the hard way:
+
+- **R2 requires all non-trailing multipart parts to be the same length** (error 10048),
+  which is stricter than S3's ≥5 MB. Accumulating whole shards to a threshold produced
+  variable parts and failed at `complete`, after streaming all 83 MB. Parts are now cut
+  at fixed offsets, so a shard can straddle two.
+- The failure was safe, which is the design working: nothing is referenced until the
+  D1 swap, so the aborted run left the event untouched and still serving.
+
+Applied to all three events; recall verified byte-identical afterwards (same 49
+matches, same top hit at 0.871, same score sequence).
+
+**Not wired into `/finalize` on purpose.** A long continuation chain would recompact
+83 MB after each of up to 61 passes. It belongs behind a shard-count threshold, or
+stays manual.
 
 ---
 
