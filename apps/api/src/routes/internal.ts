@@ -189,9 +189,21 @@ internalRoutes.post('/events/:id/photos', async (c) => {
   // Without this the insert trips the photos->sources foreign key and surfaces
   // as an opaque 500 in the runner log. Fail with something diagnosable.
   const source = await c.env.DB.prepare(
-    'SELECT id FROM sources WHERE id = ? AND event_id = ?',
-  ).bind(source_id, eventId).first();
+    'SELECT id, removed_at FROM sources WHERE id = ? AND event_id = ?',
+  ).bind(source_id, eventId).first<{ id: string; removed_at: string | null }>();
   if (!source) throw new HttpError(400, `No source ${source_id} on event ${eventId}`, 'no_source');
+
+  // A pass already in flight when the photographer withdrew their link must not
+  // land its photos. Removal marks the source and then deletes in batches, so a
+  // runner mid-album is the one writer that could otherwise put rows back behind
+  // the purge — and every one of them would be a photo we promised to take down.
+  if (source.removed_at) {
+    throw new HttpError(
+      410,
+      `Source ${source_id} was removed at the photographer's request`,
+      'source_removed',
+    );
+  }
 
   // Validate drive_file_id, because this column later becomes a shell argument.
   //
@@ -544,8 +556,12 @@ internalRoutes.post('/events/:id/finalize', async (c) => {
   // already-complete link, so it took one button press to mislabel the event.
   // Verify the claim against every source instead of taking the runner's word.
   const short = await c.env.DB.prepare(
+    // A withdrawn link is short by design — its photos are being deleted on
+    // request — so counting it here would pin the event at 'partial' forever and
+    // put "some photos are still missing from the photographer" under the title
+    // of an album that is exactly as complete as it is meant to be.
     `SELECT COUNT(*) AS n FROM sources s
-      WHERE s.event_id = ?
+      WHERE s.event_id = ? AND s.removed_at IS NULL
         AND COALESCE(s.discovered, 0) >
             (SELECT COUNT(*) FROM photos p WHERE p.source_id = s.id)`,
   ).bind(eventId).first<{ n: number }>();

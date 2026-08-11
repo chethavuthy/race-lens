@@ -20,7 +20,10 @@ app.use('/api/*', (c, next) =>
       return allowed.includes(origin) ? origin : allowed[0];
     },
     allowHeaders: ['Content-Type', 'X-Ingest-Secret'],
-    allowMethods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+    // DELETE is here for /api/admin/sources/:id — the link takedown. Omitting it
+    // fails the preflight, so the removal would be refused by the browser before
+    // the Worker ever saw it, on every origin except the same-origin custom domain.
+    allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     maxAge: 86400,
   })(c, next),
 );

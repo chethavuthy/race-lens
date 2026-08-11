@@ -336,9 +336,15 @@ export async function searchFaces(
   const pages = await env.DB.batch<any>(
     parts.map((part) =>
       env.DB.prepare(
+        // The removed-source clause matches the one in public.ts: a withdrawn link
+        // is unsearchable from the moment it is withdrawn, not from whenever the
+        // batched purge of its photos happens to finish. Its vectors are still in
+        // the shards this scan read — the join is what drops them.
         `SELECT f.row_idx, f.bbox, p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.taken_at
            FROM faces f JOIN photos p ON p.id = f.photo_id
-          WHERE f.event_id = ? AND f.row_idx IN (${part.map(() => '?').join(',')})`,
+          WHERE f.event_id = ? AND f.row_idx IN (${part.map(() => '?').join(',')})
+            AND NOT EXISTS (
+              SELECT 1 FROM sources s WHERE s.id = p.source_id AND s.removed_at IS NOT NULL)`,
       ).bind(eventId, ...part),
     ),
   );

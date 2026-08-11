@@ -248,8 +248,21 @@ adminRoutes.post('/ingest', async (c) => {
   // The admin page then listed the same link several times, most with zero
   // photos, and any per-source total became nonsense.
   const existing = await c.env.DB.prepare(
-    'SELECT id, image_source FROM sources WHERE event_id = ? AND drive_folder_id = ?',
-  ).bind(event_id, folderId).first<{ id: string; image_source: string }>();
+    'SELECT id, image_source, removed_at FROM sources WHERE event_id = ? AND drive_folder_id = ?',
+  ).bind(event_id, folderId).first<{ id: string; image_source: string; removed_at: string | null }>();
+
+  // A withdrawn folder is not re-indexed by pasting its link again.
+  //
+  // The upsert below would otherwise happily revive it, and the event page
+  // promises the photographer the opposite. Undoing a removal is a deliberate,
+  // separate act — POST /sources/:id/restore — so it can never happen by reflex.
+  if (existing?.removed_at) {
+    throw new HttpError(
+      409,
+      'That link was removed at the photographer’s request. Restore it from the Drive links list first.',
+      'source_removed',
+    );
+  }
 
   // An omitted image_source means "leave it alone", not "reset to original".
   //
@@ -325,6 +338,7 @@ adminRoutes.get('/events/:id/report', async (c) => {
 
   const { results: sources } = await c.env.DB.prepare(
     `SELECT s.id, s.drive_folder_id, s.drive_url, s.discovered, s.added_at, s.image_source,
+            s.credit_name, s.removed_at,
             (SELECT COUNT(*) FROM photos p WHERE p.source_id = s.id) AS indexed
        FROM sources s WHERE s.event_id = ? ORDER BY s.added_at`,
   ).bind(eventId).all<any>();
@@ -403,18 +417,30 @@ adminRoutes.get('/events/:id/report', async (c) => {
     // discovered is 0 for sources indexed before it was recorded. Zero is not
     // "found nothing", it is "not known" — reporting it as a shortfall invented
     // missing photos that did not exist.
-    discovered_known: (s.discovered ?? 0) > 0,
-    missing: (s.discovered ?? 0) > 0 ? Math.max(0, s.discovered - (s.indexed ?? 0)) : 0,
+    //
+    // A withdrawn link is never short either: its photos are being deleted on
+    // purpose, so counting the gap against `discovered` would report thousands of
+    // "missing" photos and an event stuck at 'partial' for doing exactly what was
+    // asked. It is listed, with its removal shown, and left out of the arithmetic.
+    discovered_known: !s.removed_at && (s.discovered ?? 0) > 0,
+    missing: !s.removed_at && (s.discovered ?? 0) > 0
+      ? Math.max(0, s.discovered - (s.indexed ?? 0))
+      : 0,
   }));
+
+  // Withdrawn links stay in `sources` — the organizer needs to see that a link was
+  // removed and by when — but every total is about the album that still exists.
+  const liveSources = withMissing.filter((s) => !s.removed_at);
 
   return c.json({
     sources: withMissing,
     totals: {
-      links: withMissing.length,
-      found: withMissing.reduce((n, s) => n + (s.discovered_known ? s.discovered : 0), 0),
-      found_known: withMissing.every((s) => s.discovered_known),
+      links: liveSources.length,
+      removed_links: withMissing.length - liveSources.length,
+      found: liveSources.reduce((n, s) => n + (s.discovered_known ? s.discovered : 0), 0),
+      found_known: liveSources.every((s) => s.discovered_known),
       indexed: live?.n ?? 0,
-      missing: withMissing.reduce((n, s) => n + s.missing, 0),
+      missing: liveSources.reduce((n, s) => n + s.missing, 0),
     },
     quality: {
       photos: q?.photos ?? 0,
@@ -448,18 +474,150 @@ adminRoutes.get('/events/:id/report', async (c) => {
  *
  * Photos already indexed are NOT re-fetched — the setting applies to whatever
  * is still missing, so switching costs nothing already spent.
+ *
+ * Also where the photographer's byline is set. Both fields are optional and applied
+ * independently: the image-size toggle and the credit box are two controls on the
+ * same row, and sending one must not blank the other.
  */
 adminRoutes.patch('/sources/:id', async (c) => {
   const sourceId = c.req.param('id');
-  const { image_source } = await c.req.json<{ image_source?: string }>().catch(() => ({}) as any);
-  if (image_source !== 'thumb' && image_source !== 'original') {
-    throw new HttpError(400, "image_source must be 'thumb' or 'original'", 'bad_image_source');
+  const body = await c.req.json<{ image_source?: string; credit_name?: string | null }>()
+    .catch(() => ({}) as any);
+
+  const sets: string[] = [];
+  const binds: (string | null)[] = [];
+
+  if (body.image_source !== undefined) {
+    if (body.image_source !== 'thumb' && body.image_source !== 'original') {
+      throw new HttpError(400, "image_source must be 'thumb' or 'original'", 'bad_image_source');
+    }
+    sets.push('image_source = ?');
+    binds.push(body.image_source);
   }
+
+  if (body.credit_name !== undefined) {
+    // An empty box means "no name recorded", which is a real state the event page
+    // renders (album link alone) — so it is stored as NULL rather than as ''.
+    const name = String(body.credit_name ?? '').trim();
+    if (name.length > 80) throw new HttpError(400, 'A credit is at most 80 characters', 'bad_credit');
+    sets.push('credit_name = ?');
+    binds.push(name || null);
+  }
+
+  if (!sets.length) {
+    throw new HttpError(400, 'Nothing to update — send image_source or credit_name', 'bad_request');
+  }
+
   const r = await c.env.DB.prepare(
-    'UPDATE sources SET image_source = ? WHERE id = ?',
-  ).bind(image_source, sourceId).run();
+    `UPDATE sources SET ${sets.join(', ')} WHERE id = ?`,
+  ).bind(...binds, sourceId).run();
   if (!r.meta.changes) throw new HttpError(404, 'Link not found', 'no_source');
-  return c.json({ ok: true, image_source });
+  return c.json({ ok: true });
+});
+
+/**
+ * How many photos one purge round deletes, and how many rounds run per request.
+ *
+ * A round is a SELECT, a handful of chunked DELETE batches, and one R2 bulk
+ * delete; four of them fit comfortably inside a request while staying far below
+ * the subrequest ceiling. An 8,500-photo album is therefore two or three calls,
+ * which the admin page makes in a loop — the alternative is a single request that
+ * times out on exactly the albums where removal matters most.
+ */
+const PURGE_BATCH = 500;
+const PURGE_ROUNDS = 4;
+
+/**
+ * Take a photographer's link off the site, at their request.
+ *
+ * They message @chethavuthy on Telegram; this is what answers them. Removal is per
+ * LINK, which is the unit the photographer owns: the source is marked withdrawn —
+ * which hides it from every public query immediately, see NOT_REMOVED in public.ts —
+ * and then its photos, thumbnails, faces and bibs are deleted in batches.
+ *
+ * The source ROW survives, holding removed_at. It has to: POST /ingest upserts on
+ * (event_id, drive_folder_id), so this row is the only memory that the folder was
+ * withdrawn, and without it the next paste of the link re-indexes the album.
+ *
+ * Face VECTORS stay in their R2 shards. A shard is an immutable byte range that
+ * every later row_idx is defined against, so rewriting one to excise rows would
+ * renumber the whole event's index. With no faces row pointing at them they cannot
+ * be joined back to a photo by any query — unreachable, not merely hidden.
+ */
+adminRoutes.delete('/sources/:id', async (c) => {
+  const sourceId = c.req.param('id');
+  const src = await c.env.DB.prepare(
+    'SELECT id, event_id, removed_at FROM sources WHERE id = ?',
+  ).bind(sourceId).first<{ id: string; event_id: string; removed_at: string | null }>();
+  if (!src) throw new HttpError(404, 'Link not found', 'no_source');
+
+  // Idempotent: the admin page calls this repeatedly to finish a long purge, and
+  // only the first call sets the timestamp.
+  if (!src.removed_at) {
+    await c.env.DB.prepare('UPDATE sources SET removed_at = ? WHERE id = ?')
+      .bind(nowIso(), sourceId).run();
+  }
+
+  let purged = 0;
+  for (let round = 0; round < PURGE_ROUNDS; round++) {
+    const { results: batch } = await c.env.DB.prepare(
+      'SELECT id, thumb_key FROM photos WHERE source_id = ? LIMIT ?',
+    ).bind(sourceId, PURGE_BATCH).all<{ id: string; thumb_key: string | null }>();
+    if (!batch.length) break;
+
+    const ids = batch.map((p) => p.id);
+    for (const part of chunk(ids, 90)) {
+      const marks = part.map(() => '?').join(',');
+      // Order matters: the child rows reference photos(id), so photos goes last.
+      await c.env.DB.batch([
+        c.env.DB.prepare(`DELETE FROM faces WHERE photo_id IN (${marks})`).bind(...part),
+        c.env.DB.prepare(`DELETE FROM bibs WHERE photo_id IN (${marks})`).bind(...part),
+        c.env.DB.prepare(`DELETE FROM bib_rejects WHERE photo_id IN (${marks})`).bind(...part),
+        c.env.DB.prepare(`DELETE FROM photos WHERE id IN (${marks})`).bind(...part),
+      ]);
+    }
+
+    // The thumbnails are the copies Race Lens itself published, so they go too —
+    // leaving them would keep the photographer's work served from our bucket after
+    // they asked for it to stop.
+    const keys = batch.map((p) => p.thumb_key).filter((k): k is string => !!k);
+    if (keys.length) await c.env.BUCKET.delete(keys);
+
+    purged += batch.length;
+  }
+
+  const left = await c.env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM photos WHERE source_id = ?',
+  ).bind(sourceId).first<{ n: number }>();
+
+  // Recount every call, not only on the last one: the event page shows this number
+  // beside its title, and mid-purge it should read the truth rather than a total
+  // that includes photos already gone.
+  const counts = await c.env.DB.prepare(
+    `SELECT (SELECT COUNT(*) FROM photos WHERE event_id = ?1) AS photos,
+            (SELECT COUNT(*) FROM faces  WHERE event_id = ?1) AS faces`,
+  ).bind(src.event_id).first<{ photos: number; faces: number }>();
+  await c.env.DB.prepare('UPDATE events SET photo_count = ?, face_count = ? WHERE id = ?')
+    .bind(counts?.photos ?? 0, counts?.faces ?? 0, src.event_id).run();
+
+  return c.json({ ok: true, purged, remaining: left?.n ?? 0 });
+});
+
+/**
+ * Undo a removal — for the case where it was done to the wrong link.
+ *
+ * This does NOT bring the photos back; they were deleted. It clears the flag so
+ * the link can be re-indexed, and the caller still has to press Re-index. Two
+ * deliberate steps, because a photographer's withdrawal should not be reversible
+ * by one stray click.
+ */
+adminRoutes.post('/sources/:id/restore', async (c) => {
+  const sourceId = c.req.param('id');
+  const r = await c.env.DB.prepare(
+    'UPDATE sources SET removed_at = NULL WHERE id = ?',
+  ).bind(sourceId).run();
+  if (!r.meta.changes) throw new HttpError(404, 'Link not found', 'no_source');
+  return c.json({ ok: true });
 });
 
 adminRoutes.post('/sources/:id/reindex', async (c) => {

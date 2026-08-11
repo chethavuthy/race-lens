@@ -23,16 +23,42 @@ publicRoutes.get('/events', async (c) => {
   return c.json({ events: results.map((e) => publicEvent(c.env, e)) });
 });
 
+/**
+ * Photos whose source has been withdrawn are gone from the public site at once.
+ *
+ * DELETE /api/admin/sources/:id deletes the photo rows too, but it does that in
+ * batches — a 5,000-photo album is several requests' worth of work. This clause is
+ * what makes the promise on the event page true from the first one: the moment
+ * removed_at is set, nothing from that link can be browsed, paged, or searched,
+ * whatever is left to purge.
+ */
+const NOT_REMOVED =
+  'AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id = p.source_id AND s.removed_at IS NOT NULL)';
+
 publicRoutes.get('/events/:slug', async (c) => {
   const event = await getEventBySlug(c.env, c.req.param('slug'));
   const { results } = await c.env.DB.prepare(
-    `SELECT id, drive_file_id, thumb_key, width, height, taken_at
-       FROM photos WHERE event_id = ? ORDER BY id LIMIT 60`,
+    `SELECT p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.taken_at
+       FROM photos p WHERE p.event_id = ? ${NOT_REMOVED} ORDER BY p.id LIMIT 60`,
   ).bind(event.id).all<any>();
+
+  // Who shot what. One row per live source, biggest contribution first, so the
+  // page can name them in the order that matches how much of the album is theirs.
+  const { results: credits } = await c.env.DB.prepare(
+    `SELECT s.credit_name AS name, s.drive_url AS album_url,
+            (SELECT COUNT(*) FROM photos p WHERE p.source_id = s.id) AS photo_count
+       FROM sources s
+      WHERE s.event_id = ? AND s.removed_at IS NULL
+      ORDER BY photo_count DESC, s.added_at`,
+  ).bind(event.id).all<{ name: string | null; album_url: string; photo_count: number }>();
+
   return c.json({
     event: publicEvent(c.env, event),
     photos: results.map((p) => publicPhoto(c.env, p)),
     cursor: results.length === 60 ? results[results.length - 1].id : null,
+    // A source that indexed nothing yet is not a credit — there is no work of
+    // theirs on the page to credit.
+    credits: credits.filter((cr) => cr.photo_count > 0),
   });
 });
 
@@ -42,8 +68,8 @@ publicRoutes.get('/events/:slug/photos', async (c) => {
   const cursor = c.req.query('cursor') ?? '';
   // Keyset pagination on the primary key — stable and index-only.
   const { results } = await c.env.DB.prepare(
-    `SELECT id, drive_file_id, thumb_key, width, height, taken_at
-       FROM photos WHERE event_id = ? AND id > ? ORDER BY id LIMIT ?`,
+    `SELECT p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.taken_at
+       FROM photos p WHERE p.event_id = ? AND p.id > ? ${NOT_REMOVED} ORDER BY p.id LIMIT ?`,
   ).bind(event.id, cursor, limit).all<any>();
   return c.json({
     photos: results.map((p) => publicPhoto(c.env, p)),
@@ -68,7 +94,7 @@ publicRoutes.get('/events/:slug/bib/:bib', async (c) => {
   const select = `SELECT p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.taken_at,
                          b.conf, b.bib, b.bib_raw
                     FROM bibs b JOIN photos p ON p.id = b.photo_id
-                   WHERE b.event_id = ?`;
+                   WHERE b.event_id = ? ${NOT_REMOVED}`;
 
   // Exact match on the normalized number. Both sides strip leading zeros, so
   // "0056", "056" and "56" all resolve to the same runner.
