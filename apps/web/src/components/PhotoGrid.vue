@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { Photo } from '../lib/api';
 import type { GridItem } from '../lib/grid';
 import { clockTime } from '../lib/format';
@@ -98,15 +98,27 @@ const failed = ref(new Set<string>());
 
 // A photo row with no thumb key never renders an image element, so no error
 // event ever fires — mark it up front or its tile sits on the skeleton forever.
-props.items.forEach((it) => { if (!it.photo.thumb_url) failed.value.add(it.photo.id); });
+//
+// Watched, not run once at setup. `items` grows as the browse grid appends pages
+// and is replaced wholesale by a search, so a one-shot pass only ever saw the
+// first page: a thumb-less photo arriving later kept its skeleton indefinitely.
+watch(
+  () => props.items,
+  (items) => {
+    for (const it of items) if (!it.photo.thumb_url) failed.value.add(it.photo.id);
+  },
+  { immediate: true },
+);
 
 /**
  * Reserve the tile's exact box before the image decodes.
  *
  * This is what makes a masonry column stable: without it every image resolves
  * at its natural height and the columns re-flow underneath the reader's thumb.
- * width/height come off Drive's imageMediaMetadata at index time and are
- * already on the Photo the client receives, so it costs nothing.
+ * width/height are the DECODED FRAME's dimensions, recorded by the indexer from
+ * the same array the detector ran on (see make_thumbnail), so they share a
+ * coordinate space with the bbox cropStyle divides them by. They arrive on the
+ * Photo the client already receives, so this costs nothing.
  */
 function ratio(p: Photo): string {
   return p.width && p.height ? `${p.width} / ${p.height}` : '3 / 2';

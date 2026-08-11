@@ -148,9 +148,22 @@ function nms(faces: DetectedFace[], iouThresh = 0.4): DetectedFace[] {
   return keep;
 }
 
-export async function detect(bitmap: ImageBitmap, scoreThresh = 0.5): Promise<DetectedFace[]> {
+/**
+ * `rgba` lets a caller that has already read the pixels back skip a second pass.
+ *
+ * Only `w`/`h` are used here — the model reads from its own letterboxed 640x640
+ * canvas — but embedLargestFace needs the full-resolution pixels for normCrop, and
+ * reading them twice cost a second full-frame drawImage plus a second
+ * getImageData. On a 12 MP phone photo that is another 48 MB of RGBA and another
+ * GPU->CPU sync, on the devices least able to absorb either.
+ */
+export async function detect(
+  bitmap: ImageBitmap,
+  scoreThresh = 0.5,
+  rgba?: { data: Uint8ClampedArray; w: number; h: number },
+): Promise<DetectedFace[]> {
   await loadModels();
-  const { data, w, h } = drawToRgba(bitmap);
+  const { w, h } = rgba ?? drawToRgba(bitmap);
 
   // Letterbox into the top-left of a 640x640 canvas, exactly as insightface does.
   const imRatio = h / w;
@@ -354,21 +367,27 @@ export async function embedLargestFace(
   source: Blob | HTMLVideoElement | HTMLCanvasElement,
 ): Promise<{ vec: number[]; bbox: [number, number, number, number]; faceCount: number }> {
   const bitmap = await toBitmap(source);
-  const faces = await detect(bitmap);
-  if (!faces.length) throw new NoFaceError();
+  try {
+    // One decode, one getImageData, shared by detection and alignment.
+    const rgba = drawToRgba(bitmap);
+    const faces = await detect(bitmap, 0.5, rgba);
+    if (!faces.length) throw new NoFaceError();
 
-  // Largest, not highest-scoring: in a selfie the subject is the big face, and
-  // a sharp bystander in the background can easily out-score them.
-  const face = faces.reduce((best, f) => {
-    const area = (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]);
-    const bestArea = (best.bbox[2] - best.bbox[0]) * (best.bbox[3] - best.bbox[1]);
-    return area > bestArea ? f : best;
-  });
+    // Largest, not highest-scoring: in a selfie the subject is the big face, and
+    // a sharp bystander in the background can easily out-score them.
+    const face = faces.reduce((best, f) => {
+      const area = (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]);
+      const bestArea = (best.bbox[2] - best.bbox[0]) * (best.bbox[3] - best.bbox[1]);
+      return area > bestArea ? f : best;
+    });
 
-  const { data, w, h } = drawToRgba(bitmap);
-  const aligned = normCrop(data, w, h, face.landmarks);
-  const vec = await embedAligned(aligned);
-  bitmap.close();
-
-  return { vec: Array.from(vec), bbox: face.bbox, faceCount: faces.length };
+    const aligned = normCrop(rgba.data, rgba.w, rgba.h, face.landmarks);
+    const vec = await embedAligned(aligned);
+    return { vec: Array.from(vec), bbox: face.bbox, faceCount: faces.length };
+  } finally {
+    // In a finally, because close() used to sit on the success path only — so the
+    // routine no-face case leaked the decoded bitmap every time, and the empty
+    // state exists specifically to invite another attempt.
+    bitmap.close();
+  }
 }

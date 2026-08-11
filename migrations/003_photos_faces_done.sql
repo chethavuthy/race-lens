@@ -1,0 +1,33 @@
+-- photos.faces_done — make the resume key mean "vectors are durable".
+--
+--   npx wrangler d1 execute race-lens --local  --config apps/api/wrangler.toml \
+--     --file=./migrations/003_photos_faces_done.sql
+--   npx wrangler d1 execute race-lens --remote --config apps/api/wrangler.toml \
+--     --file=./migrations/003_photos_faces_done.sql
+--
+-- SQLite has no ADD COLUMN IF NOT EXISTS, so re-running this errors with
+-- "duplicate column name". That error is safe and means it is already applied.
+--
+-- WHY
+--
+-- put_photos commits photo rows at the START of a batch; the shard flush happens
+-- at the END. Anything in between — a reclaimed runner, an OOM, a raise from
+-- put_bibs — leaves up to BATCH_SIZE photos present with zero faces. The resume
+-- key was "a photo row exists", so the next pass skipped exactly those and never
+-- recomputed them, while finalize compared discovered against the photo count,
+-- matched, and marked the event 'ready'. The photos are in the album, invisible to
+-- face search, and indistinguishable from photos that genuinely contain nobody.
+--
+-- WHY DEFAULT 1 AND NOT 0
+--
+-- DEFAULT 0 would backfill every existing photo as "not done", so the very next
+-- pass would re-download every photo of every event — straight into the Drive
+-- quota that resume exists to avoid, and that the whole image_source='thumb'
+-- feature was built to work around. Legacy rows are therefore trusted as done.
+--
+-- That means this migration does NOT retroactively recover photos already
+-- stranded by the old behaviour. Nothing safe can: telling them apart from photos
+-- that legitimately contain no face requires re-processing both populations.
+-- `--rebuild` (resume on "has faces") remains the deliberate, human-triggered
+-- recovery for that, and is why it must stay OFF the automatic continuation path.
+ALTER TABLE photos ADD COLUMN faces_done INTEGER NOT NULL DEFAULT 1;

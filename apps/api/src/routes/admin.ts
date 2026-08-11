@@ -1,26 +1,44 @@
 import { Hono } from 'hono';
 import type { Env, EventRow, JobRow } from '../types';
-import { chunk, HttpError, newId, nowIso, publicEvent, publicPhoto, r2Url, slugify } from '../lib';
+import { chunk, clampLimit, HttpError, newId, nowIso, publicEvent, publicPhoto, r2Url, slugify } from '../lib';
 import { parseFolderId, sampleThumbUrl, walkFolder } from '../drive';
+import { onAccessHost, verifyAccessJwt } from '../access';
 
 export const adminRoutes = new Hono<{ Bindings: Env }>();
 
 /**
- * Defense in depth behind Cloudflare Access. Access itself is the real gate
- * (configured on the /api/admin/* route in the dashboard); this only refuses
- * requests that never passed through it — e.g. if someone points a hostname at
- * the Worker without an Access policy attached. We deliberately do not verify
- * the JWT signature here: that is Access's job, and re-implementing it badly is
- * worse than not doing it.
+ * Cloudflare Access is the real gate. This refuses anything it did not cover.
+ *
+ * Two checks, and the hostname one is not decoration. Access cannot be attached to
+ * a workers.dev
+ * hostname (it needs a zone we own), that origin is published in the browser bundle
+ * and in DEPLOY.md, and `workers_dev = true` keeps it live for *.pages.dev browsing.
+ * So the old presence-only check on Cf-Access-Jwt-Assertion — a header any client
+ * can set to any value — left every admin route wide open there:
+ *
+ *     curl -H 'Cf-Access-Jwt-Assertion: x' https://…workers.dev/api/admin/events
+ *
+ * Refusing by hostname costs nothing, because admin has never worked on that
+ * origin: the Access cookie is host-scoped, so the SPA cannot authenticate
+ * cross-origin against it either (DEPLOY.md:132).
+ *
+ * The assertion is verified, not merely detected: RS256 against the team JWKS,
+ * with `aud`, `iss` and `exp` pinned. Access itself returns 302 on these paths
+ * before the Worker runs, so this is the second of two independent layers — which
+ * is the point, because the first one lives in a dashboard nothing here can assert.
  */
 adminRoutes.use('*', async (c, next) => {
-  const assertion = c.req.header('Cf-Access-Jwt-Assertion');
   // Bypass is a deploy-time var, never a request header: a header-triggered
   // bypass is trivially forgeable by anyone who finds the Worker's origin.
-  const devBypass = c.env.DEV_ADMIN_BYPASS === '1';
-  if (!assertion && !devBypass) {
-    throw new HttpError(403, 'Admin requires Cloudflare Access', 'no_access');
+  if (c.env.DEV_ADMIN_BYPASS === '1') {
+    await next();
+    return;
   }
+  if (!onAccessHost(c.env, c.req.url)) {
+    throw new HttpError(403, 'Admin is not served on this hostname', 'no_access');
+  }
+  const claims = await verifyAccessJwt(c.env, c.req.header('Cf-Access-Jwt-Assertion'));
+  if (!claims) throw new HttpError(403, 'Admin requires Cloudflare Access', 'no_access');
   await next();
 });
 
@@ -156,6 +174,21 @@ adminRoutes.patch('/events/:id', async (c) => {
   return c.json({ event: publicEvent(c.env, row) });
 });
 
+/**
+ * Content types a banner may be stored as, mapped to the exact string we write.
+ *
+ * Raster formats only. Anything a browser will execute — SVG above all — must not
+ * be reachable, because these objects are served from a hostname that publishes the
+ * whole bucket with whatever content type is on them.
+ */
+const BANNER_TYPES: Record<string, string> = {
+  'image/webp': 'image/webp',
+  'image/jpeg': 'image/jpeg',
+  'image/jpg': 'image/jpeg',
+  'image/png': 'image/png',
+  'image/avif': 'image/avif',
+};
+
 adminRoutes.post('/events/:id/banner', async (c) => {
   const id = c.req.param('id');
   const form = await c.req.formData();
@@ -164,12 +197,32 @@ adminRoutes.post('/events/:id/banner', async (c) => {
   if (!file || typeof file === 'string' || typeof file.stream !== 'function') {
     throw new HttpError(400, 'Expected multipart field "file"', 'bad_request');
   }
-  if (!file.type.startsWith('image/')) throw new HttpError(400, 'Banner must be an image', 'bad_type');
+  // An allowlist, not a prefix test, and OUR content type rather than the
+  // client's.
+  //
+  // `file.type` is the multipart part's own Content-Type header — attacker
+  // controlled — and `startsWith('image/')` happily admits `image/svg+xml`. That
+  // type was then written verbatim into R2 metadata, and BUCKET is published at
+  // R2_PUBLIC_BASE (img.runlytics.fit), which serves the stored type regardless of
+  // the .webp key. So an SVG banner executed its own script on a runlytics.fit
+  // origin: enough to set Domain=.runlytics.fit cookies, shadowing the Access
+  // cookie the admin app depends on, and to host phishing on the site's own image
+  // domain. `nosniff` in public/_headers is a Pages header and does not reach the
+  // R2 custom domain.
+  const type = BANNER_TYPES[file.type.split(';')[0].trim().toLowerCase()];
+  if (!type) {
+    throw new HttpError(400, 'Banner must be a WebP, JPEG, PNG or AVIF image', 'bad_type');
+  }
   if (file.size > 8 * 1024 * 1024) throw new HttpError(413, 'Banner must be under 8 MB', 'too_large');
+
+  // Without this the endpoint is a general write into the public bucket for any id
+  // at all, and it would leave banner_key set on nothing.
+  const target = await c.env.DB.prepare('SELECT id FROM events WHERE id = ?').bind(id).first();
+  if (!target) throw new HttpError(404, 'Event not found', 'no_event');
 
   const key = `banners/${id}.webp`;
   await c.env.BUCKET.put(key, file.stream(), {
-    httpMetadata: { contentType: file.type, cacheControl: 'public, max-age=31536000, immutable' },
+    httpMetadata: { contentType: type, cacheControl: 'public, max-age=31536000, immutable' },
   });
   await c.env.DB.prepare('UPDATE events SET banner_key = ? WHERE id = ?').bind(key, id).run();
   return c.json({ banner_url: r2Url(c.env, key) });
@@ -313,9 +366,13 @@ adminRoutes.get('/events/:id/report', async (c) => {
        FROM ingest_log WHERE event_id = ? ORDER BY id DESC LIMIT ?`,
   ).bind(eventId, LOG_LIMIT).all<any>();
 
+  // Bounded like the two lists above it. There are only a handful of (level, code)
+  // pairs in practice, so this is a ceiling rather than a truncation anyone will
+  // notice — but it was the one aggregate in this handler with no upper bound at
+  // all, on a response the event page polls for the length of an indexing run.
   const { results: counts } = await c.env.DB.prepare(
     `SELECT level, code, COUNT(*) AS n FROM ingest_log
-      WHERE event_id = ? GROUP BY level, code ORDER BY n DESC`,
+      WHERE event_id = ? GROUP BY level, code ORDER BY n DESC LIMIT 40`,
   ).bind(eventId).all<any>();
 
   // Quality stats. Coverage alone does not tell the organizer whether SEARCH
@@ -455,7 +512,7 @@ adminRoutes.get('/events/:id', async (c) => {
  */
 adminRoutes.get('/events/:id/photos', async (c) => {
   const eventId = c.req.param('id');
-  const limit = Math.min(Number(c.req.query('limit') ?? 24) || 24, 60);
+  const limit = clampLimit(c.req.query('limit'), 24, 60);
   const cursor = c.req.query('cursor') ?? '';
   const filter = c.req.query('filter') ?? 'all'; // all | no_face | no_bib | has_bib
 

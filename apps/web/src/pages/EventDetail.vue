@@ -67,6 +67,16 @@ const searchNote = ref<string | null>(null);
 const bib = ref('');
 
 /**
+ * Stable wrapper objects for the browse grid.
+ *
+ * `:items="browse.map(...)"` in the template allocated a fresh array — and fresh
+ * item objects — on every render of this component, so PhotoGrid's `columns`
+ * computed saw a new dependency value each time and re-dealt all 8,523 tiles for
+ * an unrelated state change like a keystroke in the bib field.
+ */
+const browseItems = computed<GridItem[]>(() => browse.value.map((photo) => ({ photo })));
+
+/**
  * Crop face results to the runner who actually matched.
  *
  * On by default because it is the point: these albums average about nine faces
@@ -261,11 +271,26 @@ function submitBib(fuzzy = false) {
   router.push({ query });
 }
 
+/**
+ * Which search is current.
+ *
+ * The submit button is disabled while `searching`, but the URL watcher is not:
+ * Back/Forward, or the empty state's "Try similar numbers", starts a second search
+ * while the first is still out. A slow response for bib A landing after B then
+ * replaced B's results with A's, under a header that only says "N photos found" —
+ * so the runner is shown someone else's photos with nothing to indicate it. That is
+ * precisely the failure the fuzzy-search opt-in exists to prevent, arriving by a
+ * different route.
+ */
+let searchSeq = 0;
+
 async function searchBib(value: string, fuzzy: boolean) {
+  const seq = ++searchSeq;
   clearResults();
   searching.value = true;
   try {
     const r = await api.searchBib(props.slug, value, fuzzy);
+    if (seq !== searchSeq) return;      // a newer search has taken over
     results.value = r.photos.map((photo) => ({ photo }));
     searchedBy.value = 'bib';
     fuzzyOffered.value = r.fuzzy_available;
@@ -275,13 +300,16 @@ async function searchBib(value: string, fuzzy: boolean) {
         `other runners — check the photo before assuming it is you.`;
     }
   } catch (e: any) {
-    searchError.value = e.message;
+    if (seq === searchSeq) searchError.value = e.message;
   } finally {
-    searching.value = false;
+    if (seq === searchSeq) searching.value = false;
   }
 }
 
 async function runFaceSearch(source: Blob | HTMLVideoElement, via: Tab) {
+  // Same generation guard as searchBib, and it matters more here: this path spends
+  // ~1s on local inference before it even reaches the network.
+  const seq = ++searchSeq;
   resetSearch();
   searching.value = true;
   try {
@@ -291,6 +319,7 @@ async function runFaceSearch(source: Blob | HTMLVideoElement, via: Tab) {
     });
     const { vec, faceCount } = await embedLargestFace(source);
     const r = await api.searchFace(props.slug, vec);
+    if (seq !== searchSeq) return;
     // bbox rides along so the grid can crop the tile to the face that matched.
     results.value = r.matches.map((m) => ({ photo: m.photo, score: m.score, bbox: m.bbox }));
     cropToFace.value = true;
@@ -299,6 +328,7 @@ async function runFaceSearch(source: Blob | HTMLVideoElement, via: Tab) {
       searchNote.value = `Matched the largest of ${faceCount} faces in your photo.`;
     }
   } catch (e: any) {
+    if (seq !== searchSeq) return;
     searchError.value =
       e instanceof NoFaceError
         ? 'We could not find a face in that image. Try a closer, front-facing photo in good light.'
@@ -306,7 +336,7 @@ async function runFaceSearch(source: Blob | HTMLVideoElement, via: Tab) {
           ? e.message
           : 'The search could not run on this device. Try the bib number instead.';
   } finally {
-    searching.value = false;
+    if (seq === searchSeq) searching.value = false;
   }
 }
 
@@ -543,7 +573,7 @@ async function onFile(e: Event) {
     <!-- browse -------------------------------------------------------- -->
     <template v-else>
       <h2 style="margin-top: var(--s-6)">All photos</h2>
-      <PhotoGrid :items="browse.map((photo) => ({ photo }))" />
+      <PhotoGrid :items="browseItems" />
       <p v-if="!browse.length" class="muted">This event has no photos yet.</p>
 
       <!-- Sits a screen below the last row; crossing it fetches the next page. -->

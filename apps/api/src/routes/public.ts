@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { Env, EventRow } from '../types';
-import { HttpError, publicEvent, publicPhoto } from '../lib';
+import { clampLimit, clampThreshold, HttpError, publicEvent, publicPhoto } from '../lib';
 import { searchFaces } from '../search';
 
 export const publicRoutes = new Hono<{ Bindings: Env }>();
@@ -38,7 +38,7 @@ publicRoutes.get('/events/:slug', async (c) => {
 
 publicRoutes.get('/events/:slug/photos', async (c) => {
   const event = await getEventBySlug(c.env, c.req.param('slug'));
-  const limit = Math.min(Number(c.req.query('limit') ?? 60) || 60, 200);
+  const limit = clampLimit(c.req.query('limit'), 60, 200);
   const cursor = c.req.query('cursor') ?? '';
   // Keyset pagination on the primary key — stable and index-only.
   const { results } = await c.env.DB.prepare(
@@ -115,9 +115,11 @@ publicRoutes.post('/events/:slug/search/face', async (c) => {
   if (!Array.isArray(vec) || vec.length !== 512 || !vec.every((v) => typeof v === 'number' && Number.isFinite(v))) {
     throw new HttpError(400, 'Body must be { vec: number[512] } of finite numbers', 'bad_vec');
   }
-  const threshold = Number(c.req.query('t') ?? 0.38);
   const { matches, timing } = await searchFaces(c.env, event.id, vec as number[], {
-    threshold: Number.isFinite(threshold) ? threshold : 0.38,
+    // Clamped, not merely finite: ?t=-1 made the cutoff negative, which turns every
+    // row in the index into a candidate and forces a full sort of them — and
+    // anything near 0 returns strangers, on the one search that must not.
+    threshold: clampThreshold(c.req.query('t'), 0.38),
     ctx: c.executionCtx,
   });
   // Server-side timing, so latency work is driven by the Worker's own numbers

@@ -26,6 +26,19 @@
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
 
+# Cloudflare Access authenticates the REQUEST; it does nothing about the
+# authenticated page being embedded in someone else's. /admin can create events,
+# rewrite bib data and fire CI jobs, so a clickjacked frame is worth closing.
+# Scoped to /admin rather than /*: event pages are meant to be embeddable, and
+# that is how a running club drops one into their own site.
+/admin
+  X-Frame-Options: DENY
+  Content-Security-Policy: frame-ancestors 'none'
+
+/admin/*
+  X-Frame-Options: DENY
+  Content-Security-Policy: frame-ancestors 'none'
+
 # ----------------------------------------------- why there is no COOP/COEP
 # onnxruntime uses wasm threads only when `self.crossOriginIsolated` is true,
 # which needs `Cross-Origin-Opener-Policy: same-origin` and

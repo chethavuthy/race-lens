@@ -39,15 +39,29 @@ Image.MAX_IMAGE_PIXELS = 300_000_000
 
 
 def make_thumbnail(path: str, max_edge: int, quality: int) -> tuple[bytes, int, int]:
+    """Returns (webp bytes, full width, full height) POST-EXIF-ROTATION.
+
+    The dimensions are the DECODED FRAME's — not the thumbnail's, and not Drive's.
+
+    They have to be, because faces.bbox is measured in pixels of the array
+    load_bgr() produces from this same file, and the client divides one by the
+    other to crop a tile to the matched face. Drive's imageMediaMetadata cannot
+    play that role twice over: it describes the ORIGINAL upload, so it is
+    pre-rotation, and with image_source='thumb' it describes a 6000px file while
+    the bytes on disk are Drive's w3200 copy. Either way the two spaces diverge and
+    the crop lands somewhere else entirely.
+    """
     with Image.open(path) as im:
         # EXIF rotation must be applied before anything else: an unrotated
         # portrait frame makes the detector miss every face in it.
         im = ImageOps.exif_transpose(im)
         im = im.convert("RGB")
+        # Captured before thumbnail() shrinks it in place.
+        full_w, full_h = im.size
         im.thumbnail((max_edge, max_edge), Image.LANCZOS)
         buf = io.BytesIO()
         im.save(buf, format="WEBP", quality=quality, method=4)
-        return buf.getvalue(), im.width, im.height
+        return buf.getvalue(), full_w, full_h
 
 
 def load_bgr(path: str) -> np.ndarray | None:
@@ -194,38 +208,93 @@ def run(args: argparse.Namespace) -> int:
                 skipped += 1
 
         photo_payload: list[dict] = []
-        decoded: dict[str, np.ndarray] = {}
+        # Paths, not decoded arrays.
+        #
+        # This used to hold one decoded uint8 H*W*3 frame per photo for the whole
+        # batch, because the loop below needs photo_ids and those only exist after
+        # put_photos. At the 6000x4000 the config note cites that is ~72 MB a frame,
+        # so the default batch of 25 sat on ~1.8 GB next to the insightface and
+        # RapidOCR sessions — and load_bgr's .copy() briefly doubles whichever frame
+        # is being added. config.py sizes BATCH_SIZE against DISK ("25 holds
+        # 540 MB"), understating RAM by ~3.5x, so raising it on that reasoning OOMs.
+        # An OOM lands mid-batch, which is exactly the interruption that strands
+        # photos with no faces. The files are still on disk until the rmtree below,
+        # so nothing required holding them decoded.
+        paths: dict[str, tuple[str, str]] = {}   # drive_file_id -> (name, local path)
 
         for img, path in local:
+            thumb_key = f"thumbs/{args.event_id}/{img.id}.webp"
+
+            # A bibs-only pass re-reads NUMBERS; the thumbnail is already in R2 and
+            # would come back byte-identical. Regenerating it costs a LANCZOS resize
+            # and a billed class-A PutObject per photo to write bytes that already
+            # exist — 8,523 of each on the largest album — and the flag's own
+            # docstring promises it "leaves photos, faces and shards untouched".
+            #
+            # width/height/taken_at are omitted rather than sent as None: the
+            # upsert in internal.ts COALESCEs them, so whatever is stored survives.
+            if args.bibs_only:
+                paths[img.id] = (img.name, path)
+                photo_payload.append({"drive_file_id": img.id, "thumb_key": thumb_key})
+                continue
+
             try:
-                thumb, tw, th = make_thumbnail(path, cfg.thumb_max_edge, cfg.thumb_quality)
+                thumb, full_w, full_h = make_thumbnail(path, cfg.thumb_max_edge, cfg.thumb_quality)
             except Exception as exc:  # noqa: BLE001
                 log.warning("Thumbnail failed for %s: %s", img.name, exc)
                 note("error", "thumbnail_failed", f"{img.name}: {str(exc)[:180]}", img.id)
                 continue
 
-            thumb_key = f"thumbs/{args.event_id}/{img.id}.webp"
             up.put_bytes(thumb_key, thumb, "image/webp")
             photo_payload.append(
                 {
                     "drive_file_id": img.id,
                     "thumb_key": thumb_key,
-                    "width": img.width or tw,
-                    "height": img.height or th,
+                    # The decoded frame's size, NOT Drive's imageMediaMetadata.
+                    #
+                    # These are the denominator the client divides faces.bbox by to
+                    # crop a tile to the matched runner, so they must be in the
+                    # bbox's own coordinate space. Drive's numbers are not: they
+                    # describe the original upload pre-EXIF-rotation, and on a
+                    # 'thumb' source they describe a 6000px file while detection ran
+                    # on Drive's w3200 copy. That put the crop window at ~4% of the
+                    # frame, in the wrong place, on every face — while the caption
+                    # still said "cropped to you".
+                    "width": full_w,
+                    "height": full_h,
                     "taken_at": img.taken_at,
                 }
             )
-            bgr = load_bgr(path)
-            if bgr is not None:
-                decoded[img.id] = bgr
+            paths[img.id] = (img.name, path)
 
-        photo_ids = up.put_photos(args.event_id, args.source_id, photo_payload) if photo_payload else {}
+        photo_ids = (
+            up.put_photos(args.event_id, args.source_id, photo_payload,
+                          faces_pending=not args.bibs_only)
+            if photo_payload else {}
+        )
 
         bib_payload: list[dict] = []
-        for drive_file_id, bgr in decoded.items():
+        # Photos this pass actually decoded and read, which is NOT the same set as
+        # photo_ids — see the put_bibs call below.
+        read_ids: list[str] = []
+        for drive_file_id, (img_name, path) in paths.items():
             photo_id = photo_ids.get(drive_file_id)
             if not photo_id:
                 continue
+
+            # Decoded here, one frame resident at a time, and released at the end of
+            # the iteration.
+            bgr = load_bgr(path)
+            if bgr is None:
+                # Journalled, not just logged. A decode failure means no faces and no
+                # bibs for a photo that nonetheless has a thumbnail and appears in the
+                # album — the organizer needs a reason for that, and log.warning goes
+                # only to CI output they cannot reach.
+                note("error", "decode_failed",
+                     f"{img_name}: could not be decoded, so no faces or bibs were "
+                     "read from it", drive_file_id)
+                continue
+            read_ids.append(photo_id)
 
             faces = engine.detect(bgr)
             for face in faces:
@@ -259,20 +328,8 @@ def run(args: argparse.Namespace) -> int:
                     bib_payload.append({"photo_id": photo_id, "bib": hit.bib,
                                         "bib_raw": hit.raw, "conf": hit.conf})
 
-        # Every photo in this batch is authoritative for its own bibs, including
-        # ones that produced none. Skipped entirely when the event has no bibs:
-        # the call would clear rows without writing any, which would silently
-        # destroy bibs read before the organizer turned the flag off — and those
-        # must survive so turning it back on does not require a re-index.
-        if photo_ids and read_bibs:
-            up.put_bibs(args.event_id, bib_payload, replace_photos=list(photo_ids.values()))
-
-        processed += len(local)
-        up.progress(args.job_id, done=processed, total=total)
-        log.info(
-            "Batch %d: %d photos, %d faces so far, %d/%d done",
-            batch_no + 1, len(local), faces_indexed + len(embeddings), processed, total,
-        )
+            # Release before the next iteration rather than at the end of the batch.
+            del bgr
 
         # Flush vectors per batch.
         #
@@ -282,6 +339,13 @@ def run(args: argparse.Namespace) -> int:
         # and bibs, which ARE written per batch, survived. That left 51 photos
         # permanently faceless: present in the album, invisible to face search,
         # and indistinguishable from photos that genuinely contain no one.
+        #
+        # Flushing per batch shrank that window from a whole run to one batch; it
+        # did not close it, because the photo rows are still committed at the top
+        # of the batch. What closes it is the ordering below: vectors, then bibs,
+        # then mark_photos_complete. faces_done stays 0 until every one of those
+        # has succeeded, and the resume key reads faces_done — so an interruption
+        # anywhere in the batch means the next pass simply redoes it.
         if embeddings:
             shard_key = f"index/{args.event_id}/{args.source_id}-{args.run_id}-b{batch_no}.bin"
             row_base = up.reserve_rows(args.event_id, shard_key, len(embeddings))
@@ -297,6 +361,37 @@ def run(args: argparse.Namespace) -> int:
             # claimed "0 faces indexed" while the event accumulated thousands.
             faces_indexed += len(embeddings)
             embeddings, face_rows = [], []
+
+        # Bibs AFTER the vectors, and only for photos this pass actually READ.
+        #
+        # replace_photos was every id in photo_ids, which includes photos whose
+        # thumbnail succeeded and whose decode then failed. Those never reach the OCR
+        # loop, so listing them deleted bibs an earlier pass had read correctly and
+        # wrote nothing back in their place: a silent, permanent loss triggered by a
+        # transient decode failure.
+        #
+        # Skipped entirely when the event has no bibs: the call would clear rows
+        # without writing any, destroying bibs read before the organizer turned the
+        # flag off — and those must survive so turning it back on does not require a
+        # re-index.
+        if read_ids and read_bibs:
+            up.put_bibs(args.event_id, bib_payload, replace_photos=read_ids)
+
+        # LAST, and only now: everything this batch could lose has been written.
+        #
+        # Every photo the pass processed, including ones the detector found nobody
+        # in — they are just as finished, and leaving them unmarked would re-download
+        # them on every later pass forever. Skipped under --bibs-only, which never
+        # touched faces and so has no claim to make about them.
+        if read_ids and not args.bibs_only:
+            up.mark_photos_complete(args.event_id, read_ids)
+
+        processed += len(local)
+        up.progress(args.job_id, done=processed, total=total)
+        log.info(
+            "Batch %d: %d photos, %d faces so far, %d/%d done",
+            batch_no + 1, len(local), faces_indexed, processed, total,
+        )
 
         if journal:
             up.log(args.event_id, journal)

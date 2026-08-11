@@ -33,6 +33,16 @@ CREATE TABLE IF NOT EXISTS sources (
   added_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sources_event ON sources(event_id);
+-- Required, not merely useful: POST /api/admin/ingest upserts with
+-- ON CONFLICT (event_id, drive_folder_id), and SQLite refuses to PREPARE a
+-- conflict target that has no matching unique constraint. Without this the only
+-- route that binds a folder to an event throws before touching the database.
+--
+-- On a database that predates this line, run migrations/002_schema_repair.sql
+-- first — it merges the duplicate sources that the pre-upsert code created, which
+-- this index cannot be built over.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_event_folder
+  ON sources(event_id, drive_folder_id);
 
 CREATE TABLE IF NOT EXISTS photos (
   id            TEXT PRIMARY KEY,
@@ -43,6 +53,18 @@ CREATE TABLE IF NOT EXISTS photos (
   width         INTEGER,
   height        INTEGER,
   taken_at      TEXT,
+  -- 1 once this photo's face vectors are durable in an R2 shard.
+  --
+  -- The resume key, and deliberately not "a photo row exists": rows are committed
+  -- at the start of a batch and vectors flush at the end, so an interruption in
+  -- between leaves photos that exist with no faces. Resuming on existence skipped
+  -- those forever while finalize still called the event 'ready'.
+  --
+  -- DEFAULT 1 is for the migration, not for new rows — POST /events/:id/photos
+  -- always inserts 0 explicitly and the runner flips it to 1 after the shard
+  -- lands. On an existing database a default of 0 would mark every photo
+  -- unfinished and trigger a full re-download.
+  faces_done    INTEGER NOT NULL DEFAULT 1,
   -- Deliberately (event_id, drive_file_id) rather than a global unique on
   -- drive_file_id: the same Drive file can legitimately appear in two events
   -- (e.g. a combined 5k/10k album). Dedupe is per event, which is all the
@@ -50,6 +72,10 @@ CREATE TABLE IF NOT EXISTS photos (
   UNIQUE (event_id, drive_file_id)
 );
 CREATE INDEX IF NOT EXISTS idx_photos_event ON photos(event_id, id);
+-- The admin report counts photos per source on every poll, and /finalize compares
+-- discovered against it per source. Without this, both full-scan photos once per
+-- link.
+CREATE INDEX IF NOT EXISTS idx_photos_source ON photos(source_id);
 
 CREATE TABLE IF NOT EXISTS bibs (
   event_id TEXT NOT NULL,
@@ -63,6 +89,29 @@ CREATE TABLE IF NOT EXISTS bibs (
   PRIMARY KEY (event_id, bib, photo_id)
 );
 CREATE INDEX IF NOT EXISTS idx_bibs_lookup ON bibs(event_id, bib);
+-- The primary key above starts (event_id, bib), so photo_id is its third column
+-- and cannot serve a lookup. Every photo -> bibs query — the admin photo filters,
+-- the per-photo delete, and the batch replace on the indexing hot path — scanned
+-- the whole table without this.
+CREATE INDEX IF NOT EXISTS idx_bibs_photo ON bibs(photo_id);
+
+-- Tombstones for OCR reads the organizer deleted by hand.
+--
+-- Deleting a wrong bib is not enough on its own: the next re-index reads it again
+-- and puts it straight back, so the correction looks undone. POST
+-- /api/internal/events/:id/bibs filters every incoming (photo, bib) pair against
+-- this table, which means it is read on EVERY bib-writing batch — an absent table
+-- fails the whole indexing pass, not one endpoint.
+--
+-- The primary key must stay exactly (event_id, photo_id, bib): admin.ts names that
+-- tuple as an ON CONFLICT target.
+CREATE TABLE IF NOT EXISTS bib_rejects (
+  event_id   TEXT NOT NULL,
+  photo_id   TEXT NOT NULL REFERENCES photos(id),
+  bib        TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (event_id, photo_id, bib)
+);
 
 -- Vector rows live in R2 shards; this table maps global row index -> photo.
 CREATE TABLE IF NOT EXISTS faces (
@@ -74,6 +123,13 @@ CREATE TABLE IF NOT EXISTS faces (
   bib       TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_faces_event_row ON faces(event_id, row_idx);
+-- Search joins by row_idx, but everything else looks a photo up by id: the admin
+-- photo filters, the per-photo re-index delete, and the resume key for --rebuild.
+-- That last one runs EXISTS(...) once per photo, so on a 78k-face event it was
+-- ~2.4 billion row reads and could not complete.
+CREATE INDEX IF NOT EXISTS idx_faces_photo ON faces(photo_id);
+-- Lets the report's COUNT(DISTINCT photo_id) per event stay inside the index.
+CREATE INDEX IF NOT EXISTS idx_faces_event_photo ON faces(event_id, photo_id);
 
 CREATE TABLE IF NOT EXISTS face_shards (
   event_id   TEXT NOT NULL,

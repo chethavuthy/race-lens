@@ -74,7 +74,21 @@ async function load(quiet = false) {
 
 onMounted(async () => {
   await load();
-  poll = setInterval(() => { if (activeJob.value) load(true); }, 6000) as unknown as number;
+  // 15s and only while visible, not 6s regardless.
+  //
+  // load() fetches getEvent AND the report, and the report is eight aggregate
+  // queries — COUNT(*) over photos, faces, jobs and ingest_log, COUNT(DISTINCT)
+  // over faces and bibs twice, plus two GROUP BYs. A rate-limited album polls this
+  // for hours across up to 61 continuation passes. The author had already bounded
+  // the jobs and log LISTS for exactly this reason; the aggregates were missed.
+  //
+  // Still the same endpoint on purpose: it is the only source of the server-computed
+  // `stale` flag that activeJob and stalledJob depend on, so swapping to the cheap
+  // /jobs route would break stall detection and the jobs pager.
+  poll = setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
+    if (activeJob.value) load(true);
+  }, 15000) as unknown as number;
 });
 onBeforeUnmount(() => clearInterval(poll));
 

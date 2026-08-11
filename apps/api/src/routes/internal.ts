@@ -15,15 +15,33 @@ internalRoutes.use('*', async (c, next) => {
 
 internalRoutes.post('/jobs/:id/progress', async (c) => {
   const id = c.req.param('id');
-  const b = await c.req.json<{ done?: number; total?: number; status?: string; error?: string }>();
+  const b = await c.req.json<{
+    done?: number; total?: number; status?: string; error?: string | null;
+  }>();
+
+  // `error` is the one field a caller needs to be able to CLEAR, and COALESCE
+  // cannot express that — it reads a null as "leave it alone".
+  //
+  // /jobs/:id/continue writes "Drive rate limit — continuing automatically
+  // (attempt N of 61)". Every later ping from the runner passes error=None, so that
+  // message survived to the end of the chain and sat next to status='done' in the
+  // admin UI. The organizer then cannot tell a chain that recovered from one that
+  // is stuck, which is the whole question the report page exists to answer.
+  //
+  // Presence of the key, not its value, is the signal: omitting `error` preserves
+  // whatever is there, sending null clears it.
+  const clearError = 'error' in b;
   await c.env.DB.prepare(
-    `UPDATE jobs SET done = COALESCE(?, done),
-                     total = COALESCE(?, total),
-                     status = COALESCE(?, status),
-                     error = COALESCE(?, error),
-                     updated_at = ?
-      WHERE id = ?`,
-  ).bind(b.done ?? null, b.total ?? null, b.status ?? null, b.error ?? null, nowIso(), id).run();
+    `UPDATE jobs SET done = COALESCE(?1, done),
+                     total = COALESCE(?2, total),
+                     status = COALESCE(?3, status),
+                     error = CASE WHEN ?4 = 1 THEN ?5 ELSE error END,
+                     updated_at = ?6
+      WHERE id = ?7`,
+  ).bind(
+    b.done ?? null, b.total ?? null, b.status ?? null,
+    clearError ? 1 : 0, b.error ?? null, nowIso(), id,
+  ).run();
   return c.json({ ok: true });
 });
 
@@ -134,8 +152,19 @@ internalRoutes.post('/jobs/:id/continue', async (c) => {
 
 internalRoutes.post('/events/:id/photos', async (c) => {
   const eventId = c.req.param('id');
-  const { source_id, photos } = await c.req.json<{ source_id: string; photos: PhotoIn[] }>();
+  const { source_id, photos, faces_pending } = await c.req.json<{
+    source_id: string; photos: PhotoIn[]; faces_pending?: boolean;
+  }>();
   if (!source_id || !Array.isArray(photos)) throw new HttpError(400, 'source_id and photos are required', 'bad_request');
+
+  // Does this pass intend to (re)write these photos' face vectors?
+  //
+  // True for an ordinary pass, false for --bibs-only, which re-reads numbers and
+  // leaves faces and shards alone. Getting this wrong in the false direction would
+  // mark every photo a bibs-only pass touched as unfinished, so the next resume
+  // would re-download the entire album. Absent means true: a caller that has not
+  // been taught about the flag is an ordinary pass.
+  const facesPending = faces_pending !== false;
 
   // Without this the insert trips the photos->sources foreign key and surfaces
   // as an opaque 500 in the runner log. Fail with something diagnosable.
@@ -144,20 +173,54 @@ internalRoutes.post('/events/:id/photos', async (c) => {
   ).bind(source_id, eventId).first();
   if (!source) throw new HttpError(400, `No source ${source_id} on event ${eventId}`, 'no_source');
 
+  // Validate drive_file_id, because this column later becomes a shell argument.
+  //
+  // POST /admin/photos/:id/reindex puts it in a repository_dispatch payload, and
+  // the workflow passes it to `python -m indexer.main --only-file`. That step now
+  // routes values through `env:` instead of interpolating them into the script, so
+  // this is the second of two independent guards rather than the only one — but a
+  // Drive file id has a known shape and nothing is gained by storing anything else.
+  const DRIVE_ID = /^[A-Za-z0-9_-]{10,128}$/;
+  for (const p of photos) {
+    if (typeof p?.drive_file_id !== 'string' || !DRIVE_ID.test(p.drive_file_id)) {
+      throw new HttpError(
+        400,
+        `Not a Drive file id: ${String(p?.drive_file_id).slice(0, 40)}`,
+        'bad_file_id',
+      );
+    }
+  }
+
   // 7 bound params per row; stay well under SQLite's 999-variable ceiling.
   for (const part of chunk(photos, 100)) {
     await c.env.DB.batch(
       part.map((p) =>
         c.env.DB.prepare(
-          `INSERT INTO photos (id, event_id, source_id, drive_file_id, thumb_key, width, height, taken_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          // COALESCE on the update, so an omitted field cannot erase a stored one.
+          //
+          // A --bibs-only pass sends drive_file_id and thumb_key alone: it does not
+          // regenerate the thumbnail, so it has no dimensions to report and must not
+          // claim any. With a bare `width = excluded.width` those arrive as NULL and
+          // wipe the values every consumer of publicPhoto depends on — including the
+          // denominator the grid divides faces.bbox by, which is the whole point of
+          // storing them.
+          // faces_done starts at 0 and only an ordinary pass resets it.
+          //
+          // A new row has no vectors yet by definition. On conflict it drops back to
+          // 0 only when this pass is going to rewrite them, so a --bibs-only pass
+          // cannot mark an already-indexed album unfinished — which would send the
+          // next resume back to Drive for every photo in it.
+          `INSERT INTO photos (id, event_id, source_id, drive_file_id, thumb_key, width, height, taken_at, faces_done)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)
            ON CONFLICT (event_id, drive_file_id) DO UPDATE SET
-             thumb_key = excluded.thumb_key,
-             width     = excluded.width,
-             height    = excluded.height,
-             taken_at  = excluded.taken_at`,
+             thumb_key  = excluded.thumb_key,
+             width      = COALESCE(excluded.width, width),
+             height     = COALESCE(excluded.height, height),
+             taken_at   = COALESCE(excluded.taken_at, taken_at),
+             faces_done = CASE WHEN ?9 = 1 THEN 0 ELSE faces_done END`,
         ).bind(newId(), eventId, source_id, p.drive_file_id, p.thumb_key,
-               p.width ?? null, p.height ?? null, p.taken_at ?? null),
+               p.width ?? null, p.height ?? null, p.taken_at ?? null,
+               facesPending ? 1 : 0),
       ),
     );
   }
@@ -173,6 +236,44 @@ internalRoutes.post('/events/:id/photos', async (c) => {
   }
 
   return c.json({ ok: true, photo_ids: ids });
+});
+
+/**
+ * Mark photos finished: their vectors are durable in a shard.
+ *
+ * Separate from POST /events/:id/faces on purpose, and this is the whole reason
+ * the resume key works. /faces only knows the photos that PRODUCED a face row, but
+ * a photo the detector found nobody in is just as finished — the pass downloaded
+ * it, decoded it, ran detection and OCR, and there was nothing to store. Marking
+ * only the photos with faces would leave that population at faces_done = 0 and
+ * re-download it on every subsequent pass, forever, which is precisely the runaway
+ * the `--rebuild` flag must never be put on the automatic continuation path to
+ * avoid.
+ *
+ * So the runner calls this with every photo it actually processed, after the shard
+ * flush. Anything that fails earlier simply never gets here, and the photo is
+ * retried next pass.
+ */
+internalRoutes.post('/events/:id/photos/complete', async (c) => {
+  const eventId = c.req.param('id');
+  const { photo_ids } = await c.req.json<{ photo_ids: string[] }>();
+  if (!Array.isArray(photo_ids)) {
+    throw new HttpError(400, 'photo_ids is required', 'bad_request');
+  }
+  if (!photo_ids.length) return c.json({ ok: true, completed: 0 });
+
+  let completed = 0;
+  // event_id is in the WHERE as well as the id list: this is the only route that
+  // can declare a photo finished, and it should not be able to do so for an event
+  // other than the one in the path.
+  for (const part of chunk(photo_ids, D1_MAX_PARAMS - 1)) {
+    const r = await c.env.DB.prepare(
+      `UPDATE photos SET faces_done = 1
+        WHERE event_id = ? AND id IN (${part.map(() => '?').join(',')})`,
+    ).bind(eventId, ...part).run();
+    completed += r.meta.changes ?? 0;
+  }
+  return c.json({ ok: true, completed });
 });
 
 /**
@@ -193,7 +294,10 @@ internalRoutes.get('/events/:id/indexed', async (c) => {
   const sql = complete
     ? `SELECT p.drive_file_id FROM photos p
         WHERE p.event_id = ? AND EXISTS (SELECT 1 FROM faces f WHERE f.photo_id = p.id)`
-    : 'SELECT drive_file_id FROM photos WHERE event_id = ?';
+    // "vectors are durable", not "the row exists". The old key skipped photos
+    // stranded by an interrupted batch forever; faces_done is only set once the
+    // shard carrying that photo's vectors has actually landed.
+    : 'SELECT drive_file_id FROM photos WHERE event_id = ? AND faces_done = 1';
   const { results } = await c.env.DB.prepare(sql)
     .bind(c.req.param('id')).all<{ drive_file_id: string }>();
   return c.json({ drive_file_ids: results.map((r) => r.drive_file_id) });
@@ -337,7 +441,21 @@ internalRoutes.post('/events/:id/faces', async (c) => {
     await c.env.DB.batch(
       part.map((f) =>
         c.env.DB.prepare(
-          'INSERT INTO faces (id, event_id, photo_id, row_idx, bbox, bib) VALUES (?, ?, ?, ?, ?, ?)',
+          // Idempotent, because this POST gets retried.
+          //
+          // upload.py::_post retries on any requests.RequestException — including a
+          // read timeout that arrived AFTER the Worker had already committed. The
+          // retry then re-inserts the same rows, and only the runner's first chunk
+          // sets `replace`, so a bare INSERT tripped the unique index on
+          // (event_id, row_idx), returned 500, exhausted the five retries and failed
+          // the whole run — with the shard bytes already durable in R2. One flaky
+          // connection cost an entire pass.
+          `INSERT INTO faces (id, event_id, photo_id, row_idx, bbox, bib)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (event_id, row_idx) DO UPDATE SET
+             photo_id = excluded.photo_id,
+             bbox     = excluded.bbox,
+             bib      = excluded.bib`,
         ).bind(newId(), eventId, f.photo_id, f.row_idx, JSON.stringify(f.bbox), f.bib ?? null),
       ),
     );
@@ -414,8 +532,17 @@ internalRoutes.post('/events/:id/finalize', async (c) => {
 
   const resolved = status === 'partial' || (short?.n ?? 0) > 0 ? 'partial' : 'ready';
 
+  // Counts always; status only for an event that is already published or indexing.
+  //
+  // 'draft' means the organizer unpublished it, and PATCH /admin/events/:id offers
+  // exactly that. This write was unconditional, so any later pass — including an
+  // automatic continuation hours later — put the event back on the public site
+  // behind their back. The route already refuses to take the runner's word about
+  // readiness (see `short` above); it should be no more trusting about visibility.
   await c.env.DB.prepare(
-    'UPDATE events SET photo_count = ?, face_count = ?, status = ? WHERE id = ?',
+    `UPDATE events SET photo_count = ?, face_count = ?,
+                       status = CASE WHEN status = 'draft' THEN status ELSE ? END
+      WHERE id = ?`,
   ).bind(counts?.photos ?? 0, counts?.faces ?? 0, resolved, eventId).run();
 
   invalidateIndex(eventId);

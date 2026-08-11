@@ -82,7 +82,10 @@ async function refreshEvents() {
 }
 
 onMounted(refreshEvents);
-onBeforeUnmount(() => clearInterval(poll));
+// BOTH intervals. benchPoll was left running: it only clears itself when the
+// benchmark reaches done/failed, so navigating away mid-run left a 5s poll of
+// /api/admin/benchmarks/:id firing for the rest of the SPA session.
+onBeforeUnmount(() => { clearInterval(poll); clearInterval(benchPoll); });
 
 async function inspect() {
   inspection.value = null;
@@ -170,8 +173,16 @@ async function onEventBanner(ev: EventSummary, e: Event) {
 }
 
 async function publish(ev: EventSummary) {
-  await api.admin.setStatus(ev.id, 'ready');
-  await refreshEvents();
+  // Every other action on this page surfaces its failure; this one threw into an
+  // unhandled rejection, so a failed Publish looked exactly like a successful one
+  // until the list happened to be refreshed.
+  try {
+    await api.admin.setStatus(ev.id, 'ready');
+    loadError.value = null;
+    await refreshEvents();
+  } catch (e: any) {
+    loadError.value = `Could not publish "${ev.name}": ${e.message}`;
+  }
 }
 </script>
 
