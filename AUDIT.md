@@ -479,7 +479,46 @@ def make_thumbnail(path: str, max_edge: int, quality: int) -> tuple[bytes, int, 
 
 Verified safe: `photos.width/height` are consumed in exactly three places — `PhotoGrid.vue:112` `ratio()` (aspect only, preserved under uniform resize), `PhotoGrid.vue:131` `cropStyle` (the bug, now consistent), and `admin.ts:499/508-509` (now consistent). No consumer edits needed.
 
-**Not retroactive.** Already-indexed `thumb`-sourced rows keep cropping wrong, and no client-side guard can detect it — the mis-scaled bbox still fits inside the stored `W × H`. Those events need a re-index, which is cheap in `thumb` mode.
+### Measured impact: essentially nil — and the "fix the old rows" plan was wrong
+
+The finding is a real code defect: the two values were derived from different sources
+and nothing tied them together. But the divergence it predicts does **not** exist in
+this data, and I nearly corrupted 26k rows acting on the prediction instead of
+checking it.
+
+`faces.bbox` gives an independent test. If `photos.width` were ~1.9x too large, no
+face in a source could ever reach its right edge — the peak `max_x / width` across
+thousands of photos would cap near 0.53. Measured per source:
+
+| source | image_source | photos | peak x-ratio | peak y-ratio |
+|---|---|---|---|---|
+| `M3ZF3-lFLkcn` | thumb | 24,037 | **1.006** | 1.099 |
+| `Sbh3vyyNVuzy` | thumb | 834 | **1.009** | 0.807 |
+| `I15mxynVpUtb` | original | 590 | **0.999** | 0.632 |
+| `0NDnUwvlckbM` | thumb | 503 | **1.009** | 1.003 |
+| `W5mDtOz8yGo7` | thumb | 297 | **1.028** | 0.919 |
+| `src_rp7127od` | thumb | 150 | **1.001** | 0.758 |
+
+Every source peaks at ~1.0, so the stored dimensions *are* the space the bboxes live
+in. Across 26,555 photos with faces, only **11** have a bbox exceeding the stored
+frame by more than 2%, and **none** by more than 10%.
+
+The reason is that `sz=w3200` returns the original unscaled when it is already
+smaller, and these albums are mostly already web-sized — the largest source reports a
+maximum stored width of 2048. The 6000px DSLR figure the code comments cite is not
+what these particular folders contain.
+
+**Two of my own claims were wrong and are corrected here.** I wrote that ~98% of
+photos were cropping incorrectly, inferred from `image_source = 'thumb'` without
+checking whether the dimensions actually diverged. And the proposed computed backfill
+— rescale every thumb-source photo so its long edge is 3200 — would have *introduced*
+the bug on ~353 photos whose dimensions were already right. `image_source` is a
+mutable current setting, not a per-photo record of how a photo was fetched, so it
+cannot support that inference at all.
+
+The code fix stands: it removes the possibility of divergence for any future pass that
+does fetch a genuinely larger original. No backfill is required or advisable.
+
 
 ---
 
