@@ -80,13 +80,16 @@ const browseItems = computed<GridItem[]>(() => browse.value.map((photo) => ({ ph
 /**
  * Crop face results to the runner who actually matched.
  *
- * On by default because it is the point: these albums average about nine faces
- * per frame, so an uncropped result is a pack of runners and the person cannot
- * tell which one is them. The photographer's full frame is never more than a
- * tap away — the tile links to the untouched original either way — and the
- * toggle beside the count switches the whole grid back.
+ * OFF by default: what the reader is here for is the photograph, and a crop is
+ * not one — it is a thumbnail of a face, taken out of the frame the photographer
+ * composed. The identification problem it was meant to solve (these albums
+ * average about nine faces per frame) is real but smaller than the cost, because
+ * every result already links to the untouched original.
+ *
+ * Kept as an opt-in beside the count, for the group shot where someone genuinely
+ * cannot tell which runner is them.
  */
-const cropToFace = ref(true);
+const cropToFace = ref(false);
 const faceSearched = computed(() => searchedBy.value === 'selfie' || searchedBy.value === 'upload');
 // Set when an exact search found nothing but a looser one might. Widening is
 // offered as a labelled choice, never done silently: a suffix match can return
@@ -113,12 +116,44 @@ const TABS = computed(() => ALL_TABS.filter((t) => t.id !== 'bib' || bibsEnabled
 
 /* ------------------------------------------------------------------ credit --
    Every frame on this page is somebody's work, and an event absorbs folders from
-   several photographers at once. The byline goes in the existing meta line rather
-   than a block of its own — the runner came here to find themselves — and the full
-   list, with each album's link, sits under the grid. */
+   several photographers at once.
+
+   The byline sits in the meta line under the title, and OPENS A DIALOG rather
+   than jumping to a block at the foot of the page. The grid loads as the reader
+   scrolls — 8,523 photos in the largest album, three screens of prefetch at a
+   time — so the bottom of this page is somewhere nobody arrives. A credit and a
+   takedown route that live down there are, in practice, not on the page at all.
+   One tap from the line under the title is. */
 
 /** The one route a photographer has for taking their album back off the site. */
 const TELEGRAM = 'https://t.me/chethavuthy';
+
+const creditDialog = ref<HTMLDialogElement | null>(null);
+/* showModal() over an `open` attribute: it is what gives the dialog the top
+   layer, the backdrop, Escape-to-close and the focus trap for free. */
+const openCredits = () => creditDialog.value?.showModal();
+const closeCredits = () => creditDialog.value?.close();
+
+/**
+ * Close on a click outside the panel — and only outside it.
+ *
+ * A backdrop click reports the DIALOG as its target, which is the usual way to
+ * detect one, but so does a click on the dialog's own rounded corners: measured,
+ * a ~10px band along the edge hits the dialog element rather than the padded box
+ * inside it, so target alone shut the panel when you clicked its top-left corner.
+ *
+ * Both tests together are what make it exact. The target test rules out clicks on
+ * anything inside, including a keyboard-activated button — Enter dispatches a
+ * click at (0, 0), which the geometry test alone would read as the backdrop.
+ */
+function onDialogClick(e: MouseEvent) {
+  const d = creditDialog.value;
+  if (!d || e.target !== d) return;
+  const r = d.getBoundingClientRect();
+  const outside =
+    e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+  if (outside) d.close();
+}
 
 /** Sources with a recorded name. An unnamed one still gets a row in the block below. */
 const namedCredits = computed(() => credits.value.filter((c) => !!c.name));
@@ -138,8 +173,8 @@ const creditLabel = (c: Credit, i: number) =>
  * The byline for the meta line: "Sok Dara and Chan Nita".
  *
  * Truncates past three, because this shares one line with the photo count and a
- * four-name list wraps it on any handset. The block under the grid names all of
- * them regardless, so nothing is lost — only deferred.
+ * four-name list wraps it on any handset. The dialog names all of them
+ * regardless, so nothing is lost — only deferred.
  */
 const byline = computed(() => {
   const names = namedCredits.value.map((c) => c.name as string);
@@ -361,9 +396,12 @@ async function runFaceSearch(source: Blob | HTMLVideoElement, via: Tab) {
     const { vec, faceCount } = await embedLargestFace(source);
     const r = await api.searchFace(props.slug, vec);
     if (seq !== searchSeq) return;
-    // bbox rides along so the grid can crop the tile to the face that matched.
+    // bbox rides along so the grid CAN crop the tile to the face that matched —
+    // only if the reader asks for it. A new search resets to full frames rather
+    // than inheriting the last one's crop, so every result set opens as the
+    // photographs it is.
     results.value = r.matches.map((m) => ({ photo: m.photo, score: m.score, bbox: m.bbox }));
-    cropToFace.value = true;
+    cropToFace.value = false;
     searchedBy.value = via;
     if (faceCount > 1 && r.matches.length) {
       searchNote.value = `Matched the largest of ${faceCount} faces in your photo.`;
@@ -428,9 +466,16 @@ async function onFile(e: Event) {
     <h1>{{ event.name }}</h1>
     <p class="muted" style="margin: 0 0 var(--s-5)">
       {{ plural(event.photo_count, 'photo') }}
-      <!-- The names link to the credit block at the foot of the page, where the
-           albums and the per-photographer counts are. -->
-      <template v-if="byline"> · by <a class="byline" href="#credits">{{ byline }}</a></template>
+      <!-- Opens the credit dialog: who shot these, a link to each album, and how
+           a photographer asks for theirs to come down. Named or not, the route is
+           always here — an unnamed event still has albums to link and a takedown
+           to offer. -->
+      <template v-if="credits.length">
+        ·
+        <button class="byline" @click="openCredits">
+          {{ byline ? `by ${byline}` : 'Photo credits' }}
+        </button>
+      </template>
       <template v-if="event.status === 'partial'">
         · <span>some photos are still missing from the photographer</span>
       </template>
@@ -650,44 +695,60 @@ async function onFile(e: Event) {
     </template>
 
     <!-- credit ------------------------------------------------------------
-         Ends the page, under the photos, and stays put whether the reader is
-         browsing or looking at search results: whose work this is does not
-         depend on what they searched for. -->
-    <section v-if="credits.length" id="credits" class="credit-foot">
-      <h2>Photos by</h2>
-      <div class="card">
-        <ul class="credit-list">
-          <li v-for="(c, i) in credits" :key="c.album_url" class="credit">
-            <span class="who">
-              <!-- An unnamed source is not given an invented byline; its album
-                   link is the whole of what we can honestly say about it. -->
-              <span class="name">{{ creditLabel(c, i) }}</span>
-              <span class="count muted small">{{ plural(c.photo_count, 'photo') }}</span>
-            </span>
-            <a class="btn" :href="c.album_url" target="_blank" rel="noopener">Open album ↗</a>
-          </li>
-        </ul>
-        <p class="muted small" style="margin: var(--s-4) 0 0; padding-top: var(--s-4);
-                                      border-top: 1px solid var(--line)">
-          Copyright stays with the photographer. Race Lens shows a small preview and links to
-          their album — every full-size photo comes from them.
-        </p>
+         A dialog, not a footer. The grid keeps loading as the reader scrolls, so
+         the foot of this page is not a place anyone lands — and neither the credit
+         nor the takedown route can afford to live somewhere unreachable. It opens
+         from the line under the title, which is on screen from the first paint.
+
+         Rendered whenever there are credits, whether the reader is browsing or
+         looking at search results: whose work this is does not depend on what
+         they searched for. -->
+    <dialog
+      v-if="credits.length"
+      ref="creditDialog"
+      class="credit-modal"
+      aria-labelledby="credit-modal-title"
+      @click="onDialogClick">
+      <!-- The inner box carries the padding, and the dialog itself carries none:
+           a padded dialog is a strip that closes the panel when clicked inside it,
+           since those clicks report the dialog as their target too. onDialogClick
+           handles the corners the same problem leaves behind. -->
+      <div class="credit-modal-body">
+      <div class="credit-modal-head">
+        <h2 id="credit-modal-title" style="margin: 0">Photos by</h2>
+        <button class="icon-btn" aria-label="Close" @click="closeCredits">✕</button>
       </div>
 
-      <h2 style="margin-top: var(--s-6)">Are these your photos?</h2>
-      <div class="card">
-        <p style="margin: 0">
-          If you shared one of these albums and want it off Race Lens, send me the link on
-          Telegram. The album and everything indexed from it comes down. No form, no reason
-          needed.
-        </p>
-        <a class="btn primary tg" :href="TELEGRAM" target="_blank" rel="noopener">
-          Message @chethavuthy
-        </a>
-        <p class="muted small" style="margin: 0">
-          Opens Telegram. Send it from the account that shared the album so I know it's you.
-        </p>
+      <ul class="credit-list">
+        <li v-for="(c, i) in credits" :key="c.album_url" class="credit">
+          <span class="who">
+            <!-- An unnamed source is not given an invented byline; its album
+                 link is the whole of what we can honestly say about it. -->
+            <span class="name">{{ creditLabel(c, i) }}</span>
+            <span class="count muted small">{{ plural(c.photo_count, 'photo') }}</span>
+          </span>
+          <a class="btn" :href="c.album_url" target="_blank" rel="noopener">Open album ↗</a>
+        </li>
+      </ul>
+
+      <p class="muted small credit-rights">
+        Copyright stays with the photographer. Race Lens shows a small preview and links to
+        their album — every full-size photo comes from them.
+      </p>
+
+      <h3 class="credit-takedown-title">Are these your photos?</h3>
+      <p style="margin: 0">
+        If you shared one of these albums and want it off Race Lens, send me the link on
+        Telegram. The album and everything indexed from it comes down. No form, no reason
+        needed.
+      </p>
+      <a class="btn tg" :href="TELEGRAM" target="_blank" rel="noopener">
+        Message @chethavuthy
+      </a>
+      <p class="muted small" style="margin: 0">
+        Opens Telegram. Send it from the account that shared the album so I know it's you.
+      </p>
       </div>
-    </section>
+    </dialog>
   </template>
 </template>

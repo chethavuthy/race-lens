@@ -870,23 +870,90 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--err) 1
 .load-status > * { margin: 0; }
 
 /* ------------------------------------------------------------------ credit --
-   Whose photographs these are, and how a photographer takes their album back
-   off the site. Ends the event page, under the grid. */
+   Whose photographs these are, and how a photographer takes their album back off
+   the site. Opened from the line under the title, because the grid loads as the
+   reader scrolls and the foot of that page is not a place anyone reaches. */
 
-/* Underlined rather than accent-coloured: the accent is reserved for primary
-   action and current selection, and this is a jump link inside a muted line. */
+/* A button that reads as part of the sentence it sits in. `button` brings a
+   44px tap target, a control border and a fill, all of which would turn a clause
+   into a widget — so they come off, and the underline carries the affordance.
+   Underlined rather than accent-coloured: the accent is reserved for primary
+   action and current selection. */
 .byline {
-  color: var(--text);
+  font: inherit; color: var(--text);
+  background: none; border: 0; padding: 0; min-height: 0;
   text-decoration: underline;
   text-decoration-color: var(--line-strong);
   text-underline-offset: 2px;
 }
-.byline:hover { text-decoration-color: var(--accent); }
+.byline:hover:not(:disabled) { background: none; text-decoration-color: var(--accent); }
+.byline:active:not(:disabled) { transform: none; }
 
-.credit-foot { margin-top: var(--s-7); }
-/* The cards here stack prose and a control, which the base .card does not lay
-   out — it only draws the surface. */
-.credit-foot .card { display: flex; flex-direction: column; gap: var(--s-4); }
+/* --------------------------------------------------------- credit dialog --
+   Native <dialog> + showModal(): the top layer, the backdrop, Escape-to-close
+   and the focus trap are the platform's, not ours. */
+.credit-modal {
+  /* `margin: auto` is what centres a dialog in the viewport — `inset: 0` alone
+     pins it to the top-left. */
+  margin: auto;
+  width: min(520px, calc(100vw - 2 * var(--s-4)));
+  max-height: min(85vh, 720px);
+  overflow-y: auto;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  /* None: the padding lives on .credit-modal-body. See the comment in the
+     template — a padded dialog closes itself when you click its own edge. */
+  padding: 0;
+}
+.credit-modal-body {
+  display: flex; flex-direction: column; gap: var(--s-4);
+  padding: var(--s-5);
+}
+.credit-modal::backdrop { background: rgb(6 8 12 / 0.72); }
+/* The dialog is in the top layer, so a transform on it would move the backdrop's
+   containing block too — only opacity and a small lift, and neither in a way that
+   moves the tap targets. */
+@media (prefers-reduced-motion: no-preference) {
+  .credit-modal[open] { animation: credit-in 180ms var(--ease); }
+  @keyframes credit-in {
+    from { opacity: 0; translate: 0 8px; }
+    to   { opacity: 1; translate: 0 0; }
+  }
+}
+/* Sticky, because the dialog itself is the scroll container: on a phone the whole
+   panel scrolls and the close control was the first thing to leave the screen.
+   The negative top margin and matching padding let it sit flush against the top
+   edge while covering the content passing under it. */
+.credit-modal-head {
+  position: sticky; top: 0; z-index: 1;
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s-4);
+  margin: calc(-1 * var(--s-5)) calc(-1 * var(--s-5)) 0;
+  padding: var(--s-5) var(--s-5) var(--s-3);
+  background: var(--surface);
+}
+/* Square, quiet, and still 44px: a close control has to be hittable without
+   being the thing the eye lands on. */
+.icon-btn {
+  flex: none; width: var(--tap); height: var(--tap);
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; border-color: var(--line); color: var(--muted);
+  font-size: var(--t-md);
+}
+.icon-btn:hover:not(:disabled) { color: var(--text); }
+
+.credit-rights {
+  margin: 0; padding-top: var(--s-4);
+  border-top: 1px solid var(--line);
+}
+/* Separates the takedown from the credit inside one scroll box, where a heading
+   alone would read as part of the list above it. */
+.credit-takedown-title {
+  margin: var(--s-2) 0 0; padding-top: var(--s-4);
+  border-top: 1px solid var(--line);
+  font-size: var(--t-md); letter-spacing: -0.01em;
+}
 
 .credit-list { list-style: none; margin: 0; padding: 0; }
 .credit {
@@ -907,16 +974,16 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--err) 1
   min-height: 40px; font-size: var(--t-sm); white-space: nowrap;
 }
 
-/* The one outbound action on the page that is not a search, and the accent is
-   what marks it as such. Written out because .primary is styled on `button`. */
-.credit-foot .tg {
+/* The one action in this dialog, and the accent is what marks it as such. Written
+   out because .primary is styled on `button`, and this is an anchor. */
+.credit-modal .tg {
   align-self: flex-start;
   display: inline-flex; align-items: center; justify-content: center;
   background: var(--accent); border-color: var(--accent);
   color: var(--accent-ink); font-weight: 600;
 }
-.credit-foot .tg:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
-.credit-foot .tg:active { background: var(--accent-press); border-color: var(--accent-press); }
+.credit-modal .tg:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.credit-modal .tg:active { background: var(--accent-press); border-color: var(--accent-press); }
 
 @media (max-width: 420px) {
   /* At this width the name, the count and a button do not fit on one line, and
