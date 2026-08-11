@@ -7,7 +7,7 @@
  * frame with nothing boxed, or a box over a runner whose number was misread, is
  * the difference between guessing at thresholds and knowing which stage failed.
  */
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { RouterLink } from 'vue-router';
 import { api } from '../lib/api';
 
@@ -35,12 +35,23 @@ const bibInput = ref<HTMLInputElement | null>(null);
 // Which face box is being edited, and the value being typed into it.
 const editingFace = ref<string | null>(null);
 const faceDraft = ref('');
-const faceInput = ref<HTMLInputElement | null>(null);
+// An ARRAY, because the input it binds lives inside `v-for="f in zoom.faces"` and
+// Vue sets ref_for on refs there. Typed as a single element, `faceInput.value` was
+// the array itself, so `?.focus()` resolved to Array.prototype.focus — undefined —
+// and threw a TypeError inside the setTimeout on every open. The editor still
+// appeared, it just never focused or selected, so each correction cost an extra
+// click and a manual clear. bibInput sits outside any v-for, which is why that one
+// always worked and this one looked inexplicable.
+const faceInput = ref<HTMLInputElement[]>([]);
 
-function startFace(f: { id: string; bib: string | null }) {
+async function startFace(f: { id: string; bib: string | null }) {
   editingFace.value = f.id;
   faceDraft.value = f.bib ?? '';
-  setTimeout(() => { faceInput.value?.focus(); faceInput.value?.select(); }, 30);
+  // nextTick rather than a 30 ms guess at when the DOM has caught up.
+  await nextTick();
+  const el = faceInput.value[0];
+  el?.focus();
+  el?.select();
 }
 
 async function saveFace() {
@@ -62,14 +73,38 @@ function syncZoom() {
 }
 
 async function patchPhoto(id: string) {
-  // Refresh just this photo rather than the whole page, so the grid position
-  // and scroll are preserved while correcting a long run of photos.
-  const r = await api.admin.photos(props.id, null, 'all').catch(() => null);
-  if (!r) return;
-  const fresh = r.photos.find((p) => p.id === id);
-  if (!fresh) return;
+  // Refresh just this photo rather than the whole page, so the grid position and
+  // scroll survive a long run of corrections.
+  //
+  // This used to request page ONE with filter 'all' and grep the response, so any
+  // photo past the first 24 was simply never in it: every correction from #25 on
+  // silently did nothing visible, and the organizer would retype it. Keyset
+  // pagination gives us an exact fetch instead — ask for rows after the PREVIOUS
+  // photo in the current view, under the SAME filter, and the target is the first
+  // row back.
   const i = photos.value.findIndex((p) => p.id === id);
-  if (i >= 0) photos.value[i] = fresh;
+  if (i < 0) return;
+  const after = i > 0 ? photos.value[i - 1].id : null;
+
+  let r: Awaited<ReturnType<typeof api.admin.photos>>;
+  try {
+    r = await api.admin.photos(props.id, after, filter.value);
+  } catch (e: any) {
+    // Was `.catch(() => null)`, which swallowed the reason entirely.
+    editError.value = `Saved, but the view could not be refreshed: ${e.message}`;
+    return;
+  }
+
+  const fresh = r.photos.find((p) => p.id === id);
+  if (fresh) {
+    photos.value[i] = fresh;
+  } else if (filter.value !== 'all') {
+    // The edit moved it out of the active filter — adding a bib under "No bib",
+    // say. Dropping it is the truthful result; leaving a stale row is not.
+    photos.value.splice(i, 1);
+    if (zoom.value?.id === id) zoom.value = null;
+    return;
+  }
   syncZoom();
 }
 
