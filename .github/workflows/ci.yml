@@ -47,7 +47,13 @@ jobs:
       # make. It only runs for a real logged-in session, which means a regression
       # here shows up as the organizer being locked out. Tested here instead,
       # against a keypair the test controls.
-      - name: Test the admin access gate
+      # Also the face-box coordinate contract (test/bbox.test.ts). That pairing —
+      # faces.bbox in the detector's pixels, photos.width/height recording the same
+      # frame — broke silently for two days: boxes stayed in range, the overlay drew
+      # them faithfully, and only a person looking at a screenshot noticed. The
+      # write side is pinned in indexer/tests; these are the read side and the
+      # ingest guard.
+      - name: Test the admin access gate and the face-box contract
         run: npm --workspace apps/api run test
 
       - name: Build frontend

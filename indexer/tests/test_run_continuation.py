@@ -40,8 +40,8 @@ def _install_cv_stubs() -> None:
     faces = types.ModuleType("indexer.faces")
 
     class _Face:
-        def __init__(self):
-            self.bbox = [0.0, 0.0, 10.0, 10.0]
+        def __init__(self, bbox):
+            self.bbox = bbox
             self.embedding = np.zeros(512, dtype=np.float32)
             self.bib = None
 
@@ -49,8 +49,14 @@ def _install_cv_stubs() -> None:
         def __init__(self, det_size=0):
             pass
 
-        def detect(self, _bgr):
-            return [_Face()]
+        def detect(self, bgr):
+            # Measured against the array it was handed, like the real detector:
+            # insightface returns boxes in the coordinates of what you pass it.
+            # A fixed [0, 0, 10, 10] would fit any frame and could never catch a
+            # coordinate-space divergence, which is the bug this fixture exists to
+            # make visible (test_the_boxes_sent_fit_the_dimensions_sent).
+            h, w = bgr.shape[:2]
+            return [_Face([w * 0.25, h * 0.25, w * 0.5, h * 0.5])]
 
     faces.FaceEngine = FaceEngine
     faces.quantize = lambda v: np.zeros(512, dtype=np.int8)
@@ -116,6 +122,7 @@ class FakeUploader:
         self.bib_replace_photos: list[list[str]] = []
         self.completed: list[str] = []
         self.faces_pending_seen: list[bool] = []
+        self.face_rows: list[dict] = []
 
     def event_config(self, _event_id):
         return {"bibs_enabled": self.bibs_enabled}
@@ -157,8 +164,11 @@ class FakeUploader:
     def reserve_rows(self, _event_id, _shard_key, _count):
         return 0
 
-    def put_faces(self, *_a, **_k):
-        pass
+    def put_faces(self, _event_id, _shard_key, _row_base, rows):
+        # Recorded, not discarded: these rows are the other half of the coordinate
+        # contract, and the Worker now rejects them if they do not fit the frame
+        # dimensions the photo payload declared.
+        self.face_rows.extend(dict(r) for r in rows)
 
     def log(self, _event_id, _entries):
         pass
@@ -340,6 +350,37 @@ def test_photo_dimensions_come_from_the_decoded_frame_not_drive(wired):
         assert (p["width"], p["height"]) == (8, 8), (
             f"{p['drive_file_id']} stored {p['width']}x{p['height']}; expected the "
             "decoded 8x8 frame, not Drive's 4000x3000 metadata"
+        )
+
+
+def test_the_boxes_sent_fit_the_dimensions_sent(wired):
+    """A pass must not send boxes measured in one space and dimensions from another.
+
+    This is the invariant the Worker now enforces at ingest (bboxFitsFrame in
+    apps/api/src/bbox.ts), asserted here against what the runner actually puts on
+    the wire — so a divergence fails in CI in seconds rather than after an album
+    has been indexed and a person has noticed the overlay looks wrong.
+
+    The test above pins where the DIMENSIONS come from. This one pins that the
+    BOXES agree with them, which is the pairing that actually broke: on
+    2026-08-09 both halves were individually defensible and jointly wrong.
+    """
+    _, up = wired(_images("src2", 3), set(), quota_after=1000)
+
+    assert run_mod.run(_args(image_source="thumb")) == 0
+    assert up.face_rows, "no faces were sent"
+
+    dims = {f"photo-{p['drive_file_id']}": (p["width"], p["height"]) for p in up.photo_payloads}
+    for row in up.face_rows:
+        w, h = dims[row["photo_id"]]
+        x, y, bw, bh = row["bbox"]
+        assert bw > 0 and bh > 0, f"{row['photo_id']}: empty box {row['bbox']}"
+        # No tolerance here, unlike the Worker's: the Worker allows a couple of
+        # pixels for detector rounding, while this fixture's arithmetic is exact.
+        assert x >= 0 and y >= 0 and x + bw <= w and y + bh <= h, (
+            f"{row['photo_id']}: box {row['bbox']} does not fit the {w}x{h} frame "
+            "the same pass reported — the detector and make_thumbnail are measuring "
+            "different images"
         )
 
 

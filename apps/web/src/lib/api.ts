@@ -33,10 +33,23 @@ export interface Photo {
   taken_at: string | null;
 }
 
+/** A face box as fractions of its frame: 0..1 from the top-left. */
+export interface FaceBox { x: number; y: number; w: number; h: number }
+
 export interface FaceMatch {
   photo: Photo;
   score: number;
-  bbox: [number, number, number, number];
+  /**
+   * The matched face, already converted to fractions by the API.
+   *
+   * Deliberately NOT pixels. When this was `bbox` in source pixels, the browser
+   * had to divide it by photo.width/height to crop the tile — which made the
+   * client the second component that had to know the indexer's pixel space, and
+   * when the indexer recorded the wrong one, the crop framed empty road while the
+   * caption still claimed it was cropped to you. Null when the frame has no
+   * recorded dimensions.
+   */
+  box: FaceBox | null;
 }
 
 export interface Job {

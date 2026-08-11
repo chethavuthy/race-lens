@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import type { Env } from '../types';
 import { HttpError, chunk, newId, nowIso, timingSafeEqual } from '../lib';
+import { bboxFitsFrame } from '../bbox';
 import { D1_MAX_PARAMS, DIM, invalidateIndex } from '../search';
 
 export const internalRoutes = new Hono<{ Bindings: Env }>();
@@ -453,6 +454,45 @@ internalRoutes.post('/events/:id/faces', async (c) => {
     rows: { photo_id: string; row_idx: number; bbox: number[]; bib?: string | null }[];
   }>();
   if (!shard_key || !Array.isArray(rows)) throw new HttpError(400, 'shard_key and rows are required', 'bad_request');
+
+  /* Every box must fit the frame it claims to be measured in.
+     ------------------------------------------------------------------------
+     This is the assertion whose absence let the 2026-08-09 divergence through.
+     faces.bbox and photos.width/height are two halves of one coordinate space,
+     written by two different requests, and until now nothing compared them — so a
+     pass that measured boxes in Drive's w3200 copy while recording the 6000px
+     original's dimensions stored 8,000 wrong boxes without a single error.
+
+     Checked here rather than trusted from the runner, because the runner is the
+     thing that can be wrong. It costs one query per chunk: the photo dimensions
+     for the ≤120 rows in hand. A failure fails the pass loudly, naming the photo
+     and both spaces, which is a CI log an organizer can act on — and the photos
+     stay at faces_done = 0, so the next pass retries them rather than leaving a
+     half-written album that looks finished. */
+  const photoIds = [...new Set(rows.map((f) => f.photo_id))];
+  const dims = new Map<string, { width: number | null; height: number | null }>();
+  for (const part of chunk(photoIds, D1_MAX_PARAMS - 1)) {
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, width, height FROM photos
+        WHERE event_id = ? AND id IN (${part.map(() => '?').join(',')})`,
+    ).bind(eventId, ...part).all<{ id: string; width: number | null; height: number | null }>();
+    for (const r of results) dims.set(r.id, { width: r.width, height: r.height });
+  }
+
+  for (const f of rows) {
+    const d = dims.get(f.photo_id);
+    // An unknown photo is a different bug, and the foreign key below reports it.
+    if (!d) continue;
+    if (!bboxFitsFrame(f.bbox, d.width, d.height)) {
+      throw new HttpError(
+        400,
+        `Face box [${f.bbox.join(', ')}] does not fit photo ${f.photo_id}, recorded as ` +
+        `${d.width}x${d.height}. The detector and the stored dimensions are in different ` +
+        `coordinate spaces — see make_thumbnail in indexer/main.py.`,
+        'bbox_space_mismatch',
+      );
+    }
+  }
 
   await c.env.DB.prepare(
     `INSERT INTO face_shards (event_id, shard_key, row_base, row_count) VALUES (?, ?, ?, ?)

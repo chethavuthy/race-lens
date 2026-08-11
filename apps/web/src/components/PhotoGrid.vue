@@ -12,7 +12,7 @@ const props = withDefaults(
     animate?: boolean;
     /**
      * Crop each tile to the matched face instead of showing the whole frame.
-     * Only meaningful when items carry a bbox.
+     * Only meaningful when items carry a box.
      */
     crop?: boolean;
     /** Show the capture time under each tile. */
@@ -116,9 +116,10 @@ watch(
  * This is what makes a masonry column stable: without it every image resolves
  * at its natural height and the columns re-flow underneath the reader's thumb.
  * width/height are the DECODED FRAME's dimensions, recorded by the indexer from
- * the same array the detector ran on (see make_thumbnail), so they share a
- * coordinate space with the bbox cropStyle divides them by. They arrive on the
- * Photo the client already receives, so this costs nothing.
+ * the same array the detector ran on (see make_thumbnail). Here they are only an
+ * aspect ratio — the face box arrives pre-normalized, so nothing in this file
+ * divides one by the other any more. They ride along on the Photo the client
+ * already receives, so this costs nothing.
  */
 function ratio(p: Photo): string {
   return p.width && p.height ? `${p.width} / ${p.height}` : '3 / 2';
@@ -139,21 +140,33 @@ function ratio(p: Photo): string {
  */
 const PAD = 2.4;
 
+/*
+ * The box arrives as fractions of the frame, so this function needs no pixel
+ * dimensions at all — which is the point. It used to divide the API's pixel bbox
+ * by photo.width/height, making the browser a second place that had to know which
+ * image the detector measured. The API now converts, in one tested function
+ * (lib.ts faceBox), and the whole class of denominator mismatch is gone from here.
+ *
+ * The frame is 1x1, so "side" is a fraction of the SHORT edge in each axis and the
+ * offsets are expressed against the crop window rather than the image.
+ */
 function cropStyle(item: GridItem): Record<string, string> | null {
+  const box = item.box;
   const { width: W, height: H } = item.photo;
-  const box = item.bbox;
   if (!box || !W || !H) return null;
+  if (!(box.w > 0 && box.h > 0)) return null;
 
-  const [x, y, bw, bh] = box;
-  if (!(bw > 0 && bh > 0)) return null;
-
-  const side = Math.min(Math.max(bw, bh) * PAD, W, H);
+  // A square window in PIXEL terms is not square in fraction terms, so the box is
+  // taken back into a common unit — the frame's aspect — before padding.
+  const aspect = W / H;
+  const boxW = box.w * aspect;               // width as a multiple of the height
+  const side = Math.min(Math.max(boxW, box.h) * PAD, aspect, 1);
   const half = side / 2;
-  const cx = Math.min(Math.max(x + bw / 2, half), W - half);
-  const cy = Math.min(Math.max(y + bh / 2, half), H - half);
+  const cx = Math.min(Math.max(box.x * aspect + boxW / 2, half), aspect - half);
+  const cy = Math.min(Math.max(box.y + box.h / 2, half), 1 - half);
 
   return {
-    width: `${(W / side) * 100}%`,
+    width: `${(aspect / side) * 100}%`,
     left: `${(-(cx - half) / side) * 100}%`,
     top: `${(-(cy - half) / side) * 100}%`,
   };

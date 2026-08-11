@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, EventRow, JobRow } from '../types';
 import { chunk, clampLimit, HttpError, newId, nowIso, publicEvent, publicPhoto, r2Url, slugify } from '../lib';
+import { faceBox } from '../bbox';
 import { parseFolderId, sampleThumbUrl, walkFolder } from '../drive';
 import { onAccessHost, verifyAccessJwt } from '../access';
 
@@ -711,18 +712,15 @@ adminRoutes.get('/events/:id/photos', async (c) => {
 
   return c.json({
     photos: photos.map((p: any) => {
-      const w = p.width || 1, h = p.height || 1;
       return {
         ...publicPhoto(c.env, p),
-        faces: (fMap[p.id] ?? []).map((f: any) => {
-          const [x, y, bw, bh] = JSON.parse(f.bbox);
-          return {
-            id: f.id,
-            bib: f.bib,
-            // clamped: a box can sit a pixel or two outside after rounding
-            x: Math.max(0, Math.min(1, x / w)), y: Math.max(0, Math.min(1, y / h)),
-            w: Math.max(0, Math.min(1, bw / w)), h: Math.max(0, Math.min(1, bh / h)),
-          };
+        // One conversion, shared with the public face search, tested in
+        // test/bbox.test.ts. The inline `x / (p.width || 1)` this replaces was the
+        // second of two places that had to agree about the pixel space, and the
+        // only reason the 2026-08-09 mismatch was ever visible to a human.
+        faces: (fMap[p.id] ?? []).flatMap((f: any) => {
+          const box = faceBox(JSON.parse(f.bbox), p.width, p.height);
+          return box ? [{ id: f.id, bib: f.bib, ...box }] : [];
         }),
         bibs: (bMap[p.id] ?? []).map((b: any) => ({
           bib: b.bib, bib_key: b.bib_key, conf: b.conf, source: b.source ?? 'ocr',

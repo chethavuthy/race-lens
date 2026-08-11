@@ -396,11 +396,11 @@ async function runFaceSearch(source: Blob | HTMLVideoElement, via: Tab) {
     const { vec, faceCount } = await embedLargestFace(source);
     const r = await api.searchFace(props.slug, vec);
     if (seq !== searchSeq) return;
-    // bbox rides along so the grid CAN crop the tile to the face that matched —
-    // only if the reader asks for it. A new search resets to full frames rather
-    // than inheriting the last one's crop, so every result set opens as the
-    // photographs it is.
-    results.value = r.matches.map((m) => ({ photo: m.photo, score: m.score, bbox: m.bbox }));
+    // The matched face's box rides along — as fractions, already converted by the
+    // API — so the grid CAN crop to that runner if the reader asks for it. A new
+    // search resets to full frames rather than inheriting the last one's crop, so
+    // every result set opens as the photographs it is.
+    results.value = r.matches.map((m) => ({ photo: m.photo, score: m.score, box: m.box }));
     cropToFace.value = false;
     searchedBy.value = via;
     if (faceCount > 1 && r.matches.length) {

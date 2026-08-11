@@ -1,5 +1,6 @@
 import type { Env } from './types';
 import { chunk, publicPhoto } from './lib';
+import { faceBox, type FaceBox } from './bbox';
 
 /**
  * Vector format contract — must match indexer/faces.py exactly.
@@ -272,7 +273,20 @@ export interface SearchTiming {
 export interface FaceMatch {
   photo: ReturnType<typeof publicPhoto>;
   score: number;
-  bbox: [number, number, number, number];
+  /**
+   * The matched face as FRACTIONS of the frame, not pixels.
+   *
+   * Pixels used to go out over the wire and PhotoGrid divided them by
+   * photo.width/height to crop the tile. That made the browser the second place
+   * that had to know which pixel space the box was in — and when the indexer got
+   * that wrong, the crop silently framed the wrong region while still captioning
+   * itself "cropped to you". Converting here leaves one place that can be wrong,
+   * and it is under test.
+   *
+   * Null when the frame has no recorded dimensions: the client then shows the
+   * whole photograph rather than a crop of a guess.
+   */
+  box: FaceBox | null;
 }
 
 export async function searchFaces(
@@ -360,7 +374,7 @@ export async function searchFaces(
     best.set(row.id, {
       photo: publicPhoto(env, row),
       score,
-      bbox: JSON.parse(row.bbox),
+      box: faceBox(JSON.parse(row.bbox), row.width, row.height),
     });
   }
 
