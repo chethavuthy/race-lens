@@ -31,7 +31,6 @@ import logging
 import re
 from dataclasses import dataclass
 
-import cv2
 import numpy as np
 
 log = logging.getLogger(__name__)
@@ -44,10 +43,6 @@ BIB_RE = re.compile(r"^\d{3,5}$")
 # 0.6 admitted reads the engine itself was unsure of. Every correct bib observed
 # on real photos scored 0.88-1.00, so this costs nothing and drops guesses.
 MIN_CONF = 0.7
-
-# Longest edge for the whole-frame pass. Chosen by measurement: at native 6000px
-# the text detector finds nothing usable, at 2400px it reads bibs reliably.
-FULL_OCR_MAX_EDGE = 2400
 
 # Minimum width of a detected text region, as a fraction of the FULL image
 # width, for it to be accepted as a bib.
@@ -228,6 +223,15 @@ class BibReader:
         bibs. Tiling ALONE is a regression (it loses 3 of the torso pass's 21),
         so this supplements rather than replaces. 2x2 beats 3x2 and 4x3 — finer
         grids cut through bibs at tile seams.
+
+        OPEN QUESTION, inherited from the read_full path this replaced: that path
+        downscaled to 2400px first, because it measured "at native 6000px the text
+        detector finds nothing usable, at 2400px it reads bibs reliably". This one
+        is handed the full-resolution frame, so a 2x2 grid over a 6000px photo
+        gives ~3450px tiles — between the two figures, and never measured. If bib
+        recall from tiling looks low on a large album, that is the first thing to
+        test. Left alone here because changing it without measurement is how the
+        crop window regressed in the first place.
         """
         h, w = bgr.shape[:2]
         tw, th = w // cols, h // rows
@@ -243,27 +247,4 @@ class BibReader:
                 for hit in self._read(bgr[y1:y2, x1:x2], ref_width=w):
                     if hit.bib not in best or hit.conf > best[hit.bib].conf:
                         best[hit.bib] = hit
-        return list(best.values())
-
-    def read_full(self, bgr: np.ndarray) -> list[BibHit]:
-        """Whole-frame OCR, for photos where the detector found no face.
-
-        The image MUST be downscaled first. A 6000x4000 original handed straight
-        to the detector gets internally resized so far that bib digits stop being
-        legible, and this path returned nothing — 46 photos of a 295-photo album
-        ended up with no face AND no bib, invisible to both searches. At ~2400px
-        the same photos read cleanly.
-        """
-        h, w = bgr.shape[:2]
-        longest = max(h, w)
-        if longest > FULL_OCR_MAX_EDGE:
-            scale = FULL_OCR_MAX_EDGE / longest
-            bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-
-        # Dedupe to the best confidence per number — one bib read twice in a
-        # photo is one bib.
-        best: dict[str, BibHit] = {}
-        for hit in self._read(bgr, ref_width=bgr.shape[1]):
-            if hit.bib not in best or hit.conf > best[hit.bib].conf:
-                best[hit.bib] = hit
         return list(best.values())

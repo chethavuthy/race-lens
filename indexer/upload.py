@@ -98,15 +98,40 @@ class Uploader:
         except Exception as exc:  # noqa: BLE001
             log.warning("progress update failed: %s", exc)
 
-    def put_photos(self, event_id: str, source_id: str, photos: list[dict]) -> dict[str, str]:
+    def put_photos(self, event_id: str, source_id: str, photos: list[dict],
+                   faces_pending: bool = True) -> dict[str, str]:
+        """Upsert photo rows and get back drive_file_id -> photo_id.
+
+        `faces_pending` says whether this pass will rewrite these photos' face
+        vectors. True for an ordinary pass, False for --bibs-only, which leaves
+        faces and shards alone — passing True there would mark an already-indexed
+        album unfinished and send the next resume back to Drive for all of it.
+        """
         ids: dict[str, str] = {}
         for part in chunked(photos, 100):
             res = self._post(
                 f"/api/internal/events/{event_id}/photos",
-                {"source_id": source_id, "photos": part},
+                {"source_id": source_id, "photos": part, "faces_pending": faces_pending},
             )
             ids.update(res.get("photo_ids", {}))
         return ids
+
+    def mark_photos_complete(self, event_id: str, photo_ids: list[str]) -> None:
+        """Declare these photos finished: their vectors are durable.
+
+        Called only after the shard flush, and with every photo the pass PROCESSED
+        — including ones the detector found nobody in. Those are just as finished,
+        and leaving them unmarked would re-download them on every later pass.
+
+        Not wrapped in a try/except, unlike progress() or log(): if this fails the
+        photos must stay unfinished so a later pass redoes them. Swallowing it
+        would recreate the silent-loss bug this whole flag exists to close.
+        """
+        if not photo_ids:
+            return
+        for part in chunked(photo_ids, 90):
+            self._post(f"/api/internal/events/{event_id}/photos/complete",
+                       {"photo_ids": part})
 
     def already_indexed(self, event_id: str, complete_only: bool = False) -> set[str]:
         """drive_file_ids this event already has, so a re-run can skip them.
