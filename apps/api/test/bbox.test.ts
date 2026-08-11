@@ -71,7 +71,21 @@ console.log('\nbboxFitsFrame:');
 check('a box inside the frame fits', bboxFitsFrame([100, 100, 200, 200], 1000, 500), true);
 check('a box filling the frame fits', bboxFitsFrame([0, 0, 1000, 500], 1000, 500), true);
 
-// Detector rounding, which must not fail an album.
+/*
+ * The case that made the first version of this guard dangerous.
+ *
+ * SCRFD predicts the whole face box even when the frame cuts through it, so a
+ * runner at the bottom edge legitimately overshoots. Production's eight real
+ * examples are all this shape — a 2048x1365 frame with a box ending 3.7% to 6.6%
+ * of the long edge past the bottom. A 2% tolerance rejected them, and rejecting a
+ * batch fails the pass, so eight faces standing near an edge would have killed a
+ * 27,000-photo album.
+ */
+check('a face cropped by the bottom edge fits',
+  bboxFitsFrame([900, 1280, 180, 220], 2048, 1365), true);
+check('...and so does the worst real overshoot, 6.6% of the long edge',
+  bboxFitsFrame([900, 1300, 180, 200], 2048, 1365), true);
+
 const slack = Math.max(1000, 500) * BBOX_TOLERANCE;
 check('a box over by less than the tolerance fits',
   bboxFitsFrame([0, 0, 1000 + slack / 2, 500], 1000, 500), true);
@@ -82,11 +96,14 @@ check('a box over by less than the tolerance fits',
  * numbers for a smaller file. This is the case the guard actually catches, and
  * catching it stops the writer that produces both halves.
  */
+// 6224px-space boxes against a 3200px frame: 95% over, versus 6.6% for the
+// honest overshoot above. Two orders of magnitude apart, which is what lets one
+// threshold separate them.
 check('a box measured in a larger space is rejected',
   bboxFitsFrame([4000, 200, 300, 300], 3200, 2133), false);
-check('a box past the bottom edge is rejected',
-  bboxFitsFrame([10, 2100, 50, 200], 3200, 2133), false);
-check('a far-negative box is rejected', bboxFitsFrame([-500, 10, 50, 50], 3200, 2133), false);
+check('a box far past the bottom edge is rejected',
+  bboxFitsFrame([10, 4000, 50, 200], 3200, 2133), false);
+check('a far-negative box is rejected', bboxFitsFrame([-1200, 10, 50, 50], 3200, 2133), false);
 check('a zero-area box is rejected', bboxFitsFrame([10, 10, 0, 50], 3200, 2133), false);
 check('a garbage box is rejected', bboxFitsFrame([10, 10, NaN, 50], 3200, 2133), false);
 

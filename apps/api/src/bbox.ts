@@ -68,10 +68,23 @@ export function faceBox(
  * and the same source toggled the other way gave boxes running past the frame
  * edge. Rejecting the overflow half stops the writer that produces both.
  *
- * TOLERANCE covers detector rounding, not a space mismatch: 2% of the long edge
- * is a few pixels on a 3200px frame, while a mismatch is off by 50% or more.
+ * TOLERANCE is 25% of the long edge, and it is wide on purpose — measured, not
+ * guessed. SCRFD predicts the WHOLE face box even when the frame cuts through it,
+ * so a runner at the bottom edge legitimately produces a box that ends past it.
+ * In production (Angkor, 27,988 photos with faces) every such case overshot by
+ * 3.7% to 6.6% of the long edge; eight photos in all.
+ *
+ * A coordinate-space mismatch is not in that league. Boxes measured in a 6224px
+ * frame against dimensions of 3200 overshoot by 95%. The two populations are two
+ * orders of magnitude apart, so one threshold separates them cleanly, and 25%
+ * sits far above the honest overshoot and far below the mismatch.
+ *
+ * Getting this wrong in the tight direction is expensive: the check runs during
+ * indexing, and rejecting a batch fails the pass. A 2% tolerance — which looked
+ * reasonable and was the first thing written here — would have killed a
+ * 27,000-photo album over eight faces standing near the edge of a frame.
  */
-export const BBOX_TOLERANCE = 0.02;
+export const BBOX_TOLERANCE = 0.25;
 
 export function bboxFitsFrame(
   bbox: number[], width: number | null, height: number | null,

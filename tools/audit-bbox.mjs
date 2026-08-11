@@ -19,9 +19,16 @@
  *
  * That diagnosis is what this script is. It reports both halves of the problem:
  *
- *   OVERFLOW  a box that does not fit its frame. Provably wrong, and the same
- *             condition the Worker now rejects at ingest (bboxFitsFrame). Any
- *             count above zero is stale data written before that guard existed.
+ *   OVERFLOW  a box that cannot belong to its frame — off by 25% of the long edge
+ *             or more, the same condition the Worker rejects at ingest
+ *             (bboxFitsFrame). Any count above zero is stale data written before
+ *             that guard existed.
+ *
+ *   AT EDGE   boxes overshooting by more than 2% but nowhere near 25%. The HONEST
+ *             population: SCRFD predicts the whole face box for a runner the frame
+ *             cuts through. Informational only — the first version of this script
+ *             called these failures, which would have condemned eight perfectly
+ *             good photos in Angkor and, worse, failed the pass that wrote them.
  *
  *   REACH     of the frames with several faces, how far across the frame the
  *             furthest one sits, averaged. This is the SHRINK direction, which no
@@ -56,12 +63,21 @@ WITH per_photo AS (
 SELECT
   e.slug                                                        AS event,
   COUNT(*)                                                      AS photos_with_faces,
-  -- 2% of the long edge matches BBOX_TOLERANCE in apps/api/src/bbox.ts: enough
-  -- for the detector's rounding, nowhere near enough to hide a space mismatch.
+  -- 0.25 matches BBOX_TOLERANCE in apps/api/src/bbox.ts, and is wide for a
+  -- measured reason: SCRFD predicts the whole box for a face the frame cuts
+  -- through, so a runner at the edge honestly overshoots by up to ~7% of the long
+  -- edge. A space mismatch overshoots by ~95%. Flagging the honest ones would make
+  -- this script cry wolf on every album.
+  SUM(CASE WHEN pp.w > 0 AND pp.h > 0
+            AND (pp.max_right  > pp.w + pp.long_edge * 0.25
+              OR pp.max_bottom > pp.h + pp.long_edge * 0.25)
+           THEN 1 ELSE 0 END)                                    AS overflowing,
+  -- Reported separately, never as a failure: this is the honest-overshoot
+  -- population, and it is only here so a sudden jump in it is visible.
   SUM(CASE WHEN pp.w > 0 AND pp.h > 0
             AND (pp.max_right  > pp.w + pp.long_edge * 0.02
               OR pp.max_bottom > pp.h + pp.long_edge * 0.02)
-           THEN 1 ELSE 0 END)                                    AS overflowing,
+           THEN 1 ELSE 0 END)                                    AS edge_faces,
   SUM(CASE WHEN pp.w IS NULL OR pp.h IS NULL OR pp.w = 0 OR pp.h = 0
            THEN 1 ELSE 0 END)                                    AS unmeasurable,
   ROUND(AVG(CASE WHEN pp.faces >= 5 AND pp.long_edge > 4000
@@ -91,8 +107,8 @@ const pad = (s, n) => String(s).padEnd(n);
 const num = (s, n) => String(s ?? '—').padStart(n);
 
 console.log(`\nFace-box audit — ${local ? 'local' : 'REMOTE (production)'}\n`);
-console.log(`  ${pad('event', 44)} ${num('photos', 7)} ${num('overflow', 9)} ${num('no dims', 8)} ${num('reach', 6)}`);
-console.log(`  ${'-'.repeat(44)} ${'-'.repeat(7)} ${'-'.repeat(9)} ${'-'.repeat(8)} ${'-'.repeat(6)}`);
+console.log(`  ${pad('event', 40)} ${num('photos', 7)} ${num('overflow', 9)} ${num('at edge', 8)} ${num('no dims', 8)} ${num('reach', 6)}`);
+console.log(`  ${'-'.repeat(40)} ${'-'.repeat(7)} ${'-'.repeat(9)} ${'-'.repeat(8)} ${'-'.repeat(8)} ${'-'.repeat(6)}`);
 
 let bad = 0;
 const suspect = [];
@@ -103,7 +119,7 @@ for (const r of rows) {
   if (r.big_frames >= 20 && r.reach_big_frames !== null && r.reach_big_frames < 0.62) {
     suspect.push(r);
   }
-  console.log(`  ${pad(r.event, 44)} ${num(r.photos_with_faces, 7)} ${num(r.overflowing, 9)} ${num(r.unmeasurable, 8)} ${num(r.reach_big_frames, 6)}`);
+  console.log(`  ${pad(r.event, 40)} ${num(r.photos_with_faces, 7)} ${num(r.overflowing, 9)} ${num(r.edge_faces, 8)} ${num(r.unmeasurable, 8)} ${num(r.reach_big_frames, 6)}`);
 }
 
 console.log('');
