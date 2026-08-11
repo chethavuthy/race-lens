@@ -224,14 +224,19 @@ class BibReader:
         so this supplements rather than replaces. 2x2 beats 3x2 and 4x3 — finer
         grids cut through bibs at tile seams.
 
-        OPEN QUESTION, inherited from the read_full path this replaced: that path
-        downscaled to 2400px first, because it measured "at native 6000px the text
-        detector finds nothing usable, at 2400px it reads bibs reliably". This one
-        is handed the full-resolution frame, so a 2x2 grid over a 6000px photo
-        gives ~3450px tiles — between the two figures, and never measured. If bib
-        recall from tiling looks low on a large album, that is the first thing to
-        test. Left alone here because changing it without measurement is how the
-        crop window regressed in the first place.
+        ON TILE RESOLUTION — asked and answered, do not re-litigate without new data.
+        The read_full path this replaced downscaled to 2400px first, having measured
+        "at native 6000px the text detector finds nothing usable, at 2400px it reads
+        bibs reliably". This path is handed the full-resolution frame, so a 2x2 grid
+        over a 6000px photo yields ~3450px tiles, which sits between those two
+        figures and looked like it might be costing recall.
+
+        Measured against production on 2026-08-11, the Angkor album (26,672 photos,
+        bibs enabled): 99.2% have a detected face and 91.2% have a bib. Only 8.0%
+        have a face and no bib, and that population is dominated by runners shot from
+        behind, occluded, or too distant to read at any resolution. Whatever the tile
+        size is doing, it is not the bottleneck — so downscaling here would spend CPU
+        on every photo to chase at most a fraction of 8%.
         """
         h, w = bgr.shape[:2]
         tw, th = w // cols, h // rows

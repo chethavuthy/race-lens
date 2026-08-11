@@ -11,7 +11,16 @@ apps/web/public/golden/
 .venv-golden/
 .venv-check/
 .venv-test/
-.env.deploy
+
+# Every dotenv file is secret unless it is explicitly an example.
+#
+# This was a per-file denylist (.env.deploy, .env.local, .env.*.local), so a new one
+# was untracked-but-not-ignored — and `git add -A` swept .env.analytics, holding a live
+# Cloudflare API token, straight into a commit. GitHub's push protection caught it;
+# nothing reached the remote. A denylist only protects the files someone remembered.
+.env
+.env.*
+!.env.*.example
 
 # Local Vite overrides (e.g. VITE_API_BASE) and editor/preview launch config
 .env.local
