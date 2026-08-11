@@ -30,6 +30,15 @@ CREATE TABLE IF NOT EXISTS sources (
   -- endpoint (~12x smaller, so ~12x more photos per Drive download quota).
   -- Chosen per source by the organizer, after benchmarking that folder.
   image_source    TEXT NOT NULL DEFAULT 'original',
+  -- How this folder's photographer is credited on the event page. NULL until an
+  -- organizer fills it in; the album link is shown on its own until then.
+  credit_name     TEXT,
+  -- Set when the photographer asked for their link to come off the site. The row
+  -- outlives the removal on purpose: /api/admin/ingest upserts on
+  -- (event_id, drive_folder_id), so this flag is the only thing that stops the
+  -- next paste of the same link — or a queued continuation pass — re-indexing an
+  -- album that was withdrawn. See migrations/004_sources_credit_removal.sql.
+  removed_at      TEXT,
   added_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sources_event ON sources(event_id);

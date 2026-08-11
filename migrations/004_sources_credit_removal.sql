@@ -1,0 +1,35 @@
+-- sources.credit_name / sources.removed_at — credit the photographer, and give
+-- them a way to take their link back off the site.
+--
+--   npx wrangler d1 execute race-lens --local  --config apps/api/wrangler.toml \
+--     --file=./migrations/004_sources_credit_removal.sql
+--   npx wrangler d1 execute race-lens --remote --config apps/api/wrangler.toml \
+--     --file=./migrations/004_sources_credit_removal.sql
+--
+-- SQLite has no ADD COLUMN IF NOT EXISTS, so re-running this errors with
+-- "duplicate column name". That error is safe and means it is already applied.
+--
+-- WHY credit_name
+--
+-- An event absorbs several Drive folders from several photographers, and until now
+-- the event page named none of them: 8,523 photos with no byline anywhere, all of
+-- them somebody's work. This is the byline. Nullable, so existing rows stay valid
+-- and get filled in one at a time from the admin page — an unnamed source still
+-- shows its album link, which is strictly better than a guessed name.
+--
+-- WHY removed_at RATHER THAN DELETING THE ROW
+--
+-- Removal is per LINK: a photographer messages @chethavuthy on Telegram and their
+-- whole album leaves Race Lens. POST /api/admin/ingest upserts on
+-- (event_id, drive_folder_id), so the source row is the only place that can
+-- remember the folder was withdrawn. Delete the row and the next paste of the same
+-- link — or a queued continuation pass — walks the album straight back in, which
+-- is the one thing the promise on the event page must not do.
+--
+-- The photos themselves ARE deleted (rows, thumbnails, faces, bibs) by
+-- DELETE /api/admin/sources/:id. Face VECTORS stay in their R2 shards, because a
+-- shard is an immutable byte range other rows are indexed into; with no faces row
+-- pointing at them they can never be joined back to a photo, so they are
+-- unreachable rather than merely hidden.
+ALTER TABLE sources ADD COLUMN credit_name TEXT;
+ALTER TABLE sources ADD COLUMN removed_at TEXT;
