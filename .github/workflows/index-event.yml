@@ -37,6 +37,10 @@ concurrency:
 jobs:
   index:
     runs-on: ubuntu-latest
+    # Paired with RUN_DEADLINE_MIN on the Index step below, which MUST stay
+    # lower. This timeout kills the process outright, and a killed pass cannot
+    # ask for the continuation that keeps a large album moving on its own — the
+    # indexer stops itself before it, between batches, and requests one.
     timeout-minutes: 330
 
     steps:
@@ -124,6 +128,10 @@ jobs:
           JOB_ID:    ${{ github.event.client_payload.job_id    || inputs.job_id }}
           IMAGE_SOURCE: ${{ github.event.client_payload.image_source || inputs.image_source || 'original' }}
           ONLY_FILE: ${{ github.event.client_payload.only_file || '' }}
+          # 30 minutes under this job's timeout-minutes. Set here rather than
+          # left to the default in config.py so the two numbers sit in one file
+          # and a change to either is visibly a change to the pair.
+          RUN_DEADLINE_MIN: '300'
           # These three resolve to one of two fixed literals, so they are the only
           # values deliberately left unquoted below — an empty string must expand to
           # no argument at all rather than to an empty one.

@@ -212,15 +212,20 @@ class Uploader:
                 },
             )
 
-    def request_continue(self, job_id: str) -> bool:
-        """Ask the Worker to re-dispatch this job after a Drive rate limit.
+    def request_continue(self, job_id: str, reason: str = "quota") -> bool:
+        """Ask the Worker to re-dispatch this job after an early stop.
+
+        `reason` is "quota" (Drive throttled the downloads) or "time" (the pass
+        reached its own deadline before the runner's timeout could kill it). It
+        only selects the wording of the job's error line; the guards on the
+        Worker side are the same either way.
 
         The runner cannot re-dispatch itself: GH_DISPATCH_TOKEN lives only in
         the Worker, deliberately, so a CI runner never holds a token that can
         trigger workflows.
         """
         try:
-            res = self._post(f"/api/internal/jobs/{job_id}/continue", {})
+            res = self._post(f"/api/internal/jobs/{job_id}/continue", {"reason": reason})
             return bool(res.get("dispatched"))
         except Exception as exc:  # noqa: BLE001
             log.warning("Could not request continuation: %s", exc)

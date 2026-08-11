@@ -58,12 +58,21 @@ interface PhotoIn {
  * faces and bibs to rows it did not itself name.
  */
 /**
- * Re-dispatch a job that stopped early on a Drive rate limit.
+ * Re-dispatch a job that stopped early.
  *
- * Drive throttles sustained bulk downloading, so a large album of full-size
- * originals reliably stops around 1 GB. Resume means each run makes progress,
- * but without this the organizer has to notice and press the button again —
- * repeatedly, for one album. The runner asks for a continuation instead.
+ * Two walls stop a pass short, and the organizer should not have to know the
+ * difference between them:
+ *
+ *   quota — Drive throttles sustained bulk downloading, so a large album of
+ *           full-size originals reliably stops around 1 GB.
+ *   time  — a runner is killed at 330 minutes. The pass now stops itself at 300
+ *           and asks to continue, because the kill leaves no code running to
+ *           ask: six consecutive passes over a 31k-photo folder died that way,
+ *           each ~3,000 photos in, each needing a manual press to resume.
+ *
+ * Resume means each run makes progress, but without this the organizer has to
+ * notice and press the button again — repeatedly, for one album. The runner
+ * asks for a continuation instead.
  *
  * Two independent guards, because a folder that can never finish must not loop:
  *
@@ -83,16 +92,23 @@ internalRoutes.post('/jobs/:id/continue', async (c) => {
   const id = c.req.param('id');
   const MAX_ATTEMPTS = 60;
 
+  // Wording only — every guard below applies to both. Defaulted rather than
+  // required so a runner from before the field existed still continues.
+  const body = await c.req.json<{ reason?: string }>().catch(() => ({} as { reason?: string }));
+  const timedOut = body.reason === 'time';
+
   const job = await c.env.DB.prepare('SELECT * FROM jobs WHERE id = ?').bind(id).first<any>();
   if (!job) throw new HttpError(404, 'Job not found', 'no_job');
 
-  // Guard 1: no progress means the quota has not recovered. Stop.
+  // Guard 1: a pass that indexed nothing would repeat itself for nothing.
   if ((job.done ?? 0) === 0) {
     await c.env.DB.prepare(
       `UPDATE jobs SET status = 'partial', error = ?, updated_at = ? WHERE id = ?`,
     ).bind(
-      'Drive served no photos this pass — its download quota has not reset yet. ' +
-        'Press Re-index later to continue.',
+      timedOut
+        ? 'This pass ran out of time without indexing a photo. Press Re-index to try again.'
+        : 'Drive served no photos this pass — its download quota has not reset yet. ' +
+          'Press Re-index later to continue.',
       nowIso(), id,
     ).run();
     return c.json({ dispatched: false, reason: 'no_progress' });
@@ -102,7 +118,10 @@ internalRoutes.post('/jobs/:id/continue', async (c) => {
     await c.env.DB.prepare(
       "UPDATE jobs SET status = 'partial', error = ?, updated_at = ? WHERE id = ?",
     ).bind(
-      `Stopped after ${MAX_ATTEMPTS} automatic continuations — Drive is still rate-limiting this folder. Everything indexed so far is live; press Start indexing again later to resume.`,
+      `Stopped after ${MAX_ATTEMPTS} automatic continuations — ${
+        timedOut ? 'this folder is taking more CI time than one chain allows'
+                 : 'Drive is still rate-limiting this folder'
+      }. Everything indexed so far is live; press Start indexing again later to resume.`,
       nowIso(), id,
     ).run();
     return c.json({ dispatched: false, reason: 'max_attempts' });
@@ -143,7 +162,8 @@ internalRoutes.post('/jobs/:id/continue', async (c) => {
     `UPDATE jobs SET attempts = attempts + 1, status = 'queued',
                      error = ?, updated_at = ? WHERE id = ?`,
   ).bind(
-    `Drive rate limit — continuing automatically (attempt ${(job.attempts ?? 0) + 2} of ${MAX_ATTEMPTS + 1}).`,
+    `${timedOut ? 'Reached this run’s time limit' : 'Drive rate limit'} — continuing ` +
+      `automatically (attempt ${(job.attempts ?? 0) + 2} of ${MAX_ATTEMPTS + 1}).`,
     nowIso(), id,
   ).run();
 
