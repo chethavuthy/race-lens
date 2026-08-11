@@ -40,6 +40,25 @@ WEB_ORIGIN = "https://racelens.runlytics.fit,https://race-lens.runlytics.fit,htt
 R2_PUBLIC_BASE = "https://img.runlytics.fit"
 # Set to "1" ONLY in .dev.vars for local work. Never in a deployed environment.
 DEV_ADMIN_BYPASS = "0"
+# Hostnames a Cloudflare Access application actually fronts. /api/admin/* is
+# refused on anything else.
+#
+# race-lens-api.jt7.workers.dev is deliberately NOT here, and cannot be: Access
+# attaches only to hostnames in a zone we own, and workers.dev is Cloudflare's.
+# That origin stays on (workers_dev = true above) because *.pages.dev has no
+# other API base — it simply stops serving admin, which it could never serve
+# correctly anyway, since the Access cookie is host-scoped.
+#
+# Must match the Access applications created by tools/finish-deploy.sh exactly.
+ACCESS_HOSTS = "racelens.runlytics.fit,race-lens.runlytics.fit"
+# Cloudflare Access team, for the JWKS URL and the `iss` claim.
+CF_ACCESS_TEAM = "animekizz"
+# One Access application per hostname => one AUD tag each, so BOTH are listed.
+# This team also fronts unrelated apps signed by the same keys, so the audience
+# check is what scopes a valid signature to Race Lens rather than to any of them.
+#   racelens.runlytics.fit  -> a113d076…
+#   race-lens.runlytics.fit -> 3c8aa0da…
+CF_ACCESS_AUD = "a113d076162960e7b8026ff5cd12ff0ccfe2bb61ed43cbfea65dbc05c85de171,3c8aa0dad25694b63206951931a20af6804a10281668de17c8f267986e00c255"
 
 [[d1_databases]]
 binding = "DB"

@@ -11,6 +11,19 @@ export interface Env {
   INGEST_SECRET: string;
   GH_DISPATCH_TOKEN: string;
   GH_REPO: string;
+  /**
+   * Comma-separated hostnames a Cloudflare Access application actually fronts.
+   * The workers.dev origin is deliberately absent — see lib access.ts.
+   */
+  ACCESS_HOSTS: string;
+  /** Access team name: <team>.cloudflareaccess.com, used for the JWKS and `iss`. */
+  CF_ACCESS_TEAM: string;
+  /**
+   * Comma-separated AUD tags. One Access application per hostname means one AUD
+   * each, and the team also fronts unrelated apps whose tokens share these keys —
+   * so this list is what scopes a valid signature to Race Lens.
+   */
+  CF_ACCESS_AUD: string;
 }
 
 export interface EventRow {
