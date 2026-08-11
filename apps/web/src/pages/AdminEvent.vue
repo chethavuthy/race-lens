@@ -30,7 +30,8 @@ const newLink = ref('');
 let poll: number | undefined;
 
 const totals = computed(() =>
-  report.value?.totals ?? { links: 0, found: 0, found_known: true, indexed: 0, missing: 0 });
+  report.value?.totals ??
+  { links: 0, removed_links: 0, found: 0, found_known: true, indexed: 0, missing: 0 });
 const quality = computed(() => report.value?.quality ?? null);
 
 // A stalled job is NOT active: treating it as such would keep the spinner up
@@ -144,6 +145,84 @@ const passesLeft = (s: { missing: number; image_source: string }) =>
 
 const reindex = (id: string) =>
   run(id, () => api.admin.reindexSource(id), 'Re-indexing started — already-indexed photos are skipped.');
+
+type Source = Report['sources'][number];
+
+/* ------------------------------------------------------------------ credit --
+   The byline under the event title. Held as a per-row draft rather than bound
+   straight to the report, because the report is re-fetched every 15s while a
+   pass runs and that would wipe half-typed names. */
+const creditEdits = ref<Record<string, string>>({});
+const creditValue = (s: Source) => creditEdits.value[s.id] ?? s.credit_name ?? '';
+const creditDirty = (s: Source) => creditValue(s).trim() !== (s.credit_name ?? '');
+
+const saveCredit = (s: Source) =>
+  run(`credit-${s.id}`, async () => {
+    await api.admin.setCredit(s.id, creditValue(s).trim());
+    // Drop the draft so the row falls back to the stored value the reload brings.
+    delete creditEdits.value[s.id];
+  }, 'Credit saved — it shows under the event title and above the photos.');
+
+/* --------------------------------------------------------------- takedown --
+   A photographer messages @chethavuthy on Telegram; this is the control that
+   answers them. */
+
+/** Photos deleted so far in the current removal, for the button's progress. */
+const removing = ref<{ id: string; purged: number } | null>(null);
+
+/**
+ * Take one link off the site and delete everything indexed from it.
+ *
+ * The API purges in batches and reports what is left, so this loops until the
+ * album is gone: a single request cannot delete 8,000 photos inside a Worker's
+ * limits, and the albums where this matters most are the big ones. The link is
+ * already invisible to the public site after the first call — the loop is
+ * finishing the deletion, not the hiding.
+ */
+async function removeLink(s: Source) {
+  const label = s.credit_name || s.drive_folder_id;
+  const ok = confirm(
+    `Take ${label}'s link off the site?\n\n` +
+    `${plural(s.indexed, 'indexed photo')} will be deleted — thumbnails, faces and bibs with ` +
+    `them. The link cannot be re-indexed until you restore it.\n\nThis cannot be undone.`,
+  );
+  if (!ok) return;
+
+  busy.value = `rm-${s.id}`;
+  removing.value = { id: s.id, purged: 0 };
+  try {
+    for (;;) {
+      const r = await api.admin.removeSource(s.id);
+      removing.value = { id: s.id, purged: removing.value.purged + r.purged };
+      if (r.remaining === 0) break;
+      // A round that deleted nothing while claiming photos remain would spin this
+      // loop against the API forever. Stop and say so; the link is already hidden,
+      // and pressing Remove again resumes the purge.
+      if (r.purged === 0) {
+        throw new Error(
+          `The link is off the site, but ${r.remaining.toLocaleString()} photos could not be ` +
+          `deleted. Press Remove again to retry.`,
+        );
+      }
+    }
+    notice.value =
+      `Link removed — ${removing.value.purged.toLocaleString()} photos deleted. It is off the ` +
+      `public page and will not be re-indexed.`;
+    error.value = null;
+  } catch (e: any) {
+    error.value = e.message;
+    notice.value = null;
+  } finally {
+    busy.value = null;
+    removing.value = null;
+    await load(true);
+  }
+}
+
+/** Clear a removal. Does not restore the photos — Re-index does that. */
+const restoreLink = (s: Source) =>
+  run(`restore-${s.id}`, () => api.admin.restoreSource(s.id),
+      'Removal cleared. The photos are still deleted — press Re-index to fetch the album again.');
 
 const setStatus = (s: EventSummary['status']) => run('status', () => api.admin.setStatus(props.id, s));
 
@@ -277,15 +356,39 @@ const when = (iso: string) => new Date(iso).toLocaleString();
 
       <!-- per link -->
       <div class="card">
-        <h2>Drive links ({{ totals.links }})</h2>
+        <h2>
+          Drive links ({{ totals.links }})
+          <span v-if="totals.removed_links" class="muted small">
+            + {{ totals.removed_links }} removed
+          </span>
+        </h2>
         <p v-if="!report?.sources.length" class="muted" style="margin: 0">No links bound yet.</p>
         <div v-for="s in report?.sources ?? []" :key="s.id" class="row">
           <div class="row-main">
             <a :href="`https://drive.google.com/drive/folders/${s.drive_folder_id}`"
                target="_blank" rel="noopener" class="mono-id">{{ s.drive_folder_id }}</a>
             <div class="muted small">added {{ when(s.added_at) }}</div>
+            <!-- The byline the event page shows. Left empty, that album is
+                 credited by its link alone. -->
+            <form class="credit-edit" @submit.prevent="saveCredit(s)">
+              <label class="sr-only" :for="`credit-${s.id}`">Credit this photographer as</label>
+              <input :id="`credit-${s.id}`" :value="creditValue(s)" maxlength="80"
+                     :placeholder="s.removed_at ? 'Removed' : 'Credit as… e.g. Sok Dara'"
+                     :disabled="!!s.removed_at"
+                     @input="creditEdits[s.id] = ($event.target as HTMLInputElement).value" />
+              <button type="submit" :disabled="!creditDirty(s) || busy === `credit-${s.id}`">
+                <span v-if="busy === `credit-${s.id}`" class="spinner" /> Save
+              </button>
+            </form>
           </div>
-          <span class="small">
+          <span v-if="s.removed_at" class="small">
+            <span class="state err">removed</span>
+            <span class="muted"> · {{ when(s.removed_at) }}</span>
+            <span v-if="s.indexed > 0" class="muted small" style="display: block">
+              {{ s.indexed.toLocaleString() }} photos still to delete
+            </span>
+          </span>
+          <span v-else class="small">
             <strong>{{ s.indexed }}</strong> / {{ s.discovered_known ? s.discovered : '?' }} indexed
             <span v-if="s.missing > 0" class="state warn"> · {{ s.missing }} missing</span>
             <span v-else-if="s.discovered_known" class="state ok"> · complete</span>
@@ -295,19 +398,43 @@ const when = (iso: string) => new Date(iso).toLocaleString();
             </span>
           </span>
           <div class="row-actions">
-            <div class="segmented tiny" role="group" aria-label="Image size to download">
-              <button :aria-selected="s.image_source !== 'thumb'"
-                      :disabled="busy === `src-${s.id}` || !!activeJob"
-                      title="Download the full-size original from Drive"
-                      @click="setSource(s.id, 'original')">Original</button>
-              <button :aria-selected="s.image_source === 'thumb'"
-                      :disabled="busy === `src-${s.id}` || !!activeJob"
-                      title="Download Drive's resized copy — same faces and bibs, ~12x more photos per pass"
-                      @click="setSource(s.id, 'thumb')">Resized</button>
-            </div>
-            <button :disabled="busy === s.id || !!activeJob" @click="reindex(s.id)">
-              <span v-if="busy === s.id" class="spinner" /> Re-index
-            </button>
+            <template v-if="s.removed_at">
+              <!-- Enabled only while photos remain: a purge that was interrupted
+                   (a closed tab, a failed round) is resumed by pressing it again,
+                   and once the album is gone the control has nothing left to do. -->
+              <button :disabled="busy === `rm-${s.id}` || s.indexed === 0" @click="removeLink(s)">
+                <span v-if="busy === `rm-${s.id}`" class="spinner" />
+                {{ s.indexed > 0 ? 'Finish deleting' : 'Deleted' }}
+              </button>
+              <button :disabled="busy === `restore-${s.id}`" @click="restoreLink(s)">
+                <span v-if="busy === `restore-${s.id}`" class="spinner" /> Restore link
+              </button>
+            </template>
+            <template v-else>
+              <div class="segmented tiny" role="group" aria-label="Image size to download">
+                <button :aria-selected="s.image_source !== 'thumb'"
+                        :disabled="busy === `src-${s.id}` || !!activeJob"
+                        title="Download the full-size original from Drive"
+                        @click="setSource(s.id, 'original')">Original</button>
+                <button :aria-selected="s.image_source === 'thumb'"
+                        :disabled="busy === `src-${s.id}` || !!activeJob"
+                        title="Download Drive's resized copy — same faces and bibs, ~12x more photos per pass"
+                        @click="setSource(s.id, 'thumb')">Resized</button>
+              </div>
+              <button :disabled="busy === s.id || !!activeJob" @click="reindex(s.id)">
+                <span v-if="busy === s.id" class="spinner" /> Re-index
+              </button>
+              <!-- The photographer's own request, and the only destructive control
+                   on this page — so it is styled as one and confirms first. -->
+              <button class="danger" :disabled="busy === `rm-${s.id}` || !!activeJob"
+                      title="The photographer asked for this album to be taken down"
+                      @click="removeLink(s)">
+                <span v-if="busy === `rm-${s.id}`" class="spinner" />
+                {{ removing?.id === s.id
+                    ? `Removing… ${removing.purged.toLocaleString()} deleted`
+                    : 'Remove' }}
+              </button>
+            </template>
           </div>
         </div>
 

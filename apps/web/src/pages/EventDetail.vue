@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { api, ApiError, type EventSummary, type Photo } from '../lib/api';
+import { api, ApiError, type Credit, type EventSummary, type Photo } from '../lib/api';
 import { embedLargestFace, loadModels, NoFaceError, type LoadPhase } from '../lib/face';
 import PhotoGrid from '../components/PhotoGrid.vue';
 import type { GridItem } from '../lib/grid';
@@ -23,6 +23,7 @@ const tab = ref<Tab>('bib');
 const tabRefs = ref<HTMLButtonElement[]>([]);
 
 const event = ref<EventSummary | null>(null);
+const credits = ref<Credit[]>([]);
 const browse = ref<Photo[]>([]);
 const cursor = ref<string | null>(null);
 const loadingEvent = ref(true);
@@ -110,6 +111,34 @@ const usesCamera = computed(() => tab.value !== 'bib');
 const bibsEnabled = computed(() => event.value?.bibs_enabled !== false);
 const TABS = computed(() => ALL_TABS.filter((t) => t.id !== 'bib' || bibsEnabled.value));
 
+/* ------------------------------------------------------------------ credit --
+   Every frame on this page is somebody's work, and an event absorbs folders from
+   several photographers at once. The byline goes in the existing meta line rather
+   than a block of its own — the runner came here to find themselves — and the full
+   list, with each album's link, sits under the grid. */
+
+/** The one route a photographer has for taking their album back off the site. */
+const TELEGRAM = 'https://t.me/chethavuthy';
+
+/** Sources with a recorded name. An unnamed one still gets a row in the block below. */
+const namedCredits = computed(() => credits.value.filter((c) => !!c.name));
+
+/**
+ * The byline for the meta line: "Sok Dara and Chan Nita".
+ *
+ * Truncates past three, because this shares one line with the photo count and a
+ * four-name list wraps it on any handset. The block under the grid names all of
+ * them regardless, so nothing is lost — only deferred.
+ */
+const byline = computed(() => {
+  const names = namedCredits.value.map((c) => c.name as string);
+  if (!names.length) return null;
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  if (names.length === 3) return `${names[0]}, ${names[1]} and ${names[2]}`;
+  return `${names[0]} and ${names.length - 1} others`;
+});
+
 /**
  * The URL drives the bib search — on first paint, on Back/Forward, and on every
  * submit. Routing all of them through one watcher means a shared link and a
@@ -141,6 +170,7 @@ onMounted(async () => {
     // 'bib' is the initial tab because it is the right default for a race. If
     // this event has no bibs, move off it before anything renders a dead search.
     if (r.event.bibs_enabled === false && tab.value === 'bib') tab.value = 'selfie';
+    credits.value = r.credits ?? [];
     browse.value = r.photos;
     cursor.value = r.cursor;
   } catch (e: any) {
@@ -387,6 +417,9 @@ async function onFile(e: Event) {
     <h1>{{ event.name }}</h1>
     <p class="muted" style="margin: 0 0 var(--s-5)">
       {{ plural(event.photo_count, 'photo') }}
+      <!-- The names link to the credit block at the foot of the page, where the
+           albums and the per-photographer counts are. -->
+      <template v-if="byline"> · by <a class="byline" href="#credits">{{ byline }}</a></template>
       <template v-if="event.status === 'partial'">
         · <span>some photos are still missing from the photographer</span>
       </template>
@@ -604,5 +637,46 @@ async function onFile(e: Event) {
         </p>
       </div>
     </template>
+
+    <!-- credit ------------------------------------------------------------
+         Ends the page, under the photos, and stays put whether the reader is
+         browsing or looking at search results: whose work this is does not
+         depend on what they searched for. -->
+    <section v-if="credits.length" id="credits" class="credit-foot">
+      <h2>Photos by</h2>
+      <div class="card">
+        <ul class="credit-list">
+          <li v-for="c in credits" :key="c.album_url" class="credit">
+            <span class="who">
+              <!-- An unnamed source is not given an invented byline; its album
+                   link is the whole of what we can honestly say about it. -->
+              <span class="name">{{ c.name || 'Album from Google Drive' }}</span>
+              <span class="count muted small">{{ plural(c.photo_count, 'photo') }}</span>
+            </span>
+            <a class="btn" :href="c.album_url" target="_blank" rel="noopener">Open album ↗</a>
+          </li>
+        </ul>
+        <p class="muted small" style="margin: var(--s-4) 0 0; padding-top: var(--s-4);
+                                      border-top: 1px solid var(--line)">
+          Copyright stays with the photographer. Race Lens shows a small preview and links to
+          their album — every full-size photo comes from them.
+        </p>
+      </div>
+
+      <h2 style="margin-top: var(--s-6)">Are these your photos?</h2>
+      <div class="card">
+        <p style="margin: 0">
+          If you shared one of these albums and want it off Race Lens, send me the link on
+          Telegram. The album and everything indexed from it comes down. No form, no reason
+          needed.
+        </p>
+        <a class="btn primary tg" :href="TELEGRAM" target="_blank" rel="noopener">
+          Message @chethavuthy
+        </a>
+        <p class="muted small" style="margin: 0">
+          Opens Telegram. Send it from the account that shared the album so I know it's you.
+        </p>
+      </div>
+    </section>
   </template>
 </template>

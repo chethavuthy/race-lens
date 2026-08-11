@@ -12,6 +12,18 @@ export interface EventSummary {
   created_at?: string;
 }
 
+/**
+ * One photographer's contribution to an event — a Drive folder, credited.
+ *
+ * `name` is null until an organizer records one, in which case the page shows the
+ * album link on its own rather than inventing a byline.
+ */
+export interface Credit {
+  name: string | null;
+  album_url: string;
+  photo_count: number;
+}
+
 export interface Photo {
   id: string;
   thumb_url: string | null;
@@ -98,7 +110,8 @@ export const api = {
   listEvents: () => req<{ events: EventSummary[] }>('/api/events'),
 
   getEvent: (slug: string) =>
-    req<{ event: EventSummary; photos: Photo[]; cursor: string | null }>(`/api/events/${slug}`),
+    req<{ event: EventSummary; photos: Photo[]; cursor: string | null; credits: Credit[] }>(
+      `/api/events/${slug}`),
 
   getPhotos: (slug: string, cursor: string | null, limit = 60) =>
     req<{ photos: Photo[]; cursor: string | null }>(
@@ -188,9 +201,26 @@ export const api = {
       req<{ event: EventSummary }>(`/api/admin/events/${eventId}`),
 
     setImageSource: (sourceId: string, imageSource: 'original' | 'thumb') =>
-      req<{ ok: true; image_source: string }>(`/api/admin/sources/${sourceId}`, {
+      req<{ ok: true }>(`/api/admin/sources/${sourceId}`, {
         ...json({ image_source: imageSource }), method: 'PATCH',
       }),
+
+    /** The photographer's byline on the event page. Empty clears it. */
+    setCredit: (sourceId: string, creditName: string) =>
+      req<{ ok: true }>(`/api/admin/sources/${sourceId}`, {
+        ...json({ credit_name: creditName }), method: 'PATCH',
+      }),
+
+    /**
+     * One round of a link removal. Returns what is left to purge, because a large
+     * album takes several calls — see removeSourceFully in AdminEvent.vue.
+     */
+    removeSource: (sourceId: string) =>
+      req<{ ok: true; purged: number; remaining: number }>(
+        `/api/admin/sources/${sourceId}`, { method: 'DELETE' }),
+
+    restoreSource: (sourceId: string) =>
+      req<{ ok: true }>(`/api/admin/sources/${sourceId}/restore`, { method: 'POST' }),
 
     reindexSource: (sourceId: string) =>
       req<{ job_id: string }>(`/api/admin/sources/${sourceId}/reindex`, { method: 'POST' }),
@@ -222,8 +252,9 @@ export const api = {
       req<{
         sources: { id: string; drive_folder_id: string; drive_url: string;
                    discovered: number; discovered_known: boolean; indexed: number;
-                   missing: number; added_at: string; image_source: string }[];
-        totals: { links: number; found: number; found_known: boolean;
+                   missing: number; added_at: string; image_source: string;
+                   credit_name: string | null; removed_at: string | null }[];
+        totals: { links: number; removed_links: number; found: number; found_known: boolean;
                   indexed: number; missing: number };
         jobs: { id: string; source_id: string | null; status: string; done: number; total: number;
                 skipped: number; attempts: number; error: string | null; updated_at: string;
