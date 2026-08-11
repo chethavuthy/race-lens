@@ -18,6 +18,7 @@ import logging
 import os
 import shutil
 import sys
+import time
 import traceback
 import uuid
 
@@ -76,6 +77,10 @@ def load_bgr(path: str) -> np.ndarray | None:
 
 
 def run(args: argparse.Namespace) -> int:
+    # Started before the Drive walk, not before the batch loop: walking a
+    # 31,000-file folder is itself minutes of the budget, and the deadline is
+    # measured against the runner's timeout, which starts here.
+    started = time.monotonic()
     cfg = Config()
     up = Uploader(cfg)
     drive = DriveClient(cfg.google_api_key)
@@ -169,11 +174,34 @@ def run(args: argparse.Namespace) -> int:
     skipped = 0
     faces_indexed = 0
     quota_hit = False
+    deadline_hit = False
+    deadline_s = cfg.deadline_min * 60
 
     work = cfg.work_dir
     for batch_no, batch in enumerate(
         [images[i : i + cfg.batch_size] for i in range(0, total, cfg.batch_size)]
     ):
+        # Stop on our own terms, between batches, while there is still time to
+        # ask for a continuation.
+        #
+        # This is the second way a pass ends early, and until now the only one
+        # that could not resume. A quota hit is raised, caught and carried to the
+        # continuation request below; the runner's own timeout is a kill, so the
+        # request was never made and a 31k-photo album needed a manual press
+        # every 5h30m. Checked between batches because that is the point where
+        # nothing is in flight: vectors, bibs and faces_done for every batch so
+        # far have already landed.
+        #
+        # Never on the first batch: a pass that starts already past the deadline
+        # would index nothing, and a pass that indexes nothing ends the chain.
+        if batch_no and time.monotonic() - started > deadline_s:
+            log.info("Deadline reached after %d batches — stopping to continue later", batch_no)
+            note("warn", "deadline",
+                 f"This pass ran for {cfg.deadline_min} minutes, the limit for a "
+                 "single CI run. The remaining photos are picked up automatically.")
+            deadline_hit = True
+            break
+
         shutil.rmtree(work, ignore_errors=True)
         os.makedirs(work, exist_ok=True)
 
@@ -409,13 +437,14 @@ def run(args: argparse.Namespace) -> int:
 
     # Any photo we could not fetch means the album is not fully represented.
     # Reporting "done" there is a lie the organizer cannot see through.
-    incomplete = quota_hit or skipped > 0
+    incomplete = quota_hit or deadline_hit or skipped > 0
     status = "partial" if incomplete else "done"
 
-    # A run stopped by Drive's throttle has more to do and will succeed later —
-    # ask for a continuation rather than making the organizer press the button
-    # again. Only when the run actually hit the limit AND left work behind;
-    # a run that merely skipped a few unreadable files must not loop.
+    # A run stopped by Drive's throttle or by its own clock has more to do and
+    # will succeed later — ask for a continuation rather than making the
+    # organizer press the button again. Only when the run actually stopped early
+    # AND left work behind; a run that merely skipped a few unreadable files
+    # must not loop.
     # Scoped to this folder's own files, NOT `discovered - event_total`.
     #
     # already_indexed is event-wide, so subtracting it from one source's
@@ -425,18 +454,23 @@ def run(args: argparse.Namespace) -> int:
     # was false forever and the continuation was never requested — the chain
     # died silently while 260 photos were still missing.
     remaining = len(pending(folder_ids, up.already_indexed(args.event_id)))
-    if quota_hit and remaining > 0 and not args.bibs_only:
-        if up.request_continue(args.job_id):
+    if (quota_hit or deadline_hit) and remaining > 0 and not args.bibs_only:
+        # The reason travels with the request so the job's own error line — the
+        # one the organizer reads while they wait — says which wall this pass hit.
+        reason = "quota" if quota_hit else "time"
+        if up.request_continue(args.job_id, reason):
             log.info(
-                "Drive rate limit with %d photos left — continuation dispatched",
-                remaining,
+                "Stopped early (%s) with %d photos left — continuation dispatched",
+                reason, remaining,
             )
             up.finalize(args.event_id, "partial")
             return 0
         log.warning("Continuation was not dispatched; finishing as partial")
+    stopped = (" — Drive rate limit hit" if quota_hit else
+               " — stopped at this run's time limit" if deadline_hit else "")
     note("info", "summary",
          f"Pass finished: {downloaded} downloaded, {skipped} could not be fetched, "
-         f"{faces_indexed} faces indexed" + (" — Drive rate limit hit" if quota_hit else ""))
+         f"{faces_indexed} faces indexed" + stopped)
     up.log(args.event_id, journal)
 
     up.progress(

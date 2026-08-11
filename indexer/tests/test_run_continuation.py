@@ -105,6 +105,7 @@ class FakeUploader:
     def __init__(self, indexed_event_wide, bibs_enabled=True):
         self._indexed = set(indexed_event_wide)
         self.continue_requested = False
+        self.continue_reason = None
         self.finalized = []
         self.progress_calls = []
         self.bibs_enabled = bibs_enabled
@@ -162,8 +163,9 @@ class FakeUploader:
     def log(self, _event_id, _entries):
         pass
 
-    def request_continue(self, _job_id):
+    def request_continue(self, _job_id, reason="quota"):
         self.continue_requested = True
+        self.continue_reason = reason
         return True
 
     def finalize(self, _event_id, status):
@@ -193,13 +195,17 @@ def _images(prefix, n):
 @pytest.fixture
 def wired(monkeypatch, tmp_path):
     """Patch run()'s collaborators, keeping numpy/Pillow real."""
-    def _build(folder_images, indexed_event_wide, quota_after, bibs_enabled=True):
+    def _build(folder_images, indexed_event_wide, quota_after, bibs_enabled=True,
+               deadline_min=10_000):
         drive = FakeDrive(folder_images, quota_after)
         up = FakeUploader(indexed_event_wide, bibs_enabled=bibs_enabled)
 
         cfg = types.SimpleNamespace(
             google_api_key="k", batch_size=25, thumb_max_edge=1000,
             thumb_quality=80, det_size=640, work_dir=str(tmp_path / "work"),
+            # Effectively no deadline unless a test asks for one: every other
+            # scenario here would otherwise depend on how long it took to run.
+            deadline_min=deadline_min,
         )
         monkeypatch.setattr(run_mod, "Config", lambda: cfg)
         monkeypatch.setattr(run_mod, "Uploader", lambda _cfg: up)
@@ -474,6 +480,81 @@ def test_an_interrupted_batch_leaves_its_photos_unfinished(wired):
         "photos were marked complete despite the vector flush failing, so a later "
         "pass would skip them and they would never get faces"
     )
+
+
+# --- the run's own clock ----------------------------------------------------
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """Advance monotonic time by a fixed step on every read.
+
+    run() reads the clock once at entry and once per batch thereafter, so a
+    step of N seconds makes batch B start at B*N. Faking it keeps these tests
+    instant and, more importantly, deterministic — a real deadline test would
+    be a test of how fast the machine running it is.
+    """
+    def _install(step_s):
+        ticks = {"n": -1}
+
+        def monotonic():
+            ticks["n"] += 1
+            return ticks["n"] * step_s
+
+        monkeypatch.setattr(run_mod, "time", types.SimpleNamespace(monotonic=monotonic))
+    return _install
+
+
+def test_a_pass_that_runs_out_of_time_continues_itself(wired, clock):
+    """The regression this exists for.
+
+    A runner is killed at its timeout, and a killed process cannot ask for a
+    continuation — so six consecutive 5h30m passes over the 31k-photo Angkor
+    folder each stopped ~3,000 photos in and waited for someone to press the
+    button. Stopping between batches, before the kill, is what makes a large
+    album finish on its own.
+    """
+    clock(60)                                   # one minute per batch
+    _, up = wired(_images("src2", 250), set(), quota_after=10_000, deadline_min=5)
+
+    assert run_mod.run(_args()) == 0
+
+    assert up.continue_requested, "a pass stopped by the clock must continue"
+    assert up.continue_reason == "time"
+    assert up.finalized == ["partial"]
+    # Batches start at 0, 60, ... 300 s; the first read strictly past 300 is at
+    # 360, so six batches of 25 ran and the seventh never started.
+    assert len(up.completed) == 150, (
+        "photos processed before the deadline must still be marked complete, or "
+        "the continuation re-downloads them"
+    )
+
+
+def test_the_deadline_never_costs_a_pass_its_first_batch(wired, clock):
+    """A pass that starts already past the deadline must still index something.
+
+    Zero progress ends the chain on the Worker side, so a deadline that could
+    fire before the first batch would turn "this album is slow" into "this album
+    stops forever" — the exact failure it was added to remove.
+    """
+    clock(600)
+    _, up = wired(_images("src2", 60), set(), quota_after=10_000, deadline_min=0)
+
+    assert run_mod.run(_args()) == 0
+
+    assert len(up.completed) == 25, "the first batch must run whatever the clock says"
+    assert up.continue_requested
+    assert up.continue_reason == "time"
+
+
+def test_a_folder_that_finishes_in_time_does_not_continue(wired, clock):
+    """The control: the clock must not manufacture work that is already done."""
+    clock(60)
+    _, up = wired(_images("src2", 40), set(), quota_after=10_000, deadline_min=5)
+
+    assert run_mod.run(_args()) == 0
+    assert not up.continue_requested
+    assert up.finalized == ["ready"]
 
 
 def test_bibs_only_neither_completes_nor_reopens_photos(wired):

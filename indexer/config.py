@@ -39,6 +39,16 @@ class Config:
         # CPU per photo for one extra face.
         self.det_size = int(os.environ.get("DET_SIZE", "2048"))
         self.work_dir = os.environ.get("WORK_DIR", "/tmp/work")
+        # Stop before GitHub does.
+        #
+        # index-event.yml sets timeout-minutes: 330, and that timeout is a kill:
+        # the process never reaches the continuation request at the end of
+        # run(), so the chain stops dead and the album needs a manual press.
+        # Six consecutive passes over the 31k-photo Angkor folder ended exactly
+        # that way, each having indexed ~3,000 photos in 5h30m. 300 leaves half
+        # an hour — many batches' worth — to finish the batch in flight, write
+        # the summary and ask for a continuation.
+        self.deadline_min = int(os.environ.get("RUN_DEADLINE_MIN", "300"))
 
     @property
     def r2_endpoint(self) -> str:
