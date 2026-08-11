@@ -66,6 +66,46 @@ if (!toml) {
   } else {
     ok('DEV_ADMIN_BYPASS is off (admin fails closed without Cloudflare Access)');
   }
+
+  // ACCESS_HOSTS is what stops /api/admin/* answering on the workers.dev origin,
+  // which Cloudflare Access cannot cover. Empty means the gate fails closed
+  // everywhere — safe, but admin is then unreachable, so say so rather than
+  // letting someone discover it as a 403 they cannot explain.
+  const accessHosts = (toml.match(/ACCESS_HOSTS\s*=\s*"([^"]*)"/)?.[1] ?? '')
+    .split(',').map((h) => h.trim()).filter(Boolean);
+  if (!accessHosts.length) {
+    bad('ACCESS_HOSTS is empty — /api/admin/* is refused on every hostname',
+        'List the hostnames your Access applications front, e.g. "racelens.runlytics.fit,race-lens.runlytics.fit"');
+  } else if (accessHosts.some((h) => /\.workers\.dev$/.test(h))) {
+    bad('ACCESS_HOSTS contains a *.workers.dev hostname — that reopens the admin bypass',
+        'Access cannot be attached to workers.dev. Remove it; the origin stays live for public browsing.');
+  } else {
+    ok(`ACCESS_HOSTS gates admin to ${accessHosts.join(', ')}`);
+  }
+
+  // Required now that verifyAccessJwt reads them. Absent, it fails closed and the
+  // organizer is locked out of /admin with a 403 they cannot explain — safe, but
+  // worth catching here rather than in the dashboard.
+  const team = toml.match(/CF_ACCESS_TEAM\s*=\s*"([^"]*)"/)?.[1] ?? '';
+  if (!team || team.startsWith('<')) {
+    bad('CF_ACCESS_TEAM is unset — admin JWT verification fails closed',
+        'Your Access team name, i.e. <team>.cloudflareaccess.com');
+  } else ok(`CF_ACCESS_TEAM is "${team}"`);
+
+  const auds = (toml.match(/CF_ACCESS_AUD\s*=\s*"([^"]*)"/)?.[1] ?? '')
+    .split(',').map((a) => a.trim()).filter(Boolean);
+  const looksLikeAud = (a) => /^[0-9a-f]{64}$/.test(a);
+  if (!auds.length || auds.some((a) => a.startsWith('<'))) {
+    bad('CF_ACCESS_AUD is unset — admin JWT verification fails closed',
+        'One AUD tag per Access application, comma-separated');
+  } else if (!auds.every(looksLikeAud)) {
+    bad(`CF_ACCESS_AUD has ${auds.length} entries but one is not a 64-char hex AUD tag`);
+  } else if (auds.length < accessHosts.length) {
+    soft(`CF_ACCESS_AUD lists ${auds.length} tag(s) for ${accessHosts.length} host(s)`,
+         'finish-deploy.sh creates one application PER HOSTNAME, so expect one AUD each — a missing one 403s that domain');
+  } else {
+    ok(`CF_ACCESS_AUD accepts ${auds.length} audience(s)`);
+  }
 }
 
 // ------------------------------------------------------------------- ML models
@@ -126,7 +166,32 @@ if (remote) {
     await probe('/api/events', [200], 'GET /api/events (liveness)');
     await probe('/health', [200, 404], 'GET /health (flaps while a new workers.dev subdomain propagates)');
     // Must be refused: these are the two doors into the system.
-    await probe('/api/admin/events', [403, 302], 'GET /api/admin/events (must be blocked)');
+    await probe('/api/admin/events', [403, 302], 'GET /api/admin/events, no header');
+
+    // The probe above is NOT sufficient on its own, and used to be the whole test.
+    //
+    // The admin guard once accepted any non-empty Cf-Access-Jwt-Assertion, and this
+    // file sends no such header — so it got its 403 and reported "ok" while
+    // `curl -H 'Cf-Access-Jwt-Assertion: x'` against the same URL returned 200 and
+    // full organizer control. A check that only exercises the path an attacker
+    // would not take is worse than no check: it manufactures confidence.
+    //
+    // Note this cannot be verified with `wrangler dev` — declaring `routes` makes
+    // it rewrite request.url to the first route's hostname, so the hostname gate
+    // passes locally no matter what you connect to. Only a deployed origin answers
+    // this honestly, which is why it lives behind --remote.
+    try {
+      const forged = await fetch(`${apiBase}/api/admin/events`, {
+        redirect: 'manual',
+        headers: { 'Cf-Access-Jwt-Assertion': 'forged.not.a.jwt' },
+      });
+      if (forged.status === 403 || forged.status === 302) {
+        ok(`GET /api/admin/events with a forged assertion → ${forged.status}`);
+      } else {
+        bad(`forged Cf-Access-Jwt-Assertion → ${forged.status} (expected 403 or 302) — ADMIN IS OPEN`,
+            'Check ACCESS_HOSTS in wrangler.toml covers only Access-fronted hostnames, and that this --api base is one of them');
+      }
+    } catch (e) { bad(`forged-assertion probe → ${e.message}`); }
     try {
       const res = await fetch(`${apiBase}/api/internal/events/x/finalize`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Ingest-Secret': 'wrong' }, body: '{}',

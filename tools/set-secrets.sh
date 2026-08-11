@@ -27,7 +27,10 @@ worker() {  # worker <NAME> <value>
 }
 actions() { # actions <NAME> <value>
   if [ -n "${2:-}" ]; then
-    gh secret set "$1" --repo "$REPO" --body "$2" >/dev/null 2>&1 \
+    # stdin, not --body: an argv value is visible to any `ps` on this machine for
+    # as long as the call runs, which contradicts this file's own header. gh reads
+    # the value from a file, and `-` means standard input.
+    printf '%s' "$2" | gh secret set "$1" --repo "$REPO" --body-file - >/dev/null 2>&1 \
       && echo "  ${GRN}set${OFF}   actions/$1" || echo "  FAIL  actions/$1"
   else
     echo "  ${YEL}skip${OFF}  actions/$1 ${DIM}(blank in .env.deploy)${OFF}"
@@ -56,7 +59,17 @@ actions API_BASE_URL          "${API_BASE_URL:-https://race-lens-api.jt7.workers
 if [ -n "${GOOGLE_API_KEY:-}" ] && [ -n "${TEST_FOLDER_ID:-}" ]; then
   echo
   echo "Drive check on folder $TEST_FOLDER_ID"
-  BODY=$(curl -s "https://www.googleapis.com/drive/v3/files?q=%27$TEST_FOLDER_ID%27+in+parents+and+trashed%3Dfalse&fields=files(id,name,mimeType)&pageSize=5&supportsAllDrives=true&includeItemsFromAllDrives=true&key=$GOOGLE_API_KEY")
+  # --get --data-urlencode keeps the key out of the command line: curl assembles
+  # the query itself, so the API key never appears in argv where `ps` can read it.
+  # The key arrives on stdin via printf, NOT a here-string: `<<<` appends a newline
+  # and `@-` reads it, which encoded the key as "…%0a" and made Drive reject it.
+  BODY=$(curl -s --get "https://www.googleapis.com/drive/v3/files" \
+    --data-urlencode "q='$TEST_FOLDER_ID' in parents and trashed=false" \
+    --data-urlencode "fields=files(id,name,mimeType)" \
+    --data-urlencode "pageSize=5" \
+    --data-urlencode "supportsAllDrives=true" \
+    --data-urlencode "includeItemsFromAllDrives=true" \
+    --data-urlencode "key@-" < <(printf '%s' "$GOOGLE_API_KEY"))
   node -e '
 const b=JSON.parse(require("fs").readFileSync(0,"utf8"));
 if (b.error) { console.log("  FAIL  "+b.error.code+" "+b.error.message);

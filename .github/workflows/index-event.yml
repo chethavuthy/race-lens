@@ -75,6 +75,20 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
           df -h /
 
+      # NOTE ON EVERY `env:` BLOCK BELOW
+      #
+      # Dispatch inputs reach the shell as environment variables, never as script
+      # text. `${{ ... }}` is substituted BEFORE bash sees the line, so a value
+      # containing `"; curl … | sh; "` used to execute on a runner holding
+      # GOOGLE_API_KEY, INGEST_SECRET and the R2 write credentials.
+      #
+      # Nothing is known to be exploitable today: every field is either newId()-
+      # generated or charset-validated by parseFolderId. The exception was
+      # only_file, which comes from photos.drive_file_id — a column the internal
+      # API accepted verbatim until it started validating it. That is one
+      # unvalidated column of margin, and the authentication in front of it was
+      # itself broken (see AUDIT.md S1). Indirection costs nothing and does not
+      # depend on either guard holding.
       - name: Benchmark folder (thumbnail vs original)
         if: github.event.action == 'benchmark-folder'
         env:
@@ -85,11 +99,14 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          BENCHMARK_ID: ${{ github.event.client_payload.benchmark_id }}
+          FOLDER_ID: ${{ github.event.client_payload.folder_id }}
+          SAMPLE: ${{ github.event.client_payload.sample || 6 }}
         run: |
           python -m indexer.benchmark \
-            --benchmark-id "${{ github.event.client_payload.benchmark_id }}" \
-            --folder-id    "${{ github.event.client_payload.folder_id }}" \
-            --sample       "${{ github.event.client_payload.sample || 6 }}"
+            --benchmark-id "$BENCHMARK_ID" \
+            --folder-id    "$FOLDER_ID" \
+            --sample       "$SAMPLE"
 
       - name: Index
         if: github.event.action != 'benchmark-folder'
@@ -101,17 +118,27 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          EVENT_ID:  ${{ github.event.client_payload.event_id  || inputs.event_id }}
+          SOURCE_ID: ${{ github.event.client_payload.source_id || inputs.source_id }}
+          FOLDER_ID: ${{ github.event.client_payload.folder_id || inputs.folder_id }}
+          JOB_ID:    ${{ github.event.client_payload.job_id    || inputs.job_id }}
+          IMAGE_SOURCE: ${{ github.event.client_payload.image_source || inputs.image_source || 'original' }}
+          ONLY_FILE: ${{ github.event.client_payload.only_file || '' }}
+          # These three resolve to one of two fixed literals, so they are the only
+          # values deliberately left unquoted below — an empty string must expand to
+          # no argument at all rather than to an empty one.
+          FLAG_BIBS_ONLY: ${{ (github.event.client_payload.bibs_only || inputs.bibs_only) && '--bibs-only' || '' }}
+          FLAG_NO_RESUME: ${{ (github.event.client_payload.no_resume || inputs.no_resume) && '--no-resume' || '' }}
+          FLAG_REBUILD:   ${{ (github.event.client_payload.rebuild   || inputs.rebuild)   && '--rebuild'   || '' }}
         run: |
           python -m indexer.main \
-            --event-id  "${{ github.event.client_payload.event_id  || inputs.event_id }}" \
-            --source-id "${{ github.event.client_payload.source_id || inputs.source_id }}" \
-            --folder-id "${{ github.event.client_payload.folder_id || inputs.folder_id }}" \
-            --job-id    "${{ github.event.client_payload.job_id    || inputs.job_id }}" \
-            ${{ (github.event.client_payload.bibs_only || inputs.bibs_only) && '--bibs-only' || '' }} \
-            ${{ (github.event.client_payload.no_resume || inputs.no_resume) && '--no-resume' || '' }} \
-            ${{ (github.event.client_payload.rebuild || inputs.rebuild) && '--rebuild' || '' }} \
-            --image-source "${{ github.event.client_payload.image_source || inputs.image_source || 'original' }}" \
-            --only-file "${{ github.event.client_payload.only_file || '' }}"
+            --event-id  "$EVENT_ID" \
+            --source-id "$SOURCE_ID" \
+            --folder-id "$FOLDER_ID" \
+            --job-id    "$JOB_ID" \
+            $FLAG_BIBS_ONLY $FLAG_NO_RESUME $FLAG_REBUILD \
+            --image-source "$IMAGE_SOURCE" \
+            --only-file "$ONLY_FILE"
 
       - name: Report failure
         # main.py reports its own exceptions, but this also catches the cases it
@@ -121,9 +148,14 @@ jobs:
         env:
           API_BASE_URL: ${{ secrets.API_BASE_URL }}
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+          JOB_ID: ${{ github.event.client_payload.job_id || inputs.job_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          JOB_ID="${{ github.event.client_payload.job_id || inputs.job_id }}"
-          curl -sS -X POST "$API_BASE_URL/api/internal/jobs/$JOB_ID/progress" \
-            -H "X-Ingest-Secret: $INGEST_SECRET" \
-            -H 'Content-Type: application/json' \
-            -d "{\"status\":\"failed\",\"error\":\"Runner job failed — see ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+          # jq builds the JSON so the message cannot break out of the string it
+          # sits in, and the URL arrives as data rather than as script text.
+          jq -n --arg err "Runner job failed — see $RUN_URL" \
+            '{status: "failed", error: $err}' \
+          | curl -sS -X POST "$API_BASE_URL/api/internal/jobs/$JOB_ID/progress" \
+              -H "X-Ingest-Secret: $INGEST_SECRET" \
+              -H 'Content-Type: application/json' \
+              --data-binary @-

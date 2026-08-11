@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# CI reads the repo and nothing else. `npm ci` runs whatever lifecycle scripts the
+# dependency tree declares, and on a pull_request from a branch the token carries
+# the repository default, which is write on older repos. Nothing here needs it.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -35,6 +41,15 @@ jobs:
       - name: Typecheck (Worker + web)
         run: npm run typecheck
 
+      # The admin gate cannot be tested against a deployed origin: the hostname
+      # check 403s on workers.dev and Access itself 302s on the custom domains, so
+      # both outer layers shield verifyAccessJwt from any request an outsider can
+      # make. It only runs for a real logged-in session, which means a regression
+      # here shows up as the organizer being locked out. Tested here instead,
+      # against a keypair the test controls.
+      - name: Test the admin access gate
+        run: npm --workspace apps/api run test
+
       - name: Build frontend
         run: npm run build
 
@@ -48,6 +63,60 @@ jobs:
       # and an unverified parity gate.
       - name: Preflight
         run: node tools/preflight.mjs
+
+      # The gap the audit came out of: apps/api had no tests, and four findings —
+      # two of them fatal to a fresh database — were invisible to tsc and hidden in
+      # production by DDL that had been applied by hand and never committed.
+      #
+      # Runs against a LOCAL D1 built from schema.sql + every migration, so it also
+      # proves those files can actually stand a system up on their own. Real
+      # credentials are not involved: .dev.vars here holds test values, and the one
+      # GitHub dispatch it triggers is expected to fail.
+      - name: Worker smoke test
+        run: |
+          # CI ONLY — this OVERWRITES apps/api/.dev.vars. Do not run the step
+          # verbatim on a machine that has a real one.
+          cat > apps/api/.dev.vars <<'VARS'
+          DEV_ADMIN_BYPASS=1
+          INGEST_SECRET=smoke-test-secret
+          GOOGLE_API_KEY=smoke-test-key
+          GH_DISPATCH_TOKEN=smoke-test-token
+          GH_REPO=smoke/none
+          VARS
+
+          npx wrangler d1 execute race-lens --local \
+            --config apps/api/wrangler.toml --file=./schema.sql
+          for m in migrations/*.sql; do
+            # 003 is an ALTER, which errors as "duplicate column" once applied.
+            # schema.sql already carries the column for a fresh database, so a
+            # failure here is expected and not a reason to fail the build.
+            npx wrangler d1 execute race-lens --local \
+              --config apps/api/wrangler.toml --file="$m" || echo "  (skipped $m)"
+          done
+
+          # $! rather than %1: job control is off in a non-interactive shell, so
+          # `kill %1` would not find it.
+          npx wrangler dev --config apps/api/wrangler.toml --port 8787 &
+          DEV_PID=$!
+
+          # `if`, not `curl … && break`: this step runs under `bash -e`, where a
+          # failing curl in an && list aborts the whole step. Conditions are exempt.
+          READY=
+          for _ in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8787/health >/dev/null 2>&1; then READY=1; break; fi
+            sleep 1
+          done
+          if [ -z "$READY" ]; then
+            echo "wrangler dev never became ready"
+            kill "$DEV_PID" 2>/dev/null || true
+            exit 1
+          fi
+
+          # `|| STATUS=$?` keeps `set -e` from aborting before the server is killed.
+          STATUS=0
+          node tools/smoke.mjs --secret=smoke-test-secret || STATUS=$?
+          kill "$DEV_PID" 2>/dev/null || true
+          exit "$STATUS"
 
   python:
     runs-on: ubuntu-latest

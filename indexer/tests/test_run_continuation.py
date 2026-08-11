@@ -12,6 +12,7 @@ them and stubbing them would test a different program.
 """
 from __future__ import annotations
 
+import os
 import sys
 import types
 from argparse import Namespace
@@ -109,6 +110,11 @@ class FakeUploader:
         self.bibs_enabled = bibs_enabled
         self.bib_writes = 0
         self.shard_writes: list[tuple[str, int]] = []
+        self.photo_payloads: list[dict] = []
+        self.bytes_writes: list[str] = []
+        self.bib_replace_photos: list[list[str]] = []
+        self.completed: list[str] = []
+        self.faces_pending_seen: list[bool] = []
 
     def event_config(self, _event_id):
         return {"bibs_enabled": self.bibs_enabled}
@@ -122,15 +128,17 @@ class FakeUploader:
     def set_discovered(self, _source_id, _count):
         pass
 
-    def put_photos(self, _event_id, _source_id, photos):
+    def put_photos(self, _event_id, _source_id, photos, faces_pending=True):
+        self.faces_pending_seen.append(faces_pending)
         ids = {}
         for p in photos:
+            self.photo_payloads.append(dict(p))
             ids[p["drive_file_id"]] = f"photo-{p['drive_file_id']}"
             self._indexed.add(p["drive_file_id"])
         return ids
 
-    def put_bytes(self, *_a, **_k):
-        pass
+    def put_bytes(self, key, _data, _content_type):
+        self.bytes_writes.append(key)
 
     def put_shard(self, key, data):
         # Shards go to the private bucket via the Worker, not S3, so this is a
@@ -138,8 +146,12 @@ class FakeUploader:
         # embeddings never travel the public-bucket path.
         self.shard_writes.append((key, len(data)))
 
-    def put_bibs(self, *_a, **_k):
+    def mark_photos_complete(self, _event_id, photo_ids):
+        self.completed.extend(photo_ids)
+
+    def put_bibs(self, _event_id, _bibs, replace_photos=None):
         self.bib_writes += 1
+        self.bib_replace_photos.append(list(replace_photos or []))
 
     def reserve_rows(self, _event_id, _shard_key, _count):
         return 0
@@ -297,3 +309,182 @@ def test_config_failure_leaves_bib_reading_on(wired):
 
     assert run_mod.run(_args()) == 0
     assert up.bib_writes > 0
+
+
+def test_photo_dimensions_come_from_the_decoded_frame_not_drive(wired):
+    """photos.width/height must match the array the detector saw.
+
+    The fixtures already encode the exact production divergence: _images() reports
+    Drive's imageMediaMetadata as 4000x3000 (the ORIGINAL upload), while
+    FakeDrive.download_thumb writes the 8x8 file that actually lands on disk — the
+    same relationship as image_source='thumb', where Drive describes a 6000px
+    original and the bytes are its w3200 copy.
+
+    faces.bbox is measured on the decoded frame, and PhotoGrid's cropStyle divides
+    the two, so storing Drive's numbers put the crop window at a small fraction of
+    the frame, in the wrong place, for essentially every face — while the tile
+    caption still read "cropped to you". Nothing failed; the crops were just wrong.
+    """
+    _, up = wired(_images("src2", 3), set(), quota_after=1000)
+
+    assert run_mod.run(_args(image_source="thumb")) == 0
+    assert up.photo_payloads, "no photos were sent"
+
+    for p in up.photo_payloads:
+        assert (p["width"], p["height"]) == (8, 8), (
+            f"{p['drive_file_id']} stored {p['width']}x{p['height']}; expected the "
+            "decoded 8x8 frame, not Drive's 4000x3000 metadata"
+        )
+
+
+def test_a_decode_failure_does_not_wipe_that_photos_bibs(wired, monkeypatch):
+    """A photo that cannot be decoded must not be claimed as authoritative.
+
+    replace_photos told the Worker "delete every OCR bib on these photos, here are
+    the replacements". It was built from photo_ids — every photo whose THUMBNAIL
+    succeeded — while the OCR loop only ever visits photos that also DECODED. So a
+    photo that thumbnailed and then failed to decode had its existing bibs deleted
+    and nothing written back: a silent, permanent loss caused by a transient failure,
+    on the data the whole product is a search over.
+    """
+    _, up = wired(_images("src2", 3), set(), quota_after=1000)
+
+    real_load = run_mod.load_bgr
+    victim = "src2-1"
+
+    def flaky(path):
+        # dest is os.path.join(work_dir, drive_file_id), so the basename is the id.
+        if os.path.basename(path) == victim:
+            return None
+        return real_load(path)
+
+    monkeypatch.setattr(run_mod, "load_bgr", flaky)
+
+    assert run_mod.run(_args()) == 0
+
+    claimed = [pid for call in up.bib_replace_photos for pid in call]
+    assert claimed, "no bibs were written at all"
+    assert f"photo-{victim}" not in claimed, (
+        "the undecodable photo was claimed as authoritative, so its existing bibs "
+        "were deleted with no replacement"
+    )
+    # The photos that DID decode must still be replaced, or a re-read could never
+    # retract a wrong number.
+    assert "photo-src2-0" in claimed
+    assert "photo-src2-2" in claimed
+
+
+def test_a_decode_failure_is_journalled_for_the_organizer(wired, monkeypatch):
+    """log.warning goes to CI output the organizer cannot reach; note() reaches them."""
+    _, up = wired(_images("src2", 2), set(), quota_after=1000)
+    entries: list[dict] = []
+    up.log = lambda _event_id, es: entries.extend(es)
+
+    monkeypatch.setattr(run_mod, "load_bgr", lambda _p: None)
+    assert run_mod.run(_args()) == 0
+
+    codes = [e.get("code") for e in entries]
+    assert "decode_failed" in codes, f"decode failures were not journalled: {codes}"
+
+
+def test_bibs_only_does_not_rewrite_thumbnails(wired):
+    """--bibs-only promises it "leaves photos, faces and shards untouched".
+
+    It re-read numbers but still ran a LANCZOS resize and a billed class-A PutObject
+    per photo, to upload bytes byte-identical to the ones already in R2 — 8,523 of
+    each on the largest album.
+    """
+    _, up = wired(_images("src2", 4), set(), quota_after=1000)
+
+    assert run_mod.run(_args(bibs_only=True)) == 0
+
+    assert up.bytes_writes == [], (
+        f"a bibs-only pass re-uploaded {len(up.bytes_writes)} thumbnails"
+    )
+    # It must still map ids, or it has nothing to attach bibs to.
+    assert up.photo_payloads, "no photos were sent, so no bibs could be written"
+    # ...and must not claim dimensions it never measured.
+    for payload in up.photo_payloads:
+        assert "width" not in payload and "height" not in payload
+
+
+def test_a_normal_pass_still_writes_thumbnails(wired):
+    """Guard against the bibs-only skip leaking into the ordinary path."""
+    _, up = wired(_images("src2", 3), set(), quota_after=1000)
+
+    assert run_mod.run(_args()) == 0
+    assert len(up.bytes_writes) == 3
+    assert all(k.startswith("thumbs/") for k in up.bytes_writes)
+
+
+# --- faces_done: the resume key means "vectors are durable" ------------------
+
+
+def test_a_clean_pass_marks_every_processed_photo_complete(wired):
+    _, up = wired(_images("src2", 4), set(), quota_after=1000)
+
+    assert run_mod.run(_args()) == 0
+    assert sorted(up.completed) == [f"photo-src2-{i}" for i in range(4)]
+    # Ordinary pass: it IS going to rewrite these photos' vectors.
+    assert up.faces_pending_seen == [True]
+
+
+def test_a_photo_with_no_faces_is_still_marked_complete(wired, monkeypatch):
+    """The trap this flag has to avoid.
+
+    A photo the detector found nobody in produces no face row, so anything keyed on
+    "has faces" treats it as unfinished forever and re-downloads it on every pass.
+    That population is large enough that the quality report headlines it, and it is
+    exactly why --rebuild must stay off the automatic continuation path.
+    """
+    import indexer.faces as faces_mod
+    monkeypatch.setattr(faces_mod.FaceEngine, "detect", lambda self, _bgr: [])
+
+    _, up = wired(_images("src2", 3), set(), quota_after=1000)
+    assert run_mod.run(_args()) == 0
+
+    assert up.shard_writes == [], "no faces, so nothing should have been sharded"
+    assert sorted(up.completed) == [f"photo-src2-{i}" for i in range(3)], (
+        "photos with no detected face were left unfinished and would be "
+        "re-downloaded on every subsequent pass"
+    )
+
+
+def test_an_interrupted_batch_leaves_its_photos_unfinished(wired):
+    """The bug, stated as a test.
+
+    put_photos commits rows at the top of the batch; the vectors land at the bottom.
+    If anything in between dies, those photos must NOT be claimed as done — the old
+    resume key ("a row exists") skipped them forever while finalize still reported
+    the event ready.
+    """
+    _, up = wired(_images("src2", 3), set(), quota_after=1000)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("runner reclaimed mid-flush")
+
+    up.put_faces = boom
+
+    # run() propagates; main() is what turns this into a failed job. Either way the
+    # batch must not have claimed completion.
+    with pytest.raises(RuntimeError, match="runner reclaimed"):
+        run_mod.run(_args())
+
+    assert up.completed == [], (
+        "photos were marked complete despite the vector flush failing, so a later "
+        "pass would skip them and they would never get faces"
+    )
+
+
+def test_bibs_only_neither_completes_nor_reopens_photos(wired):
+    """--bibs-only touches numbers, never faces.
+
+    Claiming faces_pending would reset faces_done across an already-indexed album
+    and send the next resume back to Drive for all of it; claiming completion would
+    assert something about vectors this pass never looked at.
+    """
+    _, up = wired(_images("src2", 4), set(), quota_after=1000)
+
+    assert run_mod.run(_args(bibs_only=True)) == 0
+    assert up.faces_pending_seen == [False]
+    assert up.completed == []

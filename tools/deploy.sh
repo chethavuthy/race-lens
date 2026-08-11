@@ -36,7 +36,10 @@ if grep -q REPLACE_WITH_D1_ID apps/api/wrangler.toml; then
   [ -n "$ID" ] || ID=$($WRANGLER d1 list --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const m=j.find(x=>x.name==="race-lens");process.stdout.write(m?m.uuid:"")}catch{}})')
   [ -n "$ID" ] || die "Could not create or find the race-lens D1 database."
   # macOS and GNU sed disagree on -i; write through a temp file instead.
-  sed "s/REPLACE_WITH_D1_ID/$ID/" apps/api/wrangler.toml > /tmp/wt.$$ && mv /tmp/wt.$$ apps/api/wrangler.toml
+  # mktemp, not /tmp/wt.$$: the PID is predictable and /tmp is world-writable, so
+  # a pre-created symlink there would redirect this write.
+  T=$(mktemp) && sed "s/REPLACE_WITH_D1_ID/$ID/" apps/api/wrangler.toml > "$T" \
+    && mv "$T" apps/api/wrangler.toml
   ok "database_id set to $ID"
 else
   ok "database_id already set"
@@ -64,7 +67,8 @@ curl -sf "$API_URL/health" >/dev/null && ok "/health responds" || die "/health d
 step "6/8  Frontend"
 # CORS must name the real Pages origin or every browser request is rejected.
 PAGES_URL="https://race-lens.pages.dev"
-sed "s|WEB_ORIGIN = \".*\"|WEB_ORIGIN = \"$PAGES_URL\"|" apps/api/wrangler.toml > /tmp/wt2.$$ && mv /tmp/wt2.$$ apps/api/wrangler.toml
+T=$(mktemp) && sed "s|WEB_ORIGIN = \".*\"|WEB_ORIGIN = \"$PAGES_URL\"|" apps/api/wrangler.toml > "$T" \
+  && mv "$T" apps/api/wrangler.toml
 $WRANGLER deploy $API_CFG >/dev/null 2>&1 && ok "WEB_ORIGIN pinned to $PAGES_URL"
 
 [ -f apps/web/public/models/w600k_mbf.onnx ] || ./tools/fetch-models.sh >/dev/null
