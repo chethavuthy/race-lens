@@ -51,19 +51,27 @@ const CACHE_TTL_MS = 10 * 60 * 1000;
 /**
  * How many event indexes may sit in isolate memory at once.
  *
- * These are big: one row is 512 int8, so an event costs `faces × 512` bytes.
- * The Angkor marathon is 78,382 faces = 38.3 MB, and a Worker isolate gets
- * 128 MB total. The TTL above governs freshness, not residency — an entry is
- * only ever re-read or overwritten under its own key, so without eviction every
- * event ever searched in a warm isolate stays resident forever. Three events
- * the size of Angkor would exceed the limit and the isolate would be killed
- * mid-search.
+ * ONE, not two. Measured against production on 2026-08-11:
  *
- * Two, because the realistic worst case is a runner comparing themselves across
- * a pair of races; anything beyond that is better served by the colo-wide Cache
- * API in fetchShard, which has no such ceiling.
+ *     angkor11_wupmrk   1006 shards   160,214 rows   82.0 MB
+ *     qh1VYQ3HGN6I        46 shards     8,197 rows    4.2 MB
+ *     d5URgH0h2F2C        13 shards     2,594 rows    1.3 MB
+ *
+ * A row is 512 int8, so an event costs `rows × 512`. The previous value of two
+ * was sized against "78,382 faces = 38.3 MB", which the album has since doubled
+ * past — two Angkor-sized indexes is 164 MB against a 128 MB isolate, so the
+ * budget was already blown before anything transient was counted.
+ *
+ * At 82 MB apiece there is no honest way to hold two. The colo-wide Cache API in
+ * fetchShard is what actually serves the runner comparing two races: it has no
+ * such ceiling, and a second event's shards come back from the edge rather than
+ * from R2.
+ *
+ * The TTL above governs freshness, not residency — an entry is only ever re-read
+ * or overwritten under its own key, so without eviction every event ever searched
+ * in a warm isolate would stay resident forever.
  */
-const MAX_CACHED_INDEXES = 2;
+const MAX_CACHED_INDEXES = 1;
 
 /**
  * Evict least-recently-used entries until the cache is within budget.
@@ -102,20 +110,23 @@ async function fetchShard(env: Env, key: string, ctx?: Waiter): Promise<Int8Arra
   const hit = await cache.match(cacheKey);
   if (hit) return new Int8Array(await hit.arrayBuffer());
 
-  // INDEX_BUCKET first, BUCKET second.
+  // INDEX_BUCKET only.
   //
-  // Shards moved to their own private bucket so that BUCKET could be given a
-  // custom domain — an R2 custom domain publishes the entire bucket, and these
-  // objects are raw face embeddings, one row per detected face. Serving
-  // thumbnails without a Worker invocation is only safe once the biometrics are
-  // somewhere that domain cannot reach.
+  // Shards live in their own private bucket so that BUCKET could be given a custom
+  // domain — an R2 custom domain publishes the ENTIRE bucket, and these objects are
+  // raw face embeddings, one row per detected face.
   //
-  // The fallback covers events indexed before the split, whose shards may still
-  // exist only in the old bucket. It can be dropped once every event has been
-  // re-indexed or copied; until then a missing object must degrade to the old
-  // location rather than to "no matches", which is indistinguishable from a
-  // runner genuinely not being photographed.
-  const obj = (await env.INDEX_BUCKET.get(key)) ?? (await env.BUCKET.get(key));
+  // There used to be a `?? env.BUCKET.get(key)` fallback here for events indexed
+  // before that split. Verified on 2026-08-11 with `ListObjectsV2` on the public
+  // bucket: zero objects under `index/`. So the fallback could only ever return
+  // null, which makes removing it a no-op for behaviour and one fewer wasted R2 GET
+  // per shard miss.
+  //
+  // Do not reintroduce it. It was the one code path that could serve a biometric
+  // vector out of a bucket published at img.runlytics.fit, and its existence was
+  // also the reason nobody would have noticed a leftover sitting there.
+  // tools/check-index-leak.py re-runs that check.
+  const obj = await env.INDEX_BUCKET.get(key);
   if (!obj) return null;
   const buf = await obj.arrayBuffer();
 
@@ -143,23 +154,56 @@ async function loadIndex(env: Env, eventId: string, ctx?: Waiter): Promise<Cache
   if (!shards.length) return null;
 
   const total = shards.reduce((m, s) => Math.max(m, s.row_base + s.row_count), 0);
+
+  // Make room BEFORE allocating, because eviction below happens after insertion.
+  //
+  // MAX_CACHED_INDEXES was budgeted against resident copies only, and that is off by
+  // one whole index. Loading a third event allocates `rows` (38.3 MB for Angkor)
+  // while the shard buffers are also live — together exactly one row per face, so
+  // another 38.3 MB — on top of the two entries still cached (76.6 MB). Peak ~153 MB
+  // against a 128 MB isolate. The isolate is killed mid-search: the runner sees a
+  // failed search AND the whole warm cache goes with it, so the next several
+  // searches pay 400-1200 ms cold R2 reads.
+  evictTo(MAX_CACHED_INDEXES - 1);
   const rows = new Int8Array(total * DIM);
 
-  // Parallel fetch: shard count is small (one per source folder).
-  const bodies = await Promise.all(
-    shards.map(async (s) => {
-      const buf = await fetchShard(env, s.shard_key, ctx);
-      return buf ? { s, buf } : null;
-    }),
-  );
-
-  for (const entry of bodies) {
-    if (!entry) continue;
-    const { s, buf } = entry;
-    const expected = s.row_count * DIM;
-    // A short shard means a truncated upload; take what is there rather than
-    // throwing, so one bad source cannot break search for the whole event.
-    rows.set(buf.subarray(0, Math.min(buf.length, expected)), s.row_base * DIM);
+  // Windowed, but the window has to be WIDE — and the width is measured, not chosen.
+  //
+  // Promise.all over every shard held all of their ArrayBuffers at once: for Angkor
+  // that is 1006 buffers totalling another 82 MB, a second full copy of the index on
+  // top of the one just allocated.
+  //
+  // The obvious fix is a small window, and it is a trap that cost a production
+  // outage. The comment that used to sit here claimed "shard count is small (one per
+  // source folder)". It is not: the indexer names shards
+  // `index/<event>/<source>-<run>-b<batch>.bin` — one per BATCH of 25 photos — so
+  // Angkor has 1006. A window of 2 is therefore 503 sequential R2 round trips, and a
+  // cold face search stopped answering inside 120 s.
+  //
+  // Measured on production, cold, loadMs over repeated runs:
+  //
+  //     unbounded (1006 at once)   23865, 1089, 1409, 938
+  //     IN_FLIGHT = 64             7193, 22161, 2159
+  //     IN_FLIGHT = 256            1001, 1064, 1417, 0*, 1417
+  //
+  //     * 0 ms is an in-isolate memCache hit, i.e. the cache above working.
+  //
+  // 256 is indistinguishable from unbounded while capping transient buffers at
+  // ~256 x 81 KB = 20 MB instead of 82 MB. Do not lower it without re-measuring:
+  // the shard count, not the byte count, is what sets the floor here.
+  const IN_FLIGHT = 256;
+  for (let i = 0; i < shards.length; i += IN_FLIGHT) {
+    const window = shards.slice(i, i + IN_FLIGHT);
+    const bufs = await Promise.all(window.map((s) => fetchShard(env, s.shard_key, ctx)));
+    for (let j = 0; j < window.length; j++) {
+      const buf = bufs[j];
+      if (!buf) continue;
+      const s = window[j];
+      const expected = s.row_count * DIM;
+      // A short shard means a truncated upload; take what is there rather than
+      // throwing, so one bad source cannot break search for the whole event.
+      rows.set(buf.subarray(0, Math.min(buf.length, expected)), s.row_base * DIM);
+    }
   }
 
   const idx: CachedIndex = { rows, rowCount: total, loadedAt: Date.now() };
