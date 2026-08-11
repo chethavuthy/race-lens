@@ -13,9 +13,15 @@
 
 The codebase is unusually well-reasoned. Nearly every non-obvious decision carries a comment explaining what was measured and what broke before, and the vector-parity gate (`tools/golden/RESULT.json`, cosine 0.99992) proves the hardest part of the system is correct. That quality makes the defects that remain distinctive: they are almost all **drift between two artifacts that must agree** — the SQL that code writes vs. `schema.sql`, the hostname Cloudflare Access protects vs. the hostname the Worker answers on, the coordinate space a bounding box lives in vs. the dimensions stored beside it.
 
-One finding is remotely exploitable with a single `curl`. Two mean a fresh deployment of this repo cannot index a single photo, while the live database is fine — the DDL was applied out of band and never committed, so the running site hides the breakage. One is shipping wrong output to users right now, on the exact code path organizers are steered toward.
+One finding is remotely exploitable with a single `curl`. Two mean a fresh deployment of this repo cannot index a single photo, while the live database is fine — the DDL was applied out of band and never committed, so the running site hides the breakage.
 
-**The single highest-value process change:** `apps/api/` has no tests at all, and the majority of findings below live there. The `indexer/` suite is genuinely good — `test_run_continuation.py` tests exactly the composition where a real bug lived. A `wrangler dev` + `db:local` smoke test that creates an event, ingests, posts faces and bibs, and searches would have caught C1, C2, C7 and P4 in seconds.
+**The single highest-value process change:** `apps/api/` had no tests at all, and the majority of findings below live there. The `indexer/` suite is genuinely good — `test_run_continuation.py` tests exactly the composition where a real bug lived. A `wrangler dev` + `db:local` smoke test that creates an event, ingests, posts faces and bibs, and searches would have caught C1, C2, C7 and P4 in seconds. That test now exists (`tools/smoke.mjs`), along with 25 cases on the admin gate.
+
+> **Status: all 23 tasks closed, deployed and merged — see [Outcome](#outcome).** Read
+> that section before trusting any severity here: three of this report's own
+> conclusions were wrong and are corrected in place, including one that predicted
+> user-visible breakage which measurement later disproved (C3), and one whose first
+> fix caused a production outage (P3).
 
 ---
 
@@ -408,7 +414,7 @@ The unique index, with a duplicate merge first — see the migration. Two subtle
 
 ## C3 · `photos.width/height` and `faces.bbox` are in different coordinate spaces
 
-**Severity: High — currently producing wrong output**
+**Severity: Low — real code defect, no measurable impact in this data** (raised as High)
 **Location:** [indexer/main.py:213](indexer/main.py#L213), surfacing at [PhotoGrid.vue:130](apps/web/src/components/PhotoGrid.vue#L130)
 
 ```python
@@ -833,7 +839,7 @@ async function startFace(f: { id: string; bib: string | null }) {
 
 ### Impact
 
-**Latency and query limits, not cost.** The correlated subqueries are per-row, so a 24-photo admin page with `filter=no_face` reads 24 × 78,382 ≈ 1.9 M rows. Worst case is `GET /api/internal/events/:id/indexed?complete=1`, which runs `EXISTS (… faces WHERE photo_id = p.id)` across every photo: 31 k × 78 k ≈ **2.4 billion** row reads, which will not complete regardless of billing — so `--rebuild`, the only recovery path for C4, is unusable on a large event.
+**Latency and query limits, not cost.** The correlated subqueries are per-row, so a 24-photo admin page with `filter=no_face` reads 24 × 163,000 ≈ 3.9 M rows. Worst case is `GET /api/internal/events/:id/indexed?complete=1`, which runs `EXISTS (… faces WHERE photo_id = p.id)` across every photo: 26 k × 163 k ≈ **4.3 billion** row reads, which will not complete regardless of billing — so `--rebuild`, the only recovery path for C4, is unusable on a large event.
 
 ### Fix
 
@@ -984,7 +990,7 @@ stays manual.
 const limit = Math.min(Number(c.req.query('limit') ?? 60) || 60, 200);
 ```
 
-`?limit=-1` → `Number('-1')` is `-1`, truthy, and `Math.min(-1, 200)` is `-1`. In SQLite a negative `LIMIT` means **no upper bound** (verified: `SELECT count(*) FROM (… LIMIT -1)` → 3). One unauthenticated GET returns every photo row in the event — 31 k rows serialized to JSON — and `cursor` comes back `null` because `results.length !== limit`. The 200 ceiling is defeated by a minus sign.
+`?limit=-1` → `Number('-1')` is `-1`, truthy, and `Math.min(-1, 200)` is `-1`. In SQLite a negative `LIMIT` means **no upper bound** (verified: `SELECT count(*) FROM (… LIMIT -1)` → 3). One unauthenticated GET returns every photo row in the event — 26,672 rows on the largest, serialized to JSON — and `cursor` comes back `null` because `results.length !== limit`. The 200 ceiling is defeated by a minus sign.
 
 ### Fix
 
@@ -1010,7 +1016,7 @@ const threshold = Number(c.req.query('t') ?? 0.38);
 … threshold: Number.isFinite(threshold) ? threshold : 0.38
 ```
 
-`Number.isFinite(-1)` is `true`, so `?t=-1` makes `cutoff` negative and *every* row becomes a candidate: `candidates` grows to `rowCount` (78,382) and is fully sorted, on top of the 40 M-multiply scan the endpoint already performs. That is real CPU, which the Paid plan does bill, on an unauthenticated, unrated, un-CAPTCHA'd route. Separately, `?t=0` is a *correctness* hazard: a shared URL carrying one returns unrelated people as matches, in a product whose promise is "find MY photos".
+`Number.isFinite(-1)` is `true`, so `?t=-1` makes `cutoff` negative and *every* row becomes a candidate: `candidates` grows to `rowCount` (163,000 as measured, and growing) and is fully sorted, on top of the 40 M-multiply scan the endpoint already performs. That is real CPU, which the Paid plan does bill, on an unauthenticated, unrated, un-CAPTCHA'd route. Separately, `?t=0` is a *correctness* hazard: a shared URL carrying one returns unrelated people as matches, in a product whose promise is "find MY photos".
 
 ### Fix
 
@@ -1197,6 +1203,7 @@ Verified, deliberately not expanded.
 | Low | [set-secrets.sh:30](tools/set-secrets.sh#L30) | `gh secret set --body "$2"` puts secrets in argv (visible in `ps`), contradicting the header's "piped on stdin". Use `--body-file -` with a heredoc. |
 | Low | [deploy.sh:39](tools/deploy.sh#L39) | `> /tmp/wt.$$` is a predictable path in a world-writable dir. Use `mktemp`. |
 | Low | [_headers](apps/web/public/_headers) | No `X-Frame-Options`/`frame-ancestors` on `/admin`, so the Access-authenticated SPA is frameable. No CSP anywhere. |
+| Low | [.gitignore](.gitignore) | Dotenv files were a per-file **denylist** (`.env.deploy`, `.env.local`, `.env.*.local`), so a newer `.env.analytics` holding a live Cloudflare API token was untracked but *not ignored* — the one state in which `git add -A` is dangerous. It was committed locally during this work; GitHub's push protection rejected the push and the commit was discarded, so nothing reached the remote. Now an allowlist: `.env`, `.env.*`, `!.env.*.example`. A denylist only protects the files someone remembered. |
 | Low | [ci.yml:3](.github/workflows/ci.yml#L3) | No `permissions:` block; `npm ci` runs PR-controlled lifecycle scripts. `pull_request` (not `_target`) keeps fork tokens read-only, so this is hygiene. |
 | Low | [admin.ts:574](apps/api/src/routes/admin.ts#L574) | Per-photo reindex deletes `faces` rows but leaves their vectors in the shard; those rows still score and consume `topFaces` slots before dropping out at the join. |
 
@@ -1527,7 +1534,7 @@ npm run db:local && npm --workspace apps/api run typecheck && npm run build
 | **1** | **Admin hostname gate.** Add `apps/api/src/access.ts` (`onAccessHost` only), `ACCESS_HOSTS` in `Env` + `wrangler.toml`, rewrite the `adminRoutes.use('*')` middleware. Keep `workers_dev = true`. | S1 part A | `typecheck` + unit cases on `onAccessHost` (see the caveat below) | ☑ |
 | **2** | **Harden the preflight probe** — test a forged assertion, and assert `ACCESS_HOSTS` is non-empty and free of `workers.dev`. (`CF_ACCESS_TEAM`/`CF_ACCESS_AUD` move to task 19, where they first have a reader.) | S1 | 0 blocking locally; both new failure branches fire; the `--remote` probe caught production open | ☑ |
 | **3** | **`migrations/002_schema_repair.sql`** + fold the DDL into `schema.sql`. | C1, C2, P1, P2 | Fresh apply, re-apply, no-op re-run, and a messy old-schema DB with duplicate sources + a pre-orphaned row all verified against sqlite3 | ☑ |
-| **4** | **Apply migration 002 to D1** — `--local` done; `--remote` awaiting sign-off (it DELETEs duplicate `sources` rows). | C1, C2, P1 | Local D1 has all six objects; plan shows `SEARCH f USING COVERING INDEX idx_faces_photo` | ◐ |
+| **4** | **Apply migrations 002 + 003 to D1** — `--local`, then `--remote`. | C1, C2, C4, P1 | Applied to production. Pre-check found the two schema objects already there by hand and the four indexes missing, so the audit's read was exact. 4 indexes added, `faces_done` backfilled to 1 on 26,348 rows, **0 duplicate sources to collapse**, 0 orphans, row counts unchanged. | ☑ |
 | **5** | **Coordinate-space fix in the indexer.** `make_thumbnail` returns post-EXIF full dims; `main.py` stores them instead of Drive's. Added `tests/conftest.py` (CV stubs, removing a collection-order dependency) and 4 guards — verified to fail without the fix. | C3 | 30 tests green; every test file also passes in isolation | ☑ |
 | **6** | **`clampLimit` + `clampThreshold`** in `lib.ts`, wired into `public.ts` (×2) and `admin.ts` (×1). | P4, P5 | Over HTTP against 75 seeded rows: `?limit=-1` gave **75 before, 60 after**; admin `-1`→24, `100`→60. 21 unit cases on both clamps pass | ☑ |
 | **7** | **Banner upload allowlist** + event-exists check. | S2 | SVG rejected (also with a `;charset=` param and uppercased); `text/html` rejected; webp/jpg still upload; unknown event → 404; `image/jpg` stored **normalised to `image/jpeg`**, proving the type is ours | ☑ |
@@ -1540,12 +1547,55 @@ npm run db:local && npm --workspace apps/api run typecheck && npm run build
 | **14** | **Model checksums** in `fetch-models.sh`. | S5 | Real 100 MB download re-run: both pins matched upstream. Tampered asset → exit 1 with both hashes printed **and the existing model left untouched**; missing asset → exit 1. Models still byte-identical, golden still PASS at 0.99992. | ☑ |
 | **15** | **`_headers` framing** on `/admin` only (event pages stay embeddable), `set-secrets.sh` off argv, `deploy.sh` `mktemp`, `ci.yml` `permissions: contents: read`, `ingest_log` `GROUP BY … LIMIT 40`, dead `read_full` removed with its measurement preserved on `read_tiles`. | register | Build, both typechecks, 34 tests, preflight all pass. Caught and fixed a bug in my own `set-secrets.sh` change: `<<<` appended a newline that encoded as `key=…%0a` and would have made the Drive check fail. | ☑ |
 | **16** | **Durable resume key** — `migrations/003`, insert-time `0`, new `POST /events/:id/photos/complete`, `faces_pending` flag so `--bibs-only` cannot reopen an album, `/indexed` reads the flag, batch tail reordered to vectors → bibs → complete. | C4 | Full lifecycle over HTTP: ingest → resume sees nothing; mark complete → sees only that photo; bibs-only upsert → **not** reopened; ordinary re-ingest → reopened. Migration verified on old + fresh schema (legacy rows all read done). 4 new tests incl. a photo with **no faces** and an interrupted flush. 38 tests green. | ☑ |
-| **17** | **Drain `index/` from the public bucket**, then delete the `BUCKET` fallback in `search.ts`. | S3 | ⛔ **Blocked on evidence.** wrangler 3.x has no `r2 object list`; listing needs the R2 S3 credentials in `.env.deploy`. Added `tools/check-index-leak.py` to run it. Fallback deliberately left in — removing it while pre-split shards live only in the public bucket would break face search for those events. | ⛔ |
+| **17** | **Verify `index/` is absent from the public bucket**, then delete the `BUCKET` fallback in `search.ts`. | S3 | `ListObjectsV2` on the public bucket: **0 objects** under `index/` — nothing ever leaked, and the fallback could only ever return null, so removing it is a behaviour no-op. Re-verified after deploy: all 3 events load from the private bucket alone, recall byte-identical. Incidental confirmation: the R2 token really is public-bucket-scoped (`AccessDenied` on the private one). | ☑ |
+| **20** | **Shard compaction** — `POST /api/internal/events/:id/compact`, plus segment-based reads in `search.ts` (`planSegments` / `fetchSegment`). | P9 | Compaction alone made cold search WORSE (2281/4033/11650 ms vs 1056–1297). Parallel 4 MB range reads fixed it: **232/350/434/470/675 ms**, ~2–4× faster than the original sharded layout. All 3 events compacted (1023/46/13 → 1/1/1); recall byte-identical afterwards (same 49 matches, same 0.871 top hit). | ☑ |
+| **21** | **Deploy the frontend to Pages.** | C9, C10, P2, P6, register | Caught that Pages is **not** git-connected, so nothing would ever auto-deploy. First attempt went to a preview alias (wrangler uses the current branch); deployed from `main` after the merge. Both custom domains serve the new bundle; framing headers verified on `race-lens.pages.dev/admin`. | ☑ |
+| **22** | **Merge to `main`.** | C3, C8, P7, P8, S4 | Not optional: `repository_dispatch` runs the workflow from the default branch, so every `indexer/` and `index-event.yml` fix was inert on a side branch. [PR #1](https://github.com/chethavuthy/race-lens/pull/1), CI green both jobs, 25 access-gate assertions passing in CI. | ☑ |
+| **23** | **C3 retroactive repair — NOT DONE, and correctly so.** | C3 | Measured peak `max_x / width` per source: ~1.0 everywhere, so stored dimensions already are the bbox space. Only 11 of 26,555 photos overflow by >2%. **The planned backfill would have corrupted ~353 correct photos.** See the C3 section. | ☑ |
 | **18** | **`tools/smoke.mjs` + a CI step** — builds a DB from `schema.sql` + every migration, starts `wrangler dev`, then exercises 20 assertions tagged with the findings they guard. | process | Ran the CI step **verbatim against a fresh checkout** (no local D1, no `.dev.vars`): exit 0, all 20 pass. Verified it CATCHES regressions: dropping `bib_rejects` fails all 3 C1 checks; dropping the `sources` unique index fails C2; reverting the resume key in code fails C4. | ☑ |
 | **19** | **S1 part B — verify the Access JWT.** Both CNAMEs and both Access apps already existed; team is `animekizz`. | S1 part B | **Cannot be tested from outside** — the hostname gate 403s on workers.dev and Access 302s on the custom domain, so both outer layers shield it. Tested against a controlled keypair instead: **25 cases**, all pass (`alg:none`, HS256 confusion, tampered sig, unknown kid, wrong iss/aud, expired, nbf, empty AUD, JWKS-503 all fail closed; JWKS cached). Now `npm --workspace apps/api run test` in CI. | ☑ |
 
-**Blocked / needs your decision**
+## Outcome
 
-- **Task 19** cannot proceed until `dig CNAME racelens.runlytics.fit` resolves and the two Access applications exist. Task 1 covers the exposure in the meantime.
-- **Task 4** writes to production D1. It is idempotent and I verified it against SQLite, but it deletes duplicate `sources` rows — say the word before I run `--remote`.
-- **Task 5** stops new drift but does not repair existing `thumb`-sourced events. Those need a re-index when you are ready to spend the passes.
+All 23 tasks closed. Everything is deployed to production and merged to `main`.
+
+Verified live after the final deploy:
+
+```
+admin, forged header (workers.dev)  -> 403        (was 200 = full organizer control)
+admin, custom domain                -> 302        (Cloudflare Access login)
+public API                          -> 200
+face search, Angkor 163k rows       -> loadMs 546
+shard objects per event             -> 1 / 1 / 1  (was 1023 / 46 / 13)
+```
+
+Two items were closed by deciding **not** to act, which is the outcome worth
+remembering: task 23 (the C3 backfill would have corrupted correct data) and the
+`read_tiles` resolution question (91.2% bib coverage says tiling is not the
+bottleneck). Both are recorded with their numbers rather than left as open cautions,
+because an unresolved caution in a comment is an invitation to change something on a
+hunch — which is how the crop window regressed in the first place.
+
+### Left deliberately undone
+
+- **~1,082 pre-compaction shard objects** remain in the private bucket, unreferenced.
+  Kept as a rollback path; ~88 MB, no exposure. Delete with `{"delete_old": true}`.
+- **Compaction is not wired into `/finalize`.** A 61-pass continuation chain would
+  recompact 83 MB after every pass. It belongs behind a shard-count threshold.
+- **`tools/cf-cpu-by-worker.sh`** is untracked — pre-existing, not part of this work.
+
+### What this audit got wrong
+
+Kept deliberately, because the pattern matters more than the individual errors. Three
+conclusions were confidently wrong and each was caught only by measuring:
+
+1. **P3** sized an index at 38.3 MB (really 82 MB) and trusted a comment claiming
+   ~1 shard per source (really 1,023). Acting on the second caused a production outage.
+2. **C3** was reported as affecting ~98% of photos, inferred from `image_source` without
+   checking whether the dimensions actually diverged. They had not.
+3. **P9** assumed object count was the cost driver. It was bandwidth; compaction alone
+   made things slower.
+
+Every one came from believing a plausible statement instead of running a query. This
+codebase's comments are unusually thorough and specific, which is exactly what made
+trusting them so easy.
