@@ -67,8 +67,10 @@ tried and the records still do not appear.
 ./tools/finish-deploy.sh
 ```
 
-It creates both CNAMEs, creates the four Access apps (`/admin` and `/api/admin`
-on each hostname) with an allow policy for your email, and verifies. Idempotent.
+It creates both CNAMEs, creates one Access app per hostname (covering
+`/api/admin` and `/admin/signin`) with an allow policy for your email, and
+verifies. Idempotent — and on an existing app it drops `/admin` from the
+destinations, which is what makes the organizer invitation publicly readable.
 
 ---|---|
 | Site | <https://race-lens.pages.dev> |
@@ -126,8 +128,14 @@ and the Phase 5 fixtures are absent from the deployed bundle.
 403s for everyone — correct, but you cannot use it either.
 
 Zero Trust → Access → Applications → Add → Self-hosted, one app covering
-`racelens.runlytics.fit` and `race-lens.runlytics.fit`, paths `/admin` and
-`/api/admin`. Policy: *Allow* → Emails → `vuthychetha@gmail.com`.
+`racelens.runlytics.fit` and `race-lens.runlytics.fit`, paths `/api/admin` and
+`/admin/signin`. Policy: *Allow* → Emails → `vuthychetha@gmail.com`, plus one
+line per photographer you let in.
+
+`/admin` itself is deliberately NOT gated: it is the invitation photographers
+read before they are on the list, it ships no data, and everything it renders
+comes from `/api/admin`. `/admin/signin` is gated in its place so an organizer
+who IS on the list has a path that triggers the login.
 
 Access only works on the custom domains — the API is same-origin there. On
 `*.pages.dev` the admin UI calls the Worker cross-origin, and a host-scoped
@@ -200,17 +208,19 @@ Read & Write on `race-lens`). Keep the account id, access key id, and secret.
 
 ### Cloudflare Access — do not skip
 
-`/admin` currently returns 403 to everyone, because `DEV_ADMIN_BYPASS` is `"0"`
-and no Access policy exists yet. That is fail-closed, which is correct, but it
-also means admin is unusable until you do this:
+`/api/admin/*` currently returns 403 to everyone, because `DEV_ADMIN_BYPASS` is
+`"0"` and no Access policy exists yet. That is fail-closed, which is correct, but
+it also means admin is unusable until you do this:
 
 **Zero Trust → Access → Applications → Add → Self-hosted**
 
 - Application domain: your API hostname, path `/api/admin`
-- Add a second one for the Pages hostname, path `/admin`
-- Policy: *Allow*, rule **Emails → vuthychetha@gmail.com**
+- Add a second destination on the same app, path `/admin/signin`
+- Policy: *Allow*, rule **Emails → vuthychetha@gmail.com** (add a line per
+  photographer you allow in)
 
-Verify: `/admin` in a normal window prompts for login; in incognito it 403s.
+Verify: `/admin` loads for anyone and shows the invitation; `/admin/signin`
+prompts for login; `/api/admin/*` 403s in incognito.
 
 ## 3 · GitHub
 
@@ -227,13 +237,35 @@ Repo secrets (**Settings → Secrets and variables → Actions**):
 
 ## 4 · Pages
 
+First time only — after that, use `npm run deploy` (see below).
+
 ```bash
 npm run build
-npx wrangler pages deploy apps/web/dist --project-name=race-lens
+npx wrangler pages deploy apps/web/dist --project-name=race-lens --branch=main
 ```
+
+`--branch=main` is required. Without it wrangler infers the branch from git, and
+anything other than `main` produces a PREVIEW deployment: reported as a success,
+serving nothing on the live site.
 
 The build strips `dist/golden` automatically — the Phase 5 fixtures include a
 test photo and must not reach a public origin.
+
+## 4b · Shipping a change, afterwards
+
+```bash
+npm run deploy          # both, or -- --api / -- --web
+```
+
+Do NOT hand-run `wrangler deploy` for routine changes. It reads the WORKING
+TREE, so whatever is sitting uncommitted in your checkout goes live with it —
+including a collaborator's or an agent's half-finished work, which is exactly how
+an unfinished admin change reached production on 2026-08-11.
+
+`tools/ship.sh` builds from a temporary worktree at HEAD instead, so uncommitted
+work cannot be shipped even by accident; it lists what it is ignoring, runs
+typecheck and the Worker tests inside that checkout, pins the Pages branch, and
+then checks the live origins actually serve what it just built.
 
 ## 5 · First real album
 
