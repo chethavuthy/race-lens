@@ -19,8 +19,24 @@
 
 # Vite fingerprints everything in /assets, so these are safe to freeze too.
 # Includes the 12.9 MB onnxruntime wasm binary.
+#
+# s-maxage is the scar of an outage on 2026-08-12. During a deploy there is a
+# window where index.html names an asset the edge has not caught up with; that
+# request falls through _redirects to index.html and is answered 200 with an
+# HTML body — and this rule then stamped it immutable for a year. One request in
+# that window (mine, checking the deploy) pinned an HTML document under the
+# entry script's URL at that POP, and every visitor to that hostname got a blank
+# page and "Expected a JavaScript-or-Wasm module script but the server responded
+# with a MIME type of text/html". Cloudflare's purge API needs a permission the
+# deploy token does not carry, so the only exit was shipping a new build with a
+# different filename.
+#
+# max-age still gives browsers the full year, which is where the caching matters
+# — the filenames are content-hashed, so a stale copy is impossible. s-maxage
+# caps the SHARED (edge) copy at ten minutes, so the same accident now expires
+# on its own instead of lasting until someone notices.
 /assets/*
-  Cache-Control: public, max-age=31536000, immutable
+  Cache-Control: public, max-age=31536000, immutable, s-maxage=600
 
 /*
   X-Content-Type-Options: nosniff

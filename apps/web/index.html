@@ -8,6 +8,48 @@
   </head>
   <body>
     <div id="app"></div>
+    <!--
+      Recover from an entry script that could not load.
+
+      main.ts already reloads once when a ROUTE chunk 404s after a deploy, but
+      that code only runs if the entry itself loaded. When the entry is the file
+      that is missing, nothing runs at all: the SPA catch-all answers the request
+      with index.html, the browser refuses it ("Expected a JavaScript-or-Wasm
+      module script but the server responded with a MIME type of text/html"), and
+      the visitor is left on a permanently blank page with no way back except a
+      manual reload they have no reason to try.
+
+      That window is small but real — a client can hold a fresh index.html while
+      an edge has not yet caught up with the assets it names — and it lands on
+      whoever loads the site during a deploy.
+
+      Inline and before the module tag on purpose: an external recovery script is
+      subject to the same failure it is recovering from. The sessionStorage flag
+      makes it once rather than a loop, and main.ts clears it once the app is up.
+    -->
+    <script>
+      window.addEventListener('error', function (event) {
+        var el = event.target;
+        if (!el || el.tagName !== 'SCRIPT' || !el.src) return;
+        if (el.src.indexOf('/assets/') === -1) return;
+        try {
+          if (sessionStorage.getItem('race-lens:boot-reload')) return;
+          sessionStorage.setItem('race-lens:boot-reload', '1');
+        } catch (e) { return; }  // private mode with storage disabled
+
+        // Re-fetch the failed URL bypassing the cache BEFORE reloading.
+        //
+        // The bad response is cacheable — /assets/* is stamped immutable for a
+        // year — so if the browser stored an HTML document under this .js URL, a
+        // plain reload just reads it back and the one retry is spent on the same
+        // poisoned copy. `cache: 'reload'` replaces that entry from the network.
+        // Reload either way: if the network is what failed, the retry is still
+        // the right move, and the flag above keeps it to one.
+        fetch(el.src, { cache: 'reload' })
+          .catch(function () {})
+          .then(function () { location.reload(); });
+      }, true);  // capture: resource errors do not bubble
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

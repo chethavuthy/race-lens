@@ -41,7 +41,25 @@ router.onError((err) => {
   if (!isStaleChunk) return;
   if (sessionStorage.getItem(RELOAD_FLAG)) return;
   sessionStorage.setItem(RELOAD_FLAG, '1');
-  location.reload();
+
+  // Reloading alone is not enough when the chunk is POISONED rather than gone.
+  //
+  // A deploy can answer an asset request with index.html (the SPA rule, 200) in
+  // the window before the edge has the file, and /assets/* is served
+  // `immutable` for a year — so a browser that stored that HTML under a .js URL
+  // will keep handing it back, reload after reload, without ever asking the
+  // network again. That is what took /admin down on 2026-08-12 and what left
+  // browsers broken after the edge had recovered.
+  //
+  // The chunk's URL is in the error message, so re-fetch exactly that with
+  // `cache: 'reload'`, which forces the network and replaces the stored entry.
+  // Everything is best-effort: an unparseable message or a failed fetch still
+  // reloads, because a stale build is the other, more common cause.
+  const url = message.match(/https?:\/\/[^\s'")]+/)?.[0];
+  const purge = url && url.includes('/assets/')
+    ? fetch(url, { cache: 'reload' }).catch(() => {})
+    : Promise.resolve();
+  purge.then(() => location.reload());
 });
 
 // A completed navigation means the chunks resolved, so the next stale-chunk
@@ -49,3 +67,13 @@ router.onError((err) => {
 router.afterEach(() => sessionStorage.removeItem(RELOAD_FLAG));
 
 createApp(App).use(router).mount('#app');
+
+// The entry loaded and the app is up, so the one-shot boot recovery in
+// index.html has done its job. Clearing it here — rather than never — means a
+// deploy tomorrow gets its own single retry instead of finding the flag already
+// set and leaving the visitor on a blank page.
+//
+// Keep this string identical to the one in index.html; it is written there and
+// cleared here precisely because nothing else runs when the entry fails.
+const BOOT_FLAG = 'race-lens:boot-reload';
+sessionStorage.removeItem(BOOT_FLAG);
