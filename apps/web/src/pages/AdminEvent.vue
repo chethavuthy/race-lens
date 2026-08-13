@@ -135,9 +135,12 @@ async function run<T>(key: string, fn: () => Promise<T>, ok?: string) {
  */
 const setSource = (id: string, v: 'original' | 'thumb') =>
   run(`src-${id}`, () => api.admin.setImageSource(id, v),
+      // Named by what it does, not by what the button says: the label on that
+      // row is Continue or Recheck depending on whether photos are missing, and
+      // a message that hardcodes one of them is wrong half the time.
       v === 'thumb'
-        ? 'Switched to resized copies — press Continue to carry on at the faster rate.'
-        : 'Switched to full originals — press Continue to carry on.');
+        ? 'Switched to resized copies — run the album again to carry on at the faster rate.'
+        : 'Switched to full originals — run the album again to carry on.');
 
 /**
  * Passes needed for what is still missing, at the observed per-window rates.
@@ -162,6 +165,19 @@ const reindex = (id: string) =>
   run(id, () => api.admin.reindexSource(id), 'Indexing started — photos already done are skipped.');
 
 type Source = Report['sources'][number];
+
+/**
+ * Whether this album is finished as of the last walk of the folder.
+ *
+ * Same condition as the "complete" badge, deliberately — the badge and the
+ * button beside it are two readings of one fact, and letting them drift is how
+ * a row comes to say "complete" next to a control that claims work is left.
+ *
+ * `discovered_known` is part of it: a source whose total Drive has not reported
+ * yet has missing === 0 without being finished, and calling that complete would
+ * be a guess.
+ */
+const isComplete = (s: Source) => s.missing === 0 && s.discovered_known;
 
 /* ------------------------------------------------------------------ credit --
    The byline under the event title. Held as a per-row draft rather than bound
@@ -234,10 +250,10 @@ async function removeLink(s: Source) {
   }
 }
 
-/** Clear a removal. Does not restore the photos — Re-index does that. */
+/** Clear a removal. Does not restore the photos — another indexing round does. */
 const restoreLink = (s: Source) =>
   run(`restore-${s.id}`, () => api.admin.restoreSource(s.id),
-      'Removal cleared. The photos are still deleted — press Continue to fetch the album again.');
+      'Removal cleared. The photos are still deleted — run the album again to fetch it.');
 
 const setStatus = (s: EventSummary['status']) => run('status', () => api.admin.setStatus(props.id, s));
 
@@ -254,7 +270,7 @@ const bibsEnabled = computed(() => event.value?.bibs_enabled !== false);
 const setBibs = (on: boolean) =>
   run('bibs', () => api.admin.setBibsEnabled(props.id, on),
       on
-        ? 'Bib numbers on — the next round will read bibs. Press Continue to read them for photos already done.'
+        ? 'Bib numbers on — the next round will read bibs. Run the album again to read them for photos already done.'
         : 'Bib numbers off — bib search is hidden and later rounds skip reading numbers. Existing bibs are kept.');
 
 function addLink() {
@@ -439,8 +455,25 @@ const when = (iso: string) => new Date(iso).toLocaleString();
                         title="Download Drive's resized copy — same faces and bibs, many more photos per round"
                         @click="setSource(s.id, 'thumb')">Resized</button>
               </div>
-              <button :disabled="busy === s.id || !!activeJob" @click="reindex(s.id)">
-                <span v-if="busy === s.id" class="spinner" /> Continue
+              <!-- One action, two honest names. It always starts a round that
+                   re-walks the folder; what that is FOR depends on the row.
+                   With photos missing it carries on ("Continue"). With none it
+                   picks up whatever the photographer has added since, and
+                   applies a changed setting to photos already done — neither of
+                   which is "continuing" anything, and saying so beside a row
+                   marked complete reads as a contradiction.
+
+                   Recheck rather than "Check for new photos": .row-actions
+                   sizes to its content, so a long label on some rows only would
+                   knock Remove out of line with the rows above it. The title
+                   carries the precision the seven characters cannot. -->
+              <button :disabled="busy === s.id || !!activeJob"
+                      :title="isComplete(s)
+                        ? 'Re-scan the Drive folder for photos added since the last round'
+                        : 'Index the photos not done yet'"
+                      @click="reindex(s.id)">
+                <span v-if="busy === s.id" class="spinner" />
+                {{ isComplete(s) ? 'Recheck' : 'Continue' }}
               </button>
               <!-- The photographer's own request, and the only destructive control
                    on this page — so it is styled as one and confirms first. -->
