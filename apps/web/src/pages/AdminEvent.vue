@@ -29,6 +29,18 @@ const levelFilter = ref<'all' | 'error' | 'warn'>('all');
 const newLink = ref('');
 let poll: number | undefined;
 
+/**
+ * Operator view. A photographer gets the same page with the machinery folded
+ * away: no image-size control, no pass list, and problems in plain words rather
+ * than the raw log.
+ */
+const owner = ref(false);
+
+/** The only part of the log a photographer can act on. */
+const problems = computed(() =>
+  (report.value?.log ?? []).filter((l) => l.level === 'error' || l.level === 'warn'));
+const problemsShown = ref(10);
+
 const totals = computed(() =>
   report.value?.totals ??
   { links: 0, removed_links: 0, found: 0, found_known: true, indexed: 0, missing: 0 });
@@ -74,6 +86,9 @@ async function load(quiet = false) {
 }
 
 onMounted(async () => {
+  // A failure here is not worth a banner: it can only mean the page is about to
+  // fail its own load, which load() reports properly.
+  await api.admin.me().then((me) => { owner.value = me.owner; }).catch(() => {});
   await load();
   // 15s and only while visible, not 6s regardless.
   //
@@ -121,8 +136,8 @@ async function run<T>(key: string, fn: () => Promise<T>, ok?: string) {
 const setSource = (id: string, v: 'original' | 'thumb') =>
   run(`src-${id}`, () => api.admin.setImageSource(id, v),
       v === 'thumb'
-        ? 'Switched to resized copies — press Re-index to continue at the faster rate.'
-        : 'Switched to full originals — press Re-index to continue.');
+        ? 'Switched to resized copies — press Continue to carry on at the faster rate.'
+        : 'Switched to full originals — press Continue to carry on.');
 
 /**
  * Passes needed for what is still missing, at the observed per-window rates.
@@ -144,7 +159,7 @@ const passesLeft = (s: { missing: number; image_source: string }) =>
   Math.ceil(s.missing / (s.image_source === 'thumb' ? 600 : 25));
 
 const reindex = (id: string) =>
-  run(id, () => api.admin.reindexSource(id), 'Re-indexing started — already-indexed photos are skipped.');
+  run(id, () => api.admin.reindexSource(id), 'Indexing started — photos already done are skipped.');
 
 type Source = Report['sources'][number];
 
@@ -222,7 +237,7 @@ async function removeLink(s: Source) {
 /** Clear a removal. Does not restore the photos — Re-index does that. */
 const restoreLink = (s: Source) =>
   run(`restore-${s.id}`, () => api.admin.restoreSource(s.id),
-      'Removal cleared. The photos are still deleted — press Re-index to fetch the album again.');
+      'Removal cleared. The photos are still deleted — press Continue to fetch the album again.');
 
 const setStatus = (s: EventSummary['status']) => run('status', () => api.admin.setStatus(props.id, s));
 
@@ -239,8 +254,8 @@ const bibsEnabled = computed(() => event.value?.bibs_enabled !== false);
 const setBibs = (on: boolean) =>
   run('bibs', () => api.admin.setBibsEnabled(props.id, on),
       on
-        ? 'Bib numbers on — the next pass will read bibs. Re-index to read them for photos already done.'
-        : 'Bib numbers off — bib search is hidden and later passes skip OCR. Existing bibs are kept.');
+        ? 'Bib numbers on — the next round will read bibs. Press Continue to read them for photos already done.'
+        : 'Bib numbers off — bib search is hidden and later rounds skip reading numbers. Existing bibs are kept.');
 
 function addLink() {
   const url = newLink.value.trim();
@@ -295,16 +310,16 @@ const when = (iso: string) => new Date(iso).toLocaleString();
           </div>
         </div>
         <p v-if="activeJob" class="notice" style="margin-top: var(--s-4)">
-          <span class="spinner" /> A pass is running — {{ activeJob.done }} / {{ activeJob.total }}.
-          Indexing continues automatically after a Drive rate limit.
+          <span class="spinner" /> Indexing now — {{ activeJob.done }} / {{ activeJob.total }}.
+          A big album is done in rounds, and it carries on by itself. You can close this page.
         </p>
         <p v-else-if="stalledJob" class="notice warn" style="margin-top: var(--s-4)">
-          A pass stopped without reporting back — the CI runner was cancelled or reclaimed.
-          Nothing is lost; press <strong>Re-index</strong> to pick up where it left off.
+          A round stopped early. Nothing is lost — press <strong>Continue</strong> to pick up
+          where it left off.
         </p>
         <p v-else-if="totals.missing > 0" class="notice warn" style="margin-top: var(--s-4)">
-          {{ plural(totals.missing, 'photo') }} not indexed. Press <strong>Re-index</strong> on the
-          link below — photos already indexed are skipped.
+          {{ plural(totals.missing, 'photo') }} not indexed yet. Press <strong>Continue</strong> on the
+          link below — photos already done are skipped.
         </p>
         <p v-else class="notice ok" style="margin-top: var(--s-4)">Every photo found on Drive is indexed.</p>
       </div>
@@ -394,7 +409,7 @@ const when = (iso: string) => new Date(iso).toLocaleString();
             <span v-else-if="s.discovered_known" class="state ok"> · complete</span>
             <span v-else class="muted"> · total unknown until the next pass</span>
             <span v-if="s.missing > 0" class="muted small" style="display: block">
-              ~{{ passesLeft(s) }} more {{ passesLeft(s) === 1 ? 'pass' : 'passes' }} at this setting
+              about {{ passesLeft(s) }} more {{ passesLeft(s) === 1 ? 'round' : 'rounds' }} to go
             </span>
           </span>
           <div class="row-actions">
@@ -411,18 +426,21 @@ const when = (iso: string) => new Date(iso).toLocaleString();
               </button>
             </template>
             <template v-else>
-              <div class="segmented tiny" role="group" aria-label="Image size to download">
+              <!-- Operator only, and the API refuses 'original' from anyone
+                   else — the control is hidden because the choice is made, not
+                   to keep it out of reach. -->
+              <div v-if="owner" class="segmented tiny" role="group" aria-label="Image size to download">
                 <button :aria-selected="s.image_source !== 'thumb'"
                         :disabled="busy === `src-${s.id}` || !!activeJob"
                         title="Download the full-size original from Drive"
                         @click="setSource(s.id, 'original')">Original</button>
                 <button :aria-selected="s.image_source === 'thumb'"
                         :disabled="busy === `src-${s.id}` || !!activeJob"
-                        title="Download Drive's resized copy — same faces and bibs, ~12x more photos per pass"
+                        title="Download Drive's resized copy — same faces and bibs, many more photos per round"
                         @click="setSource(s.id, 'thumb')">Resized</button>
               </div>
               <button :disabled="busy === s.id || !!activeJob" @click="reindex(s.id)">
-                <span v-if="busy === s.id" class="spinner" /> Re-index
+                <span v-if="busy === s.id" class="spinner" /> Continue
               </button>
               <!-- The photographer's own request, and the only destructive control
                    on this page — so it is styled as one and confirms first. -->
@@ -446,8 +464,39 @@ const when = (iso: string) => new Date(iso).toLocaleString();
         </form>
       </div>
 
+      <!-- What a photographer needs from the pass list and the log: whether
+           anything was skipped, and which photo. The counts, states, attempt
+           chains and codes underneath answer questions only the operator asks. -->
+      <div v-if="!owner" class="card">
+        <h2>Photos that could not be read</h2>
+        <p v-if="!problems.length" class="muted" style="margin: 0">
+          None so far — every photo Race Lens fetched went in.
+        </p>
+        <template v-else>
+          <p class="muted small" style="margin: 0 0 var(--s-2)">
+            {{ plural(problems.length, 'photo') }} skipped. Usually the file is a video, is
+            damaged, or was still uploading to Drive when indexing reached it.
+          </p>
+          <div v-for="(l, i) in problems.slice(0, problemsShown)" :key="i" class="row row-tight">
+            <div class="row-main small">
+              {{ l.message }}
+              <a v-if="l.drive_file_id" class="muted small mono-id" style="margin-left: var(--s-2)"
+                 :href="`https://drive.google.com/file/d/${l.drive_file_id}/view`"
+                 target="_blank" rel="noopener">open photo</a>
+            </div>
+          </div>
+          <div v-if="problems.length > 10" class="pager">
+            <button v-if="problemsShown < problems.length" @click="problemsShown += 10">Show more</button>
+            <button v-else @click="problemsShown = 10">Show fewer</button>
+            <span class="muted small">
+              Showing {{ Math.min(problemsShown, problems.length) }} of {{ problems.length }}
+            </span>
+          </div>
+        </template>
+      </div>
+
       <!-- passes -->
-      <div class="card">
+      <div v-if="owner" class="card">
         <h2>Passes ({{ report?.jobs_total ?? 0 }})</h2>
         <p v-if="!report?.jobs.length" class="muted" style="margin: 0">No indexing passes yet.</p>
         <div v-for="j in visibleJobs" :key="j.id" class="row row-tight">
@@ -474,7 +523,7 @@ const when = (iso: string) => new Date(iso).toLocaleString();
       </div>
 
       <!-- log -->
-      <div class="card">
+      <div v-if="owner" class="card">
         <div class="row" style="border-bottom: 0; padding-top: 0">
           <h2 class="row-main" style="margin: 0">Ingest log</h2>
           <div class="row-actions">

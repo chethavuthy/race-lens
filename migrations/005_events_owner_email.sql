@@ -1,0 +1,33 @@
+-- events.owner_email — whose event this is.
+--
+--   npx wrangler d1 execute race-lens --local  --config apps/api/wrangler.toml \
+--     --file=./migrations/005_events_owner_email.sql
+--   npx wrangler d1 execute race-lens --remote --config apps/api/wrangler.toml \
+--     --file=./migrations/005_events_owner_email.sql
+--
+-- SQLite has no ADD COLUMN IF NOT EXISTS, so re-running this errors with
+-- "duplicate column name". That error is safe and means it is already applied.
+--
+-- WHY
+--
+-- /admin used to be one room for one person. It is now the door photographers
+-- are invited through — they message on Telegram, their Google account goes on
+-- the Cloudflare Access list, and they index their own album. Access is a single
+-- allowlist with no notion of "whose", so without this column every photographer
+-- let in could open, re-index, unpublish and REMOVE every album on the site, and
+-- Remove deletes photos. This is what makes an event belong to somebody.
+--
+-- Set from the Access identity when the event is created, and never afterwards:
+-- an owner that could be reassigned through the API is not an owner.
+--
+-- WHY NULLABLE
+--
+-- Every event that existed before this migration has no owner recorded, and
+-- guessing one would be inventing a fact. NULL means "the operator's", which is
+-- exactly what those events are — OWNER_EMAIL sees everything regardless, so
+-- they stay reachable, and no photographer can reach them.
+ALTER TABLE events ADD COLUMN owner_email TEXT;
+
+-- Every scoped read is "the events belonging to this person", so it is worth an
+-- index once the list is more than a handful of rows.
+CREATE INDEX IF NOT EXISTS idx_events_owner ON events(owner_email);

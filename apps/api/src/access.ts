@@ -124,7 +124,7 @@ export async function verifyAccessJwt(
 
     // The audience check is doing real work here, not box-ticking.
     //
-    // This Access team (animekizz) also fronts unrelated applications — a
+    // This Access team also fronts unrelated applications — a
     // dashboard, a bridge, an ingest path on another domain. Every one of them is
     // signed by the SAME team keys, so signature validity alone would let a token
     // minted for any of those in through this door. `aud` is the only claim that

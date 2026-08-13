@@ -107,9 +107,9 @@ internalRoutes.post('/jobs/:id/continue', async (c) => {
       `UPDATE jobs SET status = 'partial', error = ?, updated_at = ? WHERE id = ?`,
     ).bind(
       timedOut
-        ? 'This pass ran out of time without indexing a photo. Press Re-index to try again.'
-        : 'Drive served no photos this pass — its download quota has not reset yet. ' +
-          'Press Re-index later to continue.',
+        ? 'This round ran out of time without indexing a photo. Press Continue to try again.'
+        : 'Google Drive served no photos this round — it limits how much can be ' +
+          'downloaded at once. Press Continue later to carry on.',
       nowIso(), id,
     ).run();
     return c.json({ dispatched: false, reason: 'no_progress' });
@@ -119,10 +119,10 @@ internalRoutes.post('/jobs/:id/continue', async (c) => {
     await c.env.DB.prepare(
       "UPDATE jobs SET status = 'partial', error = ?, updated_at = ? WHERE id = ?",
     ).bind(
-      `Stopped after ${MAX_ATTEMPTS} automatic continuations — ${
-        timedOut ? 'this folder is taking more CI time than one chain allows'
-                 : 'Drive is still rate-limiting this folder'
-      }. Everything indexed so far is live; press Start indexing again later to resume.`,
+      `Paused after ${MAX_ATTEMPTS} automatic rounds — ${
+        timedOut ? 'this folder is bigger than one stretch of indexing can finish'
+                 : 'Google Drive is still limiting how fast this folder can be downloaded'
+      }. Everything indexed so far is already live; press Continue to pick it up again.`,
       nowIso(), id,
     ).run();
     return c.json({ dispatched: false, reason: 'max_attempts' });
@@ -163,8 +163,8 @@ internalRoutes.post('/jobs/:id/continue', async (c) => {
     `UPDATE jobs SET attempts = attempts + 1, status = 'queued',
                      error = ?, updated_at = ? WHERE id = ?`,
   ).bind(
-    `${timedOut ? 'Reached this run’s time limit' : 'Drive rate limit'} — continuing ` +
-      `automatically (attempt ${(job.attempts ?? 0) + 2} of ${MAX_ATTEMPTS + 1}).`,
+    `${timedOut ? 'Reached this round’s time limit' : 'Google Drive slowed downloads'} — ` +
+      `continuing automatically (round ${(job.attempts ?? 0) + 2} of ${MAX_ATTEMPTS + 1}).`,
     nowIso(), id,
   ).run();
 

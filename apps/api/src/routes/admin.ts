@@ -1,11 +1,24 @@
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import type { Env, EventRow, JobRow } from '../types';
 import { chunk, clampLimit, HttpError, newId, nowIso, publicEvent, publicPhoto, r2Url, slugify } from '../lib';
+import { bannerKey, bannerType } from '../banner';
 import { faceBox } from '../bbox';
 import { parseFolderId, sampleThumbUrl, walkFolder } from '../drive';
 import { onAccessHost, verifyAccessJwt } from '../access';
 
-export const adminRoutes = new Hono<{ Bindings: Env }>();
+/**
+ * `owner` separates the two people who reach these routes.
+ *
+ * The operator runs the service. A photographer was let through the Access list
+ * to index their own album and nothing more — so the settings that only make
+ * sense to someone watching Drive's limits are decided for them rather than
+ * offered, here and not only in the UI. A hidden control is not a rule.
+ */
+export const adminRoutes = new Hono<{
+  Bindings: Env;
+  Variables: { owner: boolean; email: string | null };
+}>();
 
 /**
  * Cloudflare Access is the real gate. This refuses anything it did not cover.
@@ -29,19 +42,274 @@ export const adminRoutes = new Hono<{ Bindings: Env }>();
  * is the point, because the first one lives in a dashboard nothing here can assert.
  */
 adminRoutes.use('*', async (c, next) => {
+  let identity: string | null;
+
   // Bypass is a deploy-time var, never a request header: a header-triggered
   // bypass is trivially forgeable by anyone who finds the Worker's origin.
   if (c.env.DEV_ADMIN_BYPASS === '1') {
-    await next();
-    return;
+    // Local dev has no Access identity at all, so DEV_ADMIN_ROLE and
+    // DEV_ADMIN_EMAIL stand in for one. Without them the operator-only half of
+    // these routes, event ownership and bans are all untestable.
+    identity = c.env.DEV_ADMIN_EMAIL ?? null;
+  } else {
+    if (!onAccessHost(c.env, c.req.url)) {
+      throw new HttpError(403, 'Admin is not served on this hostname', 'no_access');
+    }
+    const claims = await verifyAccessJwt(c.env, c.req.header('Cf-Access-Jwt-Assertion'));
+    if (!claims) throw new HttpError(403, 'Admin requires Cloudflare Access', 'no_access');
+    identity = claims.email ?? null;
   }
-  if (!onAccessHost(c.env, c.req.url)) {
-    throw new HttpError(403, 'Admin is not served on this hostname', 'no_access');
+
+  const email = (identity ?? '').toLowerCase();
+  const owner = c.env.DEV_ADMIN_BYPASS === '1'
+    ? c.env.DEV_ADMIN_ROLE !== 'photographer'
+    : !!email && email === (c.env.OWNER_EMAIL ?? '').trim().toLowerCase();
+
+  // THE authorization gate, not one of several.
+  //
+  // Cloudflare Access allows any verified email now, because the guest list
+  // moved into this database so photographers can be added from /admin instead
+  // of a dashboard. Access still proves the person owns the address; whether
+  // that address may do anything is decided right here, and nowhere else.
+  //
+  // So it fails closed on every uncertainty: no row is a refusal, a banned row
+  // is a refusal, and both are refused before a single route runs. This lives
+  // OUTSIDE the dev-bypass branch on purpose — a check the dev environment
+  // cannot execute is a check nobody can test, which is how the first version of
+  // the ban shipped doing nothing locally.
+  //
+  // The operator is exempt from the lookup: locking yourself out of the only
+  // account that can invite and unban is not a state worth being able to reach.
+  if (!owner) {
+    if (!email) throw new HttpError(403, 'No email on this identity', 'no_access');
+    const row = await c.env.DB.prepare(
+      'SELECT banned_at FROM organizers WHERE email = ?',
+    ).bind(email).first<{ banned_at: string | null }>();
+    if (!row) throw new HttpError(403, 'This account is not an organizer yet', 'not_invited');
+    if (row.banned_at) throw new HttpError(403, 'This account no longer has access', 'banned');
   }
-  const claims = await verifyAccessJwt(c.env, c.req.header('Cf-Access-Jwt-Assertion'));
-  if (!claims) throw new HttpError(403, 'Admin requires Cloudflare Access', 'no_access');
+
+  c.set('owner', owner);
+  c.set('email', identity);
   await next();
 });
+
+/** Who is signed in, and how much of this page they get. */
+adminRoutes.get('/me', (c) => c.json({ email: c.get('email'), owner: c.get('owner') }));
+
+type AdminCtx = Context<{ Bindings: Env; Variables: { owner: boolean; email: string | null } }>;
+
+/** For the routes that are the operator's alone. */
+function requireOwner(c: AdminCtx): void {
+  if (!c.get('owner')) throw new HttpError(403, 'Not available on this account', 'not_owner');
+}
+
+/* ---------------------------------------------------------------- people --
+   The guest list, and what each guest has published. This is the screen the
+   invitation on /admin points at: a photographer messages on Telegram, the
+   operator types their address here, and they are in. Only the operator can
+   reach any of it. */
+
+/** Enough of an address to be worth storing. Access verifies the rest. */
+function cleanEmail(raw: string): string {
+  const email = decodeURIComponent(raw ?? '').trim().toLowerCase();
+  if (!email || email.length > 200 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new HttpError(400, 'That does not look like an email address', 'bad_email');
+  }
+  return email;
+}
+
+/** The operator's own address, which no route may ban or remove. */
+const operatorEmail = (c: AdminCtx) => (c.env.OWNER_EMAIL ?? '').trim().toLowerCase();
+
+/**
+ * Everyone on the list, with what they have published beside them.
+ *
+ * The roster and the events are separate facts — someone can be invited and
+ * never publish, or (from before this table existed) have published without a
+ * row — so both are read and joined here rather than one being inferred from
+ * the other. Anyone in either is listed; a person the operator cannot see is a
+ * person they cannot remove.
+ */
+adminRoutes.get('/organizers', async (c) => {
+  requireOwner(c);
+
+  const [{ results: roster }, { results: stats }] = await Promise.all([
+    c.env.DB.prepare(
+      'SELECT email, added_at, banned_at, reason FROM organizers ORDER BY added_at DESC',
+    ).all<{ email: string; added_at: string; banned_at: string | null; reason: string | null }>(),
+    c.env.DB.prepare(
+      `SELECT LOWER(owner_email) AS email,
+              COUNT(*) AS events,
+              COALESCE(SUM(photo_count), 0) AS photos,
+              SUM(CASE WHEN status = 'ready' THEN 1 ELSE 0 END) AS published,
+              MAX(created_at) AS last_event
+         FROM events WHERE owner_email IS NOT NULL AND owner_email <> ''
+        GROUP BY LOWER(owner_email)`,
+    ).all<{ email: string; events: number; photos: number; published: number; last_event: string }>(),
+  ]);
+
+  const byEmail = new Map<string, any>();
+  for (const r of roster) {
+    byEmail.set(r.email, {
+      email: r.email, added_at: r.added_at, banned_at: r.banned_at,
+      events: 0, photos: 0, published: 0, last_event: null,
+    });
+  }
+  for (const s of stats) {
+    const row = byEmail.get(s.email) ?? {
+      email: s.email, added_at: null, banned_at: null,
+    };
+    byEmail.set(s.email, {
+      ...row,
+      events: s.events, photos: s.photos, published: s.published, last_event: s.last_event,
+    });
+  }
+
+  return c.json({ organizers: [...byEmail.values()] });
+});
+
+/**
+ * Let a photographer in.
+ *
+ * Idempotent, and it un-bans: pressing Add on someone previously removed is a
+ * decision to let them back, and refusing it in favour of a separate control
+ * would only teach the operator that Add sometimes silently does nothing.
+ */
+adminRoutes.post('/organizers', async (c) => {
+  requireOwner(c);
+  const body = await c.req.json<{ email?: string }>().catch(() => ({}) as { email?: string });
+  const email = cleanEmail(body.email ?? '');
+
+  await c.env.DB.prepare(
+    `INSERT INTO organizers (email, added_at, added_by, banned_at, reason)
+     VALUES (?, ?, ?, NULL, NULL)
+     ON CONFLICT (email) DO UPDATE SET banned_at = NULL, reason = NULL`,
+  ).bind(email, nowIso(), c.get('email')).run();
+
+  return c.json({ email }, 201);
+});
+
+/**
+ * Withdraw someone's access, and take down what they published.
+ *
+ * `unpublish` defaults to true: a removal that leaves the albums live is the
+ * half-measure this replaces. Unpublishing hides the events from runners and
+ * keeps every photo — letting them back in does NOT republish, because whether
+ * an album belongs on the site is a separate judgement from whether a person
+ * belongs on the list.
+ */
+adminRoutes.post('/organizers/:email/ban', async (c) => {
+  requireOwner(c);
+  const email = cleanEmail(c.req.param('email'));
+  if (email === operatorEmail(c)) {
+    throw new HttpError(400, 'That is the operator account', 'bad_request');
+  }
+
+  const body = await c.req.json<{ reason?: string; unpublish?: boolean }>()
+    .catch(() => ({}) as { reason?: string; unpublish?: boolean });
+  const reason = (body.reason ?? '').trim().slice(0, 200) || null;
+  const ts = nowIso();
+
+  // A ban on someone with no row still records one: they may have been invited
+  // through an older path, or the operator may be pre-empting a return.
+  await c.env.DB.prepare(
+    `INSERT INTO organizers (email, added_at, added_by, banned_at, reason)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT (email) DO UPDATE SET banned_at = excluded.banned_at, reason = excluded.reason`,
+  ).bind(email, ts, c.get('email'), ts, reason).run();
+
+  let unpublished = 0;
+  if (body.unpublish !== false) {
+    const r = await c.env.DB.prepare(
+      "UPDATE events SET status = 'draft' WHERE LOWER(owner_email) = ? AND status = 'ready'",
+    ).bind(email).run();
+    unpublished = r.meta.changes ?? 0;
+  }
+
+  return c.json({ banned: email, unpublished });
+});
+
+/** Let them back in. Their events stay unpublished until someone republishes. */
+adminRoutes.delete('/organizers/:email/ban', async (c) => {
+  requireOwner(c);
+  const email = cleanEmail(c.req.param('email'));
+  const r = await c.env.DB.prepare(
+    'UPDATE organizers SET banned_at = NULL, reason = NULL WHERE email = ?',
+  ).bind(email).run();
+  if (!r.meta.changes) throw new HttpError(404, 'Not on the list', 'no_organizer');
+  return c.json({ ok: true, email });
+});
+
+/**
+ * Remove a row outright — for the address typed wrong, not for a person.
+ *
+ * Refused once they have published anything: deleting the row would take away
+ * their access while leaving their events owned by an address on no list, which
+ * is a ban with the record thrown away. Ban is the control for that, and it
+ * says so.
+ */
+adminRoutes.delete('/organizers/:email', async (c) => {
+  requireOwner(c);
+  const email = cleanEmail(c.req.param('email'));
+  if (email === operatorEmail(c)) {
+    throw new HttpError(400, 'That is the operator account', 'bad_request');
+  }
+
+  const used = await c.env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM events WHERE LOWER(owner_email) = ?',
+  ).bind(email).first<{ n: number }>();
+  if ((used?.n ?? 0) > 0) {
+    throw new HttpError(
+      409,
+      'They have events on the site. Remove access instead, which also unpublishes them.',
+      'has_events',
+    );
+  }
+
+  await c.env.DB.prepare('DELETE FROM organizers WHERE email = ?').bind(email).run();
+  return c.json({ ok: true, email });
+});
+
+/**
+ * The event, if it is this caller's to touch — the gate every scoped route runs
+ * through.
+ *
+ * Being on the organizer list says a person may use the admin, not that they may
+ * use it on somebody else's album. `events.owner_email` is what separates the
+ * two, and the controls behind here include Remove, which deletes photos.
+ *
+ * 404 rather than 403 on a mismatch, deliberately: 403 would confirm that an
+ * event with that id exists, and someone else's album is not a fact this caller
+ * is entitled to. A missing event and a stranger's event look identical.
+ *
+ * NULL owner_email means the event predates ownership — the operator's, and
+ * unreachable by anyone else, which is what those events already were.
+ */
+async function ownEvent(c: AdminCtx, eventId: string): Promise<EventRow> {
+  const row = await c.env.DB.prepare('SELECT * FROM events WHERE id = ?')
+    .bind(eventId).first<EventRow>();
+  if (!row) throw new HttpError(404, 'Event not found', 'no_event');
+  if (c.get('owner')) return row;
+  const email = (c.get('email') ?? '').toLowerCase();
+  if (!email || (row.owner_email ?? '').toLowerCase() !== email) {
+    throw new HttpError(404, 'Event not found', 'no_event');
+  }
+  return row;
+}
+
+/** Same gate, reached through whatever hangs off an event. */
+async function ownVia(c: AdminCtx, sql: string, id: string, what: string): Promise<string> {
+  const row = await c.env.DB.prepare(sql).bind(id).first<{ event_id: string }>();
+  if (!row) throw new HttpError(404, `${what} not found`, 'not_found');
+  await ownEvent(c, row.event_id);
+  return row.event_id;
+}
+
+const ownSource = (c: AdminCtx, id: string) =>
+  ownVia(c, 'SELECT event_id FROM sources WHERE id = ?', id, 'Link');
+const ownPhoto = (c: AdminCtx, id: string) =>
+  ownVia(c, 'SELECT event_id FROM photos WHERE id = ?', id, 'Photo');
 
 /** Validate a pasted Drive link. Deliberately does NOT start a job. */
 adminRoutes.post('/drive/inspect', async (c) => {
@@ -77,6 +345,9 @@ adminRoutes.post('/drive/inspect', async (c) => {
  * 3200px where the 20 MB original would not.
  */
 adminRoutes.post('/drive/benchmark', async (c) => {
+  // Operator only: it spends a processing run to answer a question only the
+  // operator's setting depends on.
+  if (!c.get('owner')) throw new HttpError(403, 'Not available on this account', 'not_owner');
   const { url, sample } = await c.req.json<{ url?: string; sample?: number }>();
   if (!url) throw new HttpError(400, 'Missing url', 'bad_request');
   const folderId = parseFolderId(url);
@@ -102,13 +373,15 @@ adminRoutes.post('/drive/benchmark', async (c) => {
   });
   if (!res.ok) {
     await c.env.DB.prepare("UPDATE benchmarks SET status='failed', error=? WHERE id=?")
-      .bind(`dispatch failed: ${res.status}`, id).run();
-    throw new HttpError(502, `Could not start the benchmark (GitHub ${res.status})`, 'dispatch_failed');
+      .bind(`could not start (${res.status})`, id).run();
+    throw new HttpError(502, `Could not start the comparison (${res.status})`, 'dispatch_failed');
   }
   return c.json({ benchmark_id: id, folder_id: folderId, sample: n }, 202);
 });
 
 adminRoutes.get('/benchmarks/:id', async (c) => {
+  // Only the operator starts one, so only the operator reads one back.
+  if (!c.get('owner')) throw new HttpError(403, 'Not available on this account', 'not_owner');
   const row = await c.env.DB.prepare('SELECT * FROM benchmarks WHERE id = ?')
     .bind(c.req.param('id')).first<any>();
   if (!row) throw new HttpError(404, 'Benchmark not found', 'no_benchmark');
@@ -118,10 +391,24 @@ adminRoutes.get('/benchmarks/:id', async (c) => {
 });
 
 adminRoutes.get('/events', async (c) => {
-  const { results } = await c.env.DB.prepare(
-    'SELECT * FROM events ORDER BY created_at DESC',
-  ).all<EventRow>();
-  return c.json({ events: results.map((e) => ({ ...publicEvent(c.env, e), created_at: e.created_at })) });
+  // A photographer's list is their own events and nothing else. The operator's
+  // is everything, including the ones with no owner recorded.
+  const email = (c.get('email') ?? '').toLowerCase();
+  const { results } = c.get('owner')
+    ? await c.env.DB.prepare('SELECT * FROM events ORDER BY created_at DESC').all<EventRow>()
+    : await c.env.DB.prepare(
+      'SELECT * FROM events WHERE LOWER(owner_email) = ? ORDER BY created_at DESC',
+    ).bind(email).all<EventRow>();
+  // owner_email is admin-only and deliberately not part of publicEvent: the
+  // operator's list groups by it, and a photographer's list is their own events,
+  // where it would only repeat their own address back at them.
+  return c.json({
+    events: results.map((e) => ({
+      ...publicEvent(c.env, e),
+      created_at: e.created_at,
+      owner_email: c.get('owner') ? e.owner_email : null,
+    })),
+  });
 });
 
 adminRoutes.post('/events', async (c) => {
@@ -140,11 +427,13 @@ adminRoutes.post('/events', async (c) => {
   const id = newId();
   // Absent means bibs are expected — the overwhelmingly common case, and the
   // behaviour every event had before this flag existed.
+  // Ownership is recorded here and nowhere else. No route reassigns it: an owner
+  // the API can change is not an owner.
   await c.env.DB.prepare(
-    `INSERT INTO events (id, slug, name, event_date, status, bibs_enabled, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO events (id, slug, name, event_date, status, bibs_enabled, owner_email, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(id, slug, name, body.event_date ?? null, 'draft',
-         body.bibs_enabled === false ? 0 : 1, nowIso()).run();
+         body.bibs_enabled === false ? 0 : 1, c.get('email'), nowIso()).run();
 
   const row = await c.env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(id).first<EventRow>();
   return c.json({ event: publicEvent(c.env, row!) }, 201);
@@ -152,6 +441,7 @@ adminRoutes.post('/events', async (c) => {
 
 adminRoutes.patch('/events/:id', async (c) => {
   const id = c.req.param('id');
+  await ownEvent(c, id);
   const body = await c.req.json<{
     name?: string; event_date?: string; status?: string; bibs_enabled?: boolean;
   }>();
@@ -175,23 +465,11 @@ adminRoutes.patch('/events/:id', async (c) => {
   return c.json({ event: publicEvent(c.env, row) });
 });
 
-/**
- * Content types a banner may be stored as, mapped to the exact string we write.
- *
- * Raster formats only. Anything a browser will execute — SVG above all — must not
- * be reachable, because these objects are served from a hostname that publishes the
- * whole bucket with whatever content type is on them.
- */
-const BANNER_TYPES: Record<string, string> = {
-  'image/webp': 'image/webp',
-  'image/jpeg': 'image/jpeg',
-  'image/jpg': 'image/jpeg',
-  'image/png': 'image/png',
-  'image/avif': 'image/avif',
-};
+const BANNER_MAX_BYTES = 8 * 1024 * 1024;
 
 adminRoutes.post('/events/:id/banner', async (c) => {
   const id = c.req.param('id');
+  await ownEvent(c, id);
   const form = await c.req.formData();
   const file = form.get('file') as unknown as File | string | null;
   // `instanceof File` does not narrow under @cloudflare/workers-types, so duck-type.
@@ -199,33 +477,59 @@ adminRoutes.post('/events/:id/banner', async (c) => {
     throw new HttpError(400, 'Expected multipart field "file"', 'bad_request');
   }
   // An allowlist, not a prefix test, and OUR content type rather than the
-  // client's.
-  //
-  // `file.type` is the multipart part's own Content-Type header — attacker
-  // controlled — and `startsWith('image/')` happily admits `image/svg+xml`. That
-  // type was then written verbatim into R2 metadata, and BUCKET is published at
-  // R2_PUBLIC_BASE (img.runlytics.fit), which serves the stored type regardless of
-  // the .webp key. So an SVG banner executed its own script on a runlytics.fit
-  // origin: enough to set Domain=.runlytics.fit cookies, shadowing the Access
-  // cookie the admin app depends on, and to host phishing on the site's own image
-  // domain. `nosniff` in public/_headers is a Pages header and does not reach the
-  // R2 custom domain.
-  const type = BANNER_TYPES[file.type.split(';')[0].trim().toLowerCase()];
+  // client's — see bannerType for what a prefix test let through.
+  const type = bannerType(file.type);
   if (!type) {
     throw new HttpError(400, 'Banner must be a WebP, JPEG, PNG or AVIF image', 'bad_type');
   }
-  if (file.size > 8 * 1024 * 1024) throw new HttpError(413, 'Banner must be under 8 MB', 'too_large');
+  // Checked before buffering, so an oversized upload is refused without reading
+  // it into the isolate.
+  if (file.size > BANNER_MAX_BYTES) {
+    throw new HttpError(413, 'Banner must be under 8 MB', 'too_large');
+  }
 
   // Without this the endpoint is a general write into the public bucket for any id
   // at all, and it would leave banner_key set on nothing.
-  const target = await c.env.DB.prepare('SELECT id FROM events WHERE id = ?').bind(id).first();
+  //
+  // banner_key comes back too: the object it names is the one this upload
+  // replaces, and after a successful write nothing else refers to it.
+  const target = await c.env.DB.prepare('SELECT id, banner_key FROM events WHERE id = ?')
+    .bind(id).first<{ id: string; banner_key: string | null }>();
   if (!target) throw new HttpError(404, 'Event not found', 'no_event');
 
-  const key = `banners/${id}.webp`;
-  await c.env.BUCKET.put(key, file.stream(), {
-    httpMetadata: { contentType: type, cacheControl: 'public, max-age=31536000, immutable' },
+  // Buffered rather than streamed, because the key is derived from the bytes and
+  // a hash cannot be computed from a stream that has already been consumed. Bounded
+  // by the size check above; the 8 MB ceiling is what makes this safe in a 128 MB
+  // isolate.
+  const bytes = await file.arrayBuffer();
+  // `file.size` is the multipart parser's number and the check above trusted it.
+  // This is the byte count we actually hold, so it is the one that decides.
+  if (bytes.byteLength > BANNER_MAX_BYTES) {
+    throw new HttpError(413, 'Banner must be under 8 MB', 'too_large');
+  }
+  if (bytes.byteLength === 0) throw new HttpError(400, 'Banner file is empty', 'bad_request');
+
+  const key = await bannerKey(id, bytes, type.ext);
+  await c.env.BUCKET.put(key, bytes, {
+    httpMetadata: { contentType: type.contentType, cacheControl: 'public, max-age=31536000, immutable' },
   });
   await c.env.DB.prepare('UPDATE events SET banner_key = ? WHERE id = ?').bind(key, id).run();
+
+  // Ordered write, then point, then delete. The object exists before any row names
+  // it, and the old object outlives the row that named it, so neither a failure
+  // between the steps nor a concurrent read can observe a banner_key with nothing
+  // behind it.
+  //
+  // Re-uploading identical bytes yields the same key, and deleting it here would
+  // delete what was just written — hence the comparison rather than an
+  // unconditional delete of the previous value.
+  if (target.banner_key && target.banner_key !== key) {
+    // A failed cleanup leaves an unreferenced object, which costs storage and
+    // nothing else. Not worth failing an upload that already succeeded over.
+    c.executionCtx.waitUntil(
+      c.env.BUCKET.delete(target.banner_key).catch(() => {}),
+    );
+  }
   return c.json({ banner_url: r2Url(c.env, key) });
 });
 
@@ -236,8 +540,8 @@ adminRoutes.post('/ingest', async (c) => {
   }>();
   if (!event_id || !drive_url) throw new HttpError(400, 'event_id and drive_url are required', 'bad_request');
 
-  const event = await c.env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(event_id).first<EventRow>();
-  if (!event) throw new HttpError(404, 'Event not found', 'no_event');
+  // Also the ownership gate: a link can only be added to your own event.
+  const event = await ownEvent(c, event_id);
 
   const folderId = parseFolderId(drive_url);
   const ts = nowIso();
@@ -272,9 +576,17 @@ adminRoutes.post('/ingest', async (c) => {
   // silently threw away a 'thumb' setting the organizer had chosen from the row
   // toggle, sending the next pass back to full-size downloads and the quota wall
   // that made them change it in the first place.
-  const imgSrc = image_source === 'thumb' || image_source === 'original'
-    ? image_source
-    : existing?.image_source ?? 'original';
+  //
+  // A photographer never picks: resized, always. Originals are ~20 MB each and
+  // Drive's limit is counted in bytes, so an album indexed at full size crawls
+  // for days and needs someone watching it. Resized finds the same faces and
+  // bibs. This is enforced here rather than by hiding the control, because the
+  // control is not the only way to reach this route.
+  const imgSrc = !c.get('owner')
+    ? 'thumb'
+    : image_source === 'thumb' || image_source === 'original'
+      ? image_source
+      : existing?.image_source ?? 'original';
 
   const sourceId = existing?.id ?? newId();
   const jobId = newId();
@@ -317,13 +629,16 @@ adminRoutes.post('/ingest', async (c) => {
   });
 
   if (!res.ok) {
-    const detail = await res.text();
+    // The upstream body goes to the Worker log, not into the job row: job.error
+    // is rendered on a page photographers now reach, and that body names the
+    // repository and the API behind it.
+    console.error('index dispatch failed', res.status, (await res.text()).slice(0, 300));
     // Mark the job failed immediately rather than leaving the admin UI
     // polling a job that no runner will ever pick up.
     await c.env.DB.prepare(
       "UPDATE jobs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
-    ).bind(`dispatch failed: ${res.status} ${detail.slice(0, 300)}`, nowIso(), jobId).run();
-    throw new HttpError(502, `Could not start the indexing job (GitHub returned ${res.status})`, 'dispatch_failed');
+    ).bind(`could not start indexing (${res.status})`, nowIso(), jobId).run();
+    throw new HttpError(502, `Could not start indexing (${res.status}). Try again in a minute.`, 'dispatch_failed');
   }
 
   return c.json({ job_id: jobId, source_id: sourceId, folder_id: folderId }, 202);
@@ -335,6 +650,7 @@ adminRoutes.post('/ingest', async (c) => {
  * what actually landed, and the reason for each miss.
  */
 adminRoutes.get('/events/:id/report', async (c) => {
+  await ownEvent(c, c.req.param('id'));
   const eventId = c.req.param('id');
 
   const { results: sources } = await c.env.DB.prepare(
@@ -482,6 +798,7 @@ adminRoutes.get('/events/:id/report', async (c) => {
  */
 adminRoutes.patch('/sources/:id', async (c) => {
   const sourceId = c.req.param('id');
+  await ownSource(c, sourceId);
   const body = await c.req.json<{ image_source?: string; credit_name?: string | null }>()
     .catch(() => ({}) as any);
 
@@ -491,6 +808,10 @@ adminRoutes.patch('/sources/:id', async (c) => {
   if (body.image_source !== undefined) {
     if (body.image_source !== 'thumb' && body.image_source !== 'original') {
       throw new HttpError(400, "image_source must be 'thumb' or 'original'", 'bad_image_source');
+    }
+    // Same rule as /ingest: only the operator chooses full originals.
+    if (body.image_source === 'original' && !c.get('owner')) {
+      throw new HttpError(403, 'Albums are indexed from resized copies', 'not_owner');
     }
     sets.push('image_source = ?');
     binds.push(body.image_source);
@@ -547,6 +868,7 @@ const PURGE_ROUNDS = 4;
  */
 adminRoutes.delete('/sources/:id', async (c) => {
   const sourceId = c.req.param('id');
+  await ownSource(c, sourceId);
   const src = await c.env.DB.prepare(
     'SELECT id, event_id, removed_at FROM sources WHERE id = ?',
   ).bind(sourceId).first<{ id: string; event_id: string; removed_at: string | null }>();
@@ -614,6 +936,7 @@ adminRoutes.delete('/sources/:id', async (c) => {
  */
 adminRoutes.post('/sources/:id/restore', async (c) => {
   const sourceId = c.req.param('id');
+  await ownSource(c, sourceId);
   const r = await c.env.DB.prepare(
     'UPDATE sources SET removed_at = NULL WHERE id = ?',
   ).bind(sourceId).run();
@@ -623,6 +946,7 @@ adminRoutes.post('/sources/:id/restore', async (c) => {
 
 adminRoutes.post('/sources/:id/reindex', async (c) => {
   const sourceId = c.req.param('id');
+  await ownSource(c, sourceId);
   const src = await c.env.DB.prepare('SELECT * FROM sources WHERE id = ?').bind(sourceId).first<any>();
   if (!src) throw new HttpError(404, 'Source not found', 'no_source');
 
@@ -649,16 +973,14 @@ adminRoutes.post('/sources/:id/reindex', async (c) => {
   });
   if (!res.ok) {
     await c.env.DB.prepare("UPDATE jobs SET status='failed', error=?, updated_at=? WHERE id=?")
-      .bind(`dispatch failed: ${res.status}`, nowIso(), jobId).run();
-    throw new HttpError(502, `Could not start the job (GitHub ${res.status})`, 'dispatch_failed');
+      .bind(`could not start indexing (${res.status})`, nowIso(), jobId).run();
+    throw new HttpError(502, `Could not start indexing (${res.status}). Try again in a minute.`, 'dispatch_failed');
   }
   return c.json({ job_id: jobId }, 202);
 });
 
 adminRoutes.get('/events/:id', async (c) => {
-  const row = await c.env.DB.prepare('SELECT * FROM events WHERE id = ?')
-    .bind(c.req.param('id')).first<EventRow>();
-  if (!row) throw new HttpError(404, 'Event not found', 'no_event');
+  const row = await ownEvent(c, c.req.param('id'));
   return c.json({ event: { ...publicEvent(c.env, row), created_at: row.created_at } });
 });
 
@@ -671,6 +993,7 @@ adminRoutes.get('/events/:id', async (c) => {
  */
 adminRoutes.get('/events/:id/photos', async (c) => {
   const eventId = c.req.param('id');
+  await ownEvent(c, eventId);
   const limit = clampLimit(c.req.query('limit'), 24, 60);
   const cursor = c.req.query('cursor') ?? '';
   const filter = c.req.query('filter') ?? 'all'; // all | no_face | no_bib | has_bib
@@ -740,6 +1063,7 @@ adminRoutes.get('/events/:id/photos', async (c) => {
  * outlives every future re-index.
  */
 adminRoutes.post('/photos/:id/bibs', async (c) => {
+  await ownPhoto(c, c.req.param('id'));
   const photoId = c.req.param('id');
   const { bib } = await c.req.json<{ bib?: string }>();
 
@@ -776,6 +1100,7 @@ adminRoutes.post('/photos/:id/bibs', async (c) => {
 /** Re-run the pipeline on ONE photo. Seconds, rather than a whole-folder pass. */
 adminRoutes.post('/photos/:id/reindex', async (c) => {
   const photoId = c.req.param('id');
+  await ownPhoto(c, photoId);
   const photo = await c.env.DB.prepare(
     `SELECT p.drive_file_id, p.event_id, p.source_id, s.drive_folder_id, s.image_source
        FROM photos p JOIN sources s ON s.id = p.source_id WHERE p.id = ?`,
@@ -811,11 +1136,12 @@ adminRoutes.post('/photos/:id/reindex', async (c) => {
       },
     }),
   });
-  if (!res.ok) throw new HttpError(502, `Could not start (GitHub ${res.status})`, 'dispatch_failed');
+  if (!res.ok) throw new HttpError(502, `Could not start (${res.status})`, 'dispatch_failed');
   return c.json({ job_id: jobId }, 202);
 });
 
 adminRoutes.post('/faces/:id/bib', async (c) => {
+  await ownVia(c, 'SELECT event_id FROM faces WHERE id = ?', c.req.param('id'), 'Face');
   const faceId = c.req.param('id');
   const { bib } = await c.req.json<{ bib?: string }>();
   const raw = String(bib ?? '').trim().replace(/\D/g, '');
@@ -854,6 +1180,7 @@ adminRoutes.post('/faces/:id/bib', async (c) => {
 
 adminRoutes.delete('/photos/:id/bibs/:bib', async (c) => {
   const photoId = c.req.param('id');
+  await ownPhoto(c, photoId);
   const digits = c.req.param('bib').replace(/\D/g, '');
   const norm = digits.replace(/^0+(?=\d)/, '');
   const photo = await c.env.DB.prepare('SELECT event_id FROM photos WHERE id = ?')
@@ -877,10 +1204,14 @@ adminRoutes.delete('/photos/:id/bibs/:bib', async (c) => {
 adminRoutes.get('/jobs/:id', async (c) => {
   const row = await c.env.DB.prepare('SELECT * FROM jobs WHERE id = ?').bind(c.req.param('id')).first<JobRow>();
   if (!row) throw new HttpError(404, 'Job not found', 'no_job');
+  // The admin page polls this every few seconds while an album indexes, so it is
+  // the one route a stranger's id would most easily be tried against.
+  await ownEvent(c, row.event_id);
   return c.json({ job: row });
 });
 
 adminRoutes.get('/events/:id/jobs', async (c) => {
+  await ownEvent(c, c.req.param('id'));
   const { results } = await c.env.DB.prepare(
     'SELECT * FROM jobs WHERE event_id = ? ORDER BY updated_at DESC LIMIT 20',
   ).bind(c.req.param('id')).all<JobRow>();

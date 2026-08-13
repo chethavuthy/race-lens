@@ -9,6 +9,9 @@ const router = createRouter({
     { path: '/', component: () => import('./pages/EventList.vue') },
     { path: '/e/:slug', component: () => import('./pages/EventDetail.vue'), props: true },
     { path: '/admin', component: () => import('./pages/Admin.vue') },
+    // Gated by Cloudflare Access, unlike /admin itself — reaching it is the
+    // sign-in. It redirects to /admin once the cookie is set.
+    { path: '/admin/signin', component: () => import('./pages/AdminSignin.vue') },
     { path: '/admin/e/:id', component: () => import('./pages/AdminEvent.vue'), props: true },
     { path: '/admin/e/:id/photos', component: () => import('./pages/AdminPhotos.vue'), props: true },
     // Phase 5 acceptance gate. Dev builds only — never shipped to production.

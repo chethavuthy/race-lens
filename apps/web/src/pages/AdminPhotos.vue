@@ -7,21 +7,33 @@
  * frame with nothing boxed, or a box over a runner whose number was misread, is
  * the difference between guessing at thresholds and knowing which stage failed.
  */
-import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { RouterLink } from 'vue-router';
 import { api } from '../lib/api';
 
 const props = defineProps<{ id: string }>();
 type Row = Awaited<ReturnType<typeof api.admin.photos>>['photos'][number];
 
-const FILTERS = [
+const ALL_FILTERS = [
   { id: 'all', label: 'All' },
   { id: 'no_face', label: 'No face' },
   { id: 'no_bib', label: 'No bib' },
   { id: 'has_bib', label: 'Has bib' },
 ] as const;
 
-const filter = ref<(typeof FILTERS)[number]['id']>('all');
+const filter = ref<(typeof ALL_FILTERS)[number]['id']>('all');
+
+/**
+ * An event with no bibs has no bib filters, no bib counts, and no bib copy.
+ *
+ * Offering "No bib" on a fun run is not a harmless extra tab: every photo
+ * matches it, so the one filter that looks like a problem list is the whole
+ * album, and "0 with no bib" reads as a failure of something that was never
+ * switched on. Defaults to true so nothing flickers out while the event loads.
+ */
+const bibsEnabled = ref(true);
+const FILTERS = computed(() =>
+  ALL_FILTERS.filter((f) => bibsEnabled.value || !f.id.includes('bib')));
 const photos = ref<Row[]>([]);
 const cursor = ref<string | null>(null);
 const loading = ref(true);
@@ -169,8 +181,67 @@ async function load(reset = false) {
   finally { loading.value = false; loadingMore.value = false; }
 }
 
-onMounted(() => load(true));
+onMounted(async () => {
+  measureColumns();
+  window.addEventListener('resize', onResize, { passive: true });
+  // Not fatal if it fails: the page still inspects photos, it just keeps the
+  // bib controls it would otherwise hide.
+  await api.admin.getEvent(props.id)
+    .then((r) => { bibsEnabled.value = r.event.bibs_enabled !== false; })
+    .catch(() => {});
+  load(true);
+});
+
+onBeforeUnmount(() => {
+  cancelAnimationFrame(resizeFrame);
+  window.removeEventListener('resize', onResize);
+});
 watch(filter, () => load(true));
+
+/* ---------------------------------------------------------------- layout --
+   Masonry, for the same reason the public grid uses it: these albums are a
+   mixture of 3:2 landscape off a DSLR and 3:4 portrait off a phone, and a fixed
+   grid row is as tall as its tallest tile — so every short tile sat above a
+   band of empty background and half the screen showed nothing.
+
+   Cropping to a uniform box is not an option HERE in particular: the face boxes
+   are positioned as percentages of the tile, so a cover-crop would slide every
+   box off the face it belongs to. Each tile keeps its own shape instead.
+
+   Items are dealt into whichever column is currently shortest, using the stored
+   pixel dimensions rather than measured ones — the balance is right on first
+   paint, and appending a page cannot move anything already on screen. */
+const COLUMN_BREAKPOINTS = [
+  { min: 1101, columns: 4 },
+  { min: 561, columns: 3 },
+  { min: 0, columns: 2 },
+];
+const columnCount = ref(COLUMN_BREAKPOINTS[0].columns);
+
+function measureColumns() {
+  const w = window.innerWidth;
+  columnCount.value = (COLUMN_BREAKPOINTS.find((b) => w >= b.min) ?? COLUMN_BREAKPOINTS[2]).columns;
+}
+let resizeFrame = 0;
+function onResize() {
+  cancelAnimationFrame(resizeFrame);
+  resizeFrame = requestAnimationFrame(measureColumns);
+}
+
+const columns = computed<Row[][]>(() => {
+  const n = columnCount.value;
+  const cols: Row[][] = Array.from({ length: n }, () => []);
+  const heights = new Array<number>(n).fill(0);
+  for (const p of photos.value) {
+    let shortest = 0;
+    for (let i = 1; i < n; i++) if (heights[i] < heights[shortest]) shortest = i;
+    cols[shortest].push(p);
+    // Height relative to column width, so no measuring is needed. 2/3 is the
+    // fallback for rows indexed before dimensions were stored.
+    heights[shortest] += p.width && p.height ? p.height / p.width : 2 / 3;
+  }
+  return cols;
+});
 
 const pct = (n: number) => `${(n * 100).toFixed(2)}%`;
 const summary = computed(() => {
@@ -188,11 +259,15 @@ const summary = computed(() => {
     <RouterLink :to="`/admin/e/${id}`" class="muted small">← Event</RouterLink>
   </p>
   <h1>Inspect photos</h1>
-  <p class="lede">
+  <p v-if="bibsEnabled" class="lede">
     Green boxes are detected faces. The label is the bib read from that runner's
     torso; <strong>?</strong> means a face was found but no number could be read.
     Open a photo and <strong>click any label to type that runner's bib</strong> —
     Esc cancels, Enter saves.
+  </p>
+  <p v-else class="lede">
+    Green boxes are detected faces. This event has no bib numbers, so runners find
+    themselves by face alone — a photo with no box is one face search cannot return.
   </p>
 
   <div class="segmented" role="tablist" aria-label="Filter photos">
@@ -205,28 +280,33 @@ const summary = computed(() => {
 
   <template v-else>
     <p class="muted small">
-      Showing {{ summary.shown }} · {{ summary.noFace }} with no face · {{ summary.noBib }} with no bib
+      Showing {{ summary.shown }} · {{ summary.noFace }} with no face<template
+        v-if="bibsEnabled"> · {{ summary.noBib }} with no bib</template>
     </p>
 
-    <div class="photo-grid" style="grid-template-columns: repeat(auto-fill, minmax(260px, 1fr))">
-      <figure v-for="p in photos" :key="p.id">
+    <div class="masonry">
+      <div v-for="(col, ci) in columns" :key="ci" class="masonry-col">
+      <figure v-for="p in col" :key="p.id">
         <button class="inspect-tile" @click="openZoom(p)">
           <img :src="p.thumb_url ?? ''" alt="" loading="lazy" decoding="async" />
           <span v-for="(f, i) in p.faces" :key="i" class="face-box"
                 :style="{ left: pct(f.x), top: pct(f.y), width: pct(f.w), height: pct(f.h) }">
-            <span class="face-tag">{{ f.bib || '?' }}</span>
+            <span v-if="bibsEnabled" class="face-tag">{{ f.bib || '?' }}</span>
           </span>
           <span v-if="!p.faces.length" class="no-face-flag">no face detected</span>
         </button>
         <figcaption class="muted small" style="margin-top: 4px">
-          <span v-if="p.bibs.length">
-            bibs: {{ p.bibs.map((b) => b.bib).join(', ') }}
-          </span>
-          <span v-else>no bib read</span>
-          ·
+          <template v-if="bibsEnabled">
+            <span v-if="p.bibs.length">
+              bibs: {{ p.bibs.map((b) => b.bib).join(', ') }}
+            </span>
+            <span v-else>no bib read</span>
+            ·
+          </template>
           <a :href="p.original_url" target="_blank" rel="noopener" class="mono-id">original</a>
         </figcaption>
       </figure>
+      </div>
     </div>
 
     <p v-if="!photos.length" class="muted">No photos match this filter.</p>
@@ -273,7 +353,7 @@ const summary = computed(() => {
           </div>
         </div>
 
-        <div class="bib-chips">
+        <div v-if="bibsEnabled" class="bib-chips">
           <span v-for="b in zoom.bibs" :key="b.bib_key" class="bib-chip" :class="b.source">
             {{ b.bib }}
             <span class="muted small">{{ b.source === 'manual' ? 'you' : (b.conf ?? 0).toFixed(2) }}</span>
@@ -283,7 +363,8 @@ const summary = computed(() => {
           <span v-if="!zoom.bibs.length" class="muted small">No bib on this photo yet.</span>
         </div>
 
-        <form style="display: flex; gap: var(--s-3); margin-top: var(--s-3)" @submit.prevent="addBib()">
+        <form v-if="bibsEnabled" style="display: flex; gap: var(--s-3); margin-top: var(--s-3)"
+              @submit.prevent="addBib()">
           <input ref="bibInput" v-model="draft" inputmode="numeric" pattern="[0-9]*"
                  autocomplete="off" placeholder="Type a bib number and press Enter" />
           <button class="primary" type="submit" :disabled="saving || !draft.trim()">
@@ -292,7 +373,7 @@ const summary = computed(() => {
         </form>
         <p v-if="editError" class="notice err" style="margin-top: var(--s-3)">{{ editError }}</p>
         <p v-if="reindexNote" class="notice" style="margin-top: var(--s-3)">{{ reindexNote }}</p>
-        <p class="muted small" style="margin: var(--s-3) 0 0">
+        <p v-if="bibsEnabled" class="muted small" style="margin: var(--s-3) 0 0">
           Numbers you add or remove are kept as corrections — re-indexing will not overwrite them.
         </p>
       </div>

@@ -1,12 +1,88 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { RouterLink } from 'vue-router';
-import { api, type EventSummary, type Job } from '../lib/api';
+import { ApiError, api, type EventSummary, type Job, type Organizer } from '../lib/api';
 
 type Inspection = Awaited<ReturnType<typeof api.admin.inspect>>;
 
 const events = ref<EventSummary[]>([]);
 const loadError = ref<string | null>(null);
+
+const TELEGRAM = 'https://t.me/chethavuthy';
+
+/**
+ * Set when this visitor is outside the Access door, and which side of it.
+ *
+ * The page itself is public on purpose — Access fronts /api/admin and
+ * /admin/signin, not /admin — so a photographer who has never heard of this can
+ * read what it does and ask to be let in. Everything below the invitation needs
+ * the API, so when the API refuses there is nothing else worth rendering.
+ *
+ * These are not the same person, and the difference decides what the invitation
+ * offers them. 'anonymous' has no session and needs the sign-in link. 'unlisted'
+ * is signed in as somebody this service does not know — most often the wrong
+ * Google account, since Access sends you back in with whatever session the
+ * browser already has — and needs the way out. 'removed' had access and lost it;
+ * signing out and back in changes nothing, so it is not offered.
+ */
+type Gate = 'anonymous' | 'unlisted' | 'removed';
+const gated = ref<Gate | null>(null);
+
+/**
+ * Cloudflare's own logout. Same origin, because the app-domain endpoint clears
+ * the authorization cookie from this host immediately; the team-domain one
+ * revokes the same session but leaves the cookie here to expire on its own.
+ * Either way the revocation reaches the edge in 20-30 seconds, which is why the
+ * copy says "in a moment" rather than promising an instant switch.
+ *
+ * Cloudflare renders its own page afterwards — there is no documented returnTo
+ * — so the trip back to /admin is the visitor's, not ours to automate.
+ */
+const LOGOUT = '/cdn-cgi/access/logout';
+
+/**
+ * Nothing is rendered until the answer is known.
+ *
+ * `gated` cannot be read from the URL — only the API knows — so a page that
+ * assumes either answer while it asks will show the wrong one first. Assuming
+ * "not gated" put the indexing tool and an empty "All events" list in front of
+ * every stranger for the length of a round trip, then swapped it for the
+ * invitation. Assuming the opposite would flash the invitation at the operator.
+ * A moment of one honest line is better than either.
+ */
+const checking = ref(true);
+
+/**
+ * Several different failures all mean "not through the door", and none deserves
+ * a red banner — but they are told apart here, because the way out differs.
+ *
+ * The Worker's `code` decides it, NOT the 403 alone. It answers 403 for four
+ * distinct reasons, and reading only the status told the operator "this account
+ * isn't on the list" while running against the workers.dev origin, where admin
+ * is refused by hostname and no list was ever consulted. A wrong diagnosis sends
+ * someone hunting for the wrong fix; 'no_access' means the request never
+ * presented an identity this Worker would look up, which is the anonymous case.
+ *
+ * A caller with no Access cookie at all never reaches the Worker: Access 302s
+ * the XHR to the cross-origin login page, and fetch() reports only "Failed to
+ * fetch" with no status to read. The public API separates that from a genuinely
+ * dead connection — same origin, no gate, so if it answers, the problem was the
+ * gate.
+ */
+async function accessDenial(e: unknown): Promise<Gate | null> {
+  if (e instanceof ApiError) {
+    if (e.status !== 403) return null;
+    if (e.code === 'not_invited') return 'unlisted';
+    if (e.code === 'banned') return 'removed';
+    return 'anonymous';
+  }
+  try {
+    await api.listEvents();
+    return 'anonymous';
+  } catch {
+    return null;
+  }
+}
 
 const driveUrl = ref('');
 const inspecting = ref(false);
@@ -24,9 +100,21 @@ const newDate = ref('');
 const newSlug = ref('');
 const bannerFile = ref<File | null>(null);
 
-const imageSource = ref<'original' | 'thumb'>('original');
+/**
+ * Photographers never see this, and never send anything but 'thumb'.
+ *
+ * Resized copies are what actually finishes an album: Google Drive limits how
+ * many bytes come out per window, so full-size originals crawl and need
+ * somebody watching them. The faces and bibs come out the same. The API forces
+ * the same thing, so this is a default rather than the rule itself.
+ */
+const imageSource = ref<'original' | 'thumb'>('thumb');
 
-// Benchmark is opt-in: it costs a CI run, and the answer differs per folder.
+/** Operator view: image sizes, the folder comparison, passes and the log. */
+const owner = ref(false);
+
+// The comparison is opt-in: it spends a processing run, and the answer differs
+// per folder.
 type Bench = Awaited<ReturnType<typeof api.admin.getBenchmark>>['benchmark'];
 const bench = ref<Bench | null>(null);
 const benchBusy = ref(false);
@@ -59,6 +147,10 @@ const mb = (n: number) => `${(n / 1e6).toFixed(1)} MB`;
 const starting = ref(false);
 const startError = ref<string | null>(null);
 const job = ref<Job | null>(null);
+/** Which event the running job is filling, since the form no longer says. */
+const jobEvent = ref<{ id: string; name: string } | null>(null);
+/** Bumped to remount the file input, whose value the DOM owns. */
+const formNonce = ref(0);
 let poll: number | undefined;
 
 const canStart = computed(() =>
@@ -66,6 +158,36 @@ const canStart = computed(() =>
   !starting.value &&
   (mode.value === 'existing' ? !!targetEventId.value : !!newName.value.trim()),
 );
+
+/**
+ * Mine and everyone else's, separated.
+ *
+ * One flat list stopped being readable the moment photographers could publish:
+ * the operator's own races sat interleaved with albums somebody else uploaded,
+ * with nothing on the row to say which was which. Ownership is the only
+ * distinction that matters here — it decides who to talk to when an album looks
+ * wrong — so it splits the list rather than hiding in a column.
+ *
+ * NULL owner_email means the event predates ownership, which makes it the
+ * operator's. `me` is unset for a photographer, but they only ever receive their
+ * own events, so everything lands in "mine" and the other group stays empty.
+ */
+const me = ref<string | null>(null);
+
+const isMine = (e: EventSummary) =>
+  !owner.value || !e.owner_email || e.owner_email.toLowerCase() === (me.value ?? '').toLowerCase();
+
+const eventGroups = computed(() => {
+  const mine = events.value.filter(isMine);
+  const theirs = events.value.filter((e) => !isMine(e));
+  const groups = [
+    { key: 'mine', title: owner.value ? 'My events' : 'Your events', events: mine, showOwner: false },
+  ];
+  if (owner.value && theirs.length) {
+    groups.push({ key: 'theirs', title: "Photographers' events", events: theirs, showOwner: true });
+  }
+  return groups;
+});
 
 const progressPct = computed(() => {
   const j = job.value;
@@ -77,11 +199,31 @@ async function refreshEvents() {
   try {
     events.value = (await api.admin.listEvents()).events;
   } catch (e: any) {
+    gated.value = await accessDenial(e);
+    if (gated.value) return;
     loadError.value = e.message;
   }
 }
 
-onMounted(refreshEvents);
+onMounted(async () => {
+  try {
+    const who = await api.admin.me();
+    owner.value = who.owner;
+    me.value = who.email;
+    if (owner.value) imageSource.value = 'original';
+  } catch (e) {
+    gated.value = await accessDenial(e);
+    if (gated.value) return;
+    // Anything else is a live connection answering badly; the events call below
+    // reports it in the one place errors belong on this page.
+  } finally {
+    // The question this page opens with is answered. Everything after it — the
+    // events, the people — fills in under a UI that no longer changes shape.
+    checking.value = false;
+  }
+  await refreshEvents();
+  if (owner.value) await refreshPeople();
+});
 // BOTH intervals. benchPoll was left running: it only clears itself when the
 // benchmark reaches done/failed, so navigating away mid-run left a 5s poll of
 // /api/admin/benchmarks/:id firing for the rest of the SPA session.
@@ -121,12 +263,47 @@ async function start() {
     }
 
     const { job_id } = await api.admin.ingest(eventId, driveUrl.value, imageSource.value);
+
+    // Remember which event this job belongs to BEFORE clearing the form, since
+    // clearing it is what removes the only other place that said so.
+    const target = events.value.find((e) => e.id === eventId);
+    jobEvent.value = { id: eventId, name: target?.name ?? 'this event' };
+
     startPolling(job_id);
+    resetForm();
   } catch (e: any) {
     startError.value = e.message;
   } finally {
     starting.value = false;
   }
+}
+
+/**
+ * Empty the form once the job is queued.
+ *
+ * The work has left the page at this point — it runs for hours, and the only
+ * thing worth looking at is the progress card. Leaving the link, the name and
+ * the samples on screen said the opposite: it read as though nothing had
+ * happened, and pressing Start again (which the filled-in form invites) queues
+ * the same folder a second time.
+ *
+ * The file input is cleared by remounting it — its value is owned by the DOM,
+ * not by bannerFile, so blanking the ref alone leaves the old filename showing.
+ */
+function resetForm() {
+  driveUrl.value = '';
+  inspection.value = null;
+  inspectError.value = null;
+  newName.value = '';
+  newDate.value = '';
+  newSlug.value = '';
+  bannerFile.value = null;
+  bibsEnabled.value = true;
+  mode.value = 'new';
+  targetEventId.value = '';
+  bench.value = null;
+  benchError.value = null;
+  formNonce.value++;
 }
 
 function startPolling(jobId: string) {
@@ -172,6 +349,102 @@ async function onEventBanner(ev: EventSummary, e: Event) {
   }
 }
 
+/* ---------------------------------------------------------------- people --
+   Operator only. Every other card on this page is about albums; this one is
+   about the people who put them there. */
+const organizers = ref<Organizer[]>([]);
+const peopleBusy = ref<string | null>(null);
+const peopleError = ref<string | null>(null);
+const peopleNotice = ref<string | null>(null);
+
+async function refreshPeople() {
+  if (!owner.value) return;
+  try {
+    organizers.value = (await api.admin.organizers()).organizers;
+  } catch (e: any) {
+    peopleError.value = e.message;
+  }
+}
+
+const when = (iso: string) => new Date(iso).toLocaleDateString();
+
+const newOrganizer = ref('');
+
+/** Let someone in. Also the control that lifts a removal, so Add never no-ops. */
+async function addOrganizer() {
+  const email = newOrganizer.value.trim();
+  if (!email) return;
+  peopleBusy.value = 'add';
+  peopleError.value = null;
+  try {
+    await api.admin.addOrganizer(email);
+    peopleNotice.value =
+      `${email} can sign in now. They open race-lens.runlytics.fit/admin, enter that ` +
+      `address, and Cloudflare emails them a code.`;
+    newOrganizer.value = '';
+    await refreshPeople();
+  } catch (e: any) {
+    peopleError.value = e.message;
+    peopleNotice.value = null;
+  } finally { peopleBusy.value = null; }
+}
+
+/** For an address typed wrong. The API refuses it once they own events. */
+async function removeOrganizer(o: Organizer) {
+  if (!confirm(`Take ${o.email} off the list? They have published nothing, so nothing else changes.`)) return;
+  peopleBusy.value = o.email;
+  peopleError.value = null;
+  try {
+    await api.admin.removeOrganizer(o.email);
+    peopleNotice.value = `${o.email} is off the list.`;
+    await refreshPeople();
+  } catch (e: any) {
+    peopleError.value = e.message;
+    peopleNotice.value = null;
+  } finally { peopleBusy.value = null; }
+}
+
+async function ban(o: Organizer) {
+  // Unpublishing is the point of banning from here rather than from the
+  // Cloudflare dashboard, so it is stated plainly and confirmed, not buried in
+  // an option nobody reads.
+  const ok = confirm(
+    `Remove ${o.email}'s access?\n\n` +
+    `They can no longer sign in or change anything. Their ${o.published} published ` +
+    `event${o.published === 1 ? '' : 's'} will be unpublished — hidden from runners, ` +
+    `with every photo kept.\n\nYou can let them back in from this page.`,
+  );
+  if (!ok) return;
+
+  peopleBusy.value = o.email;
+  peopleError.value = null;
+  try {
+    const r = await api.admin.ban(o.email);
+    peopleNotice.value =
+      `${o.email} can no longer sign in` +
+      (r.unpublished ? `, and ${r.unpublished} event${r.unpublished === 1 ? '' : 's'} were unpublished.` : '.');
+    await Promise.all([refreshPeople(), refreshEvents()]);
+  } catch (e: any) {
+    peopleError.value = e.message;
+    peopleNotice.value = null;
+  } finally { peopleBusy.value = null; }
+}
+
+async function unban(o: Organizer) {
+  peopleBusy.value = o.email;
+  peopleError.value = null;
+  try {
+    await api.admin.unban(o.email);
+    peopleNotice.value =
+      `${o.email} can sign in again. Their events are still unpublished — publish them ` +
+      `from the list above if they should be back on the site.`;
+    await refreshPeople();
+  } catch (e: any) {
+    peopleError.value = e.message;
+    peopleNotice.value = null;
+  } finally { peopleBusy.value = null; }
+}
+
 async function publish(ev: EventSummary) {
   // Every other action on this page surfaces its failure; this one threw into an
   // unhandled rejection, so a failed Publish looked exactly like a successful one
@@ -187,7 +460,71 @@ async function publish(ev: EventSummary) {
 </script>
 
 <template>
+  <!-- Until the API has answered, this page does not know which of the two
+       screens below it is. The heading is the half that is true either way. -->
+  <template v-if="checking">
+    <h1>Organizer</h1>
+    <p class="muted" style="margin-top: 0"><span class="spinner" /> One moment…</p>
+  </template>
+
+  <!-- The open door. /admin itself is public — Access fronts the API and the
+       sign-in path, not this page — so a photographer who has never heard of
+       this can read what it does and ask to be let in. -->
+  <template v-else-if="gated">
+    <h1>Organizer</h1>
+    <p class="lede">Turn your race photos into an album runners can search.</p>
+
+    <div class="card invite">
+      <p style="margin: 0">
+        Send me a Google Drive link and I'll index it. Runners then find themselves
+        by typing their bib number, or by taking a selfie. It's free.
+      </p>
+
+      <ul class="invite-points">
+        <li><strong>Your photos stay yours.</strong> Race Lens shows a small preview and links to your album — every full-size photo still comes from you.</li>
+        <li><strong>Your name is on it.</strong> Every page that shows your work credits you and links back.</li>
+        <li><strong>Leave any time.</strong> One message and the album comes off, along with everything indexed from it.</li>
+      </ul>
+
+      <p style="margin: 0">
+        To get in, message me on Telegram with the email you use for Google Drive,
+        and which race you shot. I'll add you and send the link back.
+      </p>
+
+      <a class="btn tg" :href="TELEGRAM" target="_blank" rel="noopener">Message @chethavuthy</a>
+
+      <p class="muted small" style="margin: 0">
+        Opens Telegram. Send it from your own account so I know it's you.
+      </p>
+
+      <!-- Three different people read this box. One has never signed in and
+           needs the door. One is signed in as an account this service does not
+           know — usually a second Google account the browser picked for them —
+           and needs to be told that, because from the outside the invitation
+           looks like a flat refusal rather than a wrong key. The third was
+           removed, and is not offered a sign-out that would change nothing. -->
+      <p v-if="gated === 'unlisted'" class="invite-signin muted small">
+        You're signed in as an account that hasn't been added yet.
+        <a :href="LOGOUT">Sign out</a> to try a different one.
+      </p>
+      <p v-else-if="gated === 'removed'" class="invite-signin muted small">
+        This account's access was removed. Message me above if that's a mistake.
+      </p>
+      <p v-else class="invite-signin muted small">
+        Already added? <a href="/admin/signin">Sign in</a>.
+      </p>
+    </div>
+  </template>
+
+  <template v-else>
   <h1>Organizer</h1>
+  <!-- Whose albums these are. It reads as a caption, but it is the only place
+       the signed-in identity is visible — and on a shared machine, or with two
+       Google accounts, "which one am I?" is answered before anything is
+       indexed under the wrong name rather than after. -->
+  <p v-if="me" class="muted small signed-in">
+    Signed in as {{ me }} · <a :href="LOGOUT">Sign out</a>
+  </p>
   <p class="muted" style="margin-top: 0">Paste a public Google Drive folder to index an album.</p>
 
   <p v-if="loadError" class="notice err">{{ loadError }}</p>
@@ -217,12 +554,16 @@ async function publish(ev: EventSummary) {
         </figure>
       </div>
 
+      <!-- Operator only. A photographer indexes from resized copies, which is
+           the setting that finishes an album, and is not asked to weigh a
+           trade-off whose terms are Drive's download limits. -->
+      <template v-if="owner">
       <h2 style="margin-top: var(--s-5)">Image quality vs speed</h2>
       <p class="muted small" style="margin-top: 0">
         Full originals are ~21 MB each. Drive also serves a resized copy about 12×
         smaller, which on one album found identical faces and bibs — and because
-        Drive's download quota is what stops a pass, that is roughly 12× more
-        photos per pass. Whether it holds for <em>this</em> folder is worth checking.
+        Drive's download limit is what stops a round, that is roughly 12× more
+        photos per round. Whether it holds for <em>this</em> folder is worth checking.
       </p>
       <div class="btn-row">
         <button :disabled="benchBusy" @click="runBenchmark">
@@ -231,7 +572,7 @@ async function publish(ev: EventSummary) {
       </div>
       <p v-if="benchError" class="notice err" style="margin-top: var(--s-3)">{{ benchError }}</p>
       <p v-if="benchBusy" class="muted small" style="margin-top: var(--s-3)">
-        Running in CI — usually 2-4 minutes. You can keep working; the result appears here.
+        Usually 2-4 minutes. You can keep working; the result appears here.
       </p>
       <p v-else-if="bench?.status === 'failed'" class="notice err" style="margin-top: var(--s-3)">
         Benchmark failed: {{ bench.error }}
@@ -250,11 +591,11 @@ async function publish(ev: EventSummary) {
             <div class="muted small">{{ mb(bench.result.original.bytes) }} for {{ bench.result.sampled }} photos</div>
           </div>
           <div>
-            <div class="stat-label">Photos per pass (est.)</div>
+            <div class="stat-label">Photos per round (est.)</div>
             <div class="stat-value">
               {{ bench.result.est_photos_per_pass.thumb }} vs {{ bench.result.est_photos_per_pass.original }}
             </div>
-            <div class="muted small">before Drive's quota stops it</div>
+            <div class="muted small">before Drive slows it down</div>
           </div>
         </div>
         <p v-if="bench.result.bibs_only_in_original.length" class="notice warn" style="margin-top: var(--s-3)">
@@ -281,6 +622,7 @@ async function publish(ev: EventSummary) {
           </button>
         </div>
       </div>
+      </template>
     </template>
   </div>
 
@@ -321,7 +663,7 @@ async function publish(ev: EventSummary) {
       </div>
       <div class="field-group">
         <label for="banner">Banner image (optional)</label>
-        <input id="banner" type="file" accept="image/*" @change="onBanner" />
+        <input :key="formNonce" id="banner" type="file" accept="image/*" @change="onBanner" />
       </div>
       <div class="field-group">
         <label>Bib numbers</label>
@@ -345,51 +687,144 @@ async function publish(ev: EventSummary) {
 
   <!-- Step 3 -->
   <div v-if="job" class="card" style="margin-top: 18px">
-    <h2>3 · Indexing</h2>
+    <h2>
+      3 · Indexing
+      <RouterLink v-if="jobEvent" :to="`/admin/e/${jobEvent.id}`" class="mono-id">
+        {{ jobEvent.name }}
+      </RouterLink>
+    </h2>
     <div class="progress" role="progressbar" :aria-valuenow="progressPct"
          aria-valuemin="0" aria-valuemax="100" :aria-label="`Indexing ${job.status}`">
       <div :style="{ transform: `scaleX(${progressPct / 100})` }" />
     </div>
-    <p class="muted small" style="margin-top: 10px">
+    <!-- A queued job with no totals is the normal first minute, not a stall:
+         the count only exists once the indexer has walked the folder. Saying
+         "0 / 0 photos (0%)" and nothing else read as a job that had failed. -->
+    <p v-if="job.status === 'queued' && !job.total" class="muted small" style="margin-top: 10px">
+      <span class="spinner" /> Queued — indexing starts within a minute or two, and the
+      photo count appears once the folder has been read. You can close this page.
+    </p>
+    <p v-else class="muted small" style="margin-top: 10px">
       {{ job.status }} — {{ job.done.toLocaleString() }} / {{ job.total.toLocaleString() }} photos ({{ progressPct }}%)
     </p>
     <p v-if="job.error" class="notice err">{{ job.error }}</p>
     <p v-if="job.status === 'partial'" class="notice warn">
-      Google Drive rate-limits bulk downloads of large photos, so this album needs
-      several passes. Indexing continues automatically — everything done so far is
-      already live, and you can close this page.
+      Google Drive only lets photos be downloaded so fast, so a big album is indexed
+      in rounds. It continues on its own — everything done so far is already live,
+      and you can close this page.
     </p>
     <p v-else-if="job.status === 'queued' && job.done > 0" class="notice">
-      <span class="spinner" /> Waiting for the next pass to start…
+      <span class="spinner" /> Waiting for the next round to start…
     </p>
   </div>
 
-  <h2 style="margin-top: var(--s-7)">All events</h2>
-  <p v-if="bannerError" class="notice err" style="margin-bottom: var(--s-3)">{{ bannerError }}</p>
-  <div class="card">
-    <p v-if="!events.length" class="muted" style="margin: 0">No events yet.</p>
-    <div v-for="e in events" :key="e.id" class="row">
-      <div class="row-main">
-        <RouterLink :to="`/admin/e/${e.id}`" class="mono-id" style="font-weight: 600">
-          {{ e.name }}
-        </RouterLink>
-        <div class="muted small">
-          /e/{{ e.slug }} · {{ e.status }} · {{ e.photo_count.toLocaleString() }} photos ·
-          {{ e.face_count.toLocaleString() }} faces
-          <span v-if="bannerBusy === e.id"> · <span class="spinner" /> uploading banner…</span>
+  <p v-if="bannerError" class="notice err" style="margin: var(--s-7) 0 var(--s-3)">{{ bannerError }}</p>
+
+  <!-- Two sections, one row template. The second exists only for the operator,
+       and only once somebody else has published — a "Photographers' events"
+       heading over nothing would suggest a list that failed to load. Their rows
+       carry the owner's address, so it is never a guess whose album is being
+       changed; the controls are the same, because the operator can still fix or
+       take down anything. -->
+  <template v-for="group in eventGroups" :key="group.key">
+    <h2 style="margin-top: var(--s-7)">
+      {{ group.title }}
+      <span v-if="group.showOwner" class="muted small" style="font-weight: 400">
+        ({{ group.events.length }})
+      </span>
+    </h2>
+    <div class="card">
+      <p v-if="!group.events.length" class="muted" style="margin: 0">No events yet.</p>
+      <div v-for="e in group.events" :key="e.id" class="row">
+        <div class="row-main">
+          <RouterLink :to="`/admin/e/${e.id}`" class="mono-id" style="font-weight: 600">
+            {{ e.name }}
+          </RouterLink>
+          <div v-if="group.showOwner" class="small" style="margin-top: 2px">
+            by {{ e.owner_email }}
+          </div>
+          <div class="muted small">
+            /e/{{ e.slug }} · {{ e.status }} · {{ e.photo_count.toLocaleString() }} photos ·
+            {{ e.face_count.toLocaleString() }} faces
+            <span v-if="bannerBusy === e.id"> · <span class="spinner" /> uploading banner…</span>
+          </div>
+        </div>
+        <img v-if="e.banner_url" class="banner-thumb" :src="e.banner_url" alt="" />
+        <div v-else class="banner-thumb" />
+        <div class="row-actions">
+          <RouterLink :to="`/admin/e/${e.id}`" class="btn file-btn">Open</RouterLink>
+          <label :for="`bn-${e.id}`" class="btn file-btn">
+            {{ e.banner_url ? 'Replace banner' : 'Add banner' }}
+          </label>
+          <input :id="`bn-${e.id}`" type="file" accept="image/*" class="sr-only"
+                 @change="onEventBanner(e, $event)" />
+          <button v-if="e.status === 'draft'" @click="publish(e)">Publish</button>
         </div>
       </div>
-      <img v-if="e.banner_url" class="banner-thumb" :src="e.banner_url" alt="" />
-      <div v-else class="banner-thumb" />
-      <div class="row-actions">
-        <RouterLink :to="`/admin/e/${e.id}`" class="btn file-btn">Open</RouterLink>
-        <label :for="`bn-${e.id}`" class="btn file-btn">
-          {{ e.banner_url ? 'Replace banner' : 'Add banner' }}
-        </label>
-        <input :id="`bn-${e.id}`" type="file" accept="image/*" class="sr-only"
-               @change="onEventBanner(e, $event)" />
-        <button v-if="e.status === 'draft'" @click="publish(e)">Publish</button>
-      </div>
     </div>
-  </div>
+  </template>
+
+  <!-- Who has been let in. Operator only, and the only place a ban can be
+       undone — so someone banned before they ever published is listed here too. -->
+  <template v-if="owner">
+    <h2 style="margin-top: var(--s-7)">Photographers</h2>
+    <p v-if="peopleNotice" class="notice ok" style="margin-bottom: var(--s-3)">{{ peopleNotice }}</p>
+    <p v-if="peopleError" class="notice err" style="margin-bottom: var(--s-3)">{{ peopleError }}</p>
+    <div class="card">
+      <!-- The whole point of the guest list living here: a photographer messages
+           on Telegram, their address is typed in, and they are in. -->
+      <form class="row" style="padding-top: 0" @submit.prevent="addOrganizer">
+        <input v-model="newOrganizer" class="row-main" type="email" inputmode="email"
+               autocomplete="off" aria-label="Photographer's email"
+               placeholder="Their Google Drive email…" />
+        <button class="primary" type="submit"
+                :disabled="peopleBusy === 'add' || !newOrganizer.trim()">
+          <span v-if="peopleBusy === 'add'" class="spinner" /> Add photographer
+        </button>
+      </form>
+
+      <p v-if="!organizers.length" class="muted" style="margin: var(--s-3) 0 0">
+        Nobody else yet. Add an address above and they can sign in straight away.
+      </p>
+
+      <div v-for="o in organizers" :key="o.email" class="row">
+        <div class="row-main">
+          <div style="font-weight: 600">{{ o.email }}</div>
+          <div class="muted small">
+            <template v-if="o.events">
+              {{ o.events }} event{{ o.events === 1 ? '' : 's' }} ·
+              {{ o.published }} published ·
+              {{ o.photos.toLocaleString() }} photos<template v-if="o.last_event">
+              · last {{ when(o.last_event) }}</template>
+            </template>
+            <template v-else-if="o.added_at">added {{ when(o.added_at) }} · nothing published yet</template>
+            <template v-else>no events</template>
+            <template v-if="o.banned_at">
+              · <span class="state err">no access since {{ when(o.banned_at) }}</span>
+            </template>
+          </div>
+        </div>
+        <div class="row-actions">
+          <button v-if="o.banned_at" :disabled="peopleBusy === o.email" @click="unban(o)">
+            <span v-if="peopleBusy === o.email" class="spinner" /> Restore access
+          </button>
+          <!-- Nothing published means nothing to take down, so the honest control
+               is "delete the row", not a ban with a record nobody needs. -->
+          <button v-else-if="!o.events" :disabled="peopleBusy === o.email"
+                  @click="removeOrganizer(o)">
+            <span v-if="peopleBusy === o.email" class="spinner" /> Remove
+          </button>
+          <button v-else class="danger" :disabled="peopleBusy === o.email" @click="ban(o)">
+            <span v-if="peopleBusy === o.email" class="spinner" /> Remove access
+          </button>
+        </div>
+      </div>
+
+      <p class="muted small" style="margin: var(--s-3) 0 0">
+        Anyone on this list can sign in with an emailed code and index their own albums.
+        Removing access refuses every request they make and unpublishes their events.
+      </p>
+    </div>
+  </template>
+  </template>
 </template>

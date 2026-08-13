@@ -7,6 +7,10 @@ export interface Env {
   R2_PUBLIC_BASE: string;
   /** "1" disables the Cloudflare Access check. Local dev only. */
   DEV_ADMIN_BYPASS?: string;
+  /** With the bypass on, "photographer" serves the non-operator view. Dev only. */
+  DEV_ADMIN_ROLE?: string;
+  /** With the bypass on, the email event ownership is keyed on. Dev only. */
+  DEV_ADMIN_EMAIL?: string;
   GOOGLE_API_KEY: string;
   INGEST_SECRET: string;
   GH_DISPATCH_TOKEN: string;
@@ -16,6 +20,15 @@ export interface Env {
    * The workers.dev origin is deliberately absent — see lib access.ts.
    */
   ACCESS_HOSTS: string;
+  /**
+   * The one account that gets the full operator view.
+   *
+   * Everyone else on the Access list is a photographer indexing their own album:
+   * same door, smaller room. They index with resized copies (the only setting
+   * that finishes an album inside Drive's limits) and see a plain progress
+   * summary rather than passes and log lines.
+   */
+  OWNER_EMAIL?: string;
   /** Access team name: <team>.cloudflareaccess.com, used for the JWKS and `iss`. */
   CF_ACCESS_TEAM: string;
   /**
@@ -37,6 +50,11 @@ export interface EventRow {
   face_count: number;
   /** 0 for events with no bibs at all; turns off bib OCR and bib search. */
   bibs_enabled: number;
+  /**
+   * The Access identity that created it. NULL on every event that predates
+   * ownership, which means the operator's — see migrations/005.
+   */
+  owner_email: string | null;
   created_at: string;
 }
 

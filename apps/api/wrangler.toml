@@ -51,8 +51,21 @@ DEV_ADMIN_BYPASS = "0"
 #
 # Must match the Access applications created by tools/finish-deploy.sh exactly.
 ACCESS_HOSTS = "racelens.runlytics.fit,race-lens.runlytics.fit"
+# The one Access identity that gets the operator view: image-size controls, the
+# folder comparison, passes and the ingest log. Everyone else on the Access list
+# is a photographer indexing their own album and gets the plain view — and the
+# resized-copy setting, which is enforced in the API, not just hidden.
+OWNER_EMAIL = "vuthychetha@gmail.com"
 # Cloudflare Access team, for the JWKS URL and the `iss` claim.
-CF_ACCESS_TEAM = "animekizz"
+#
+# Deliberately neutral. A Zero Trust org has ONE team domain per Cloudflare
+# account, and it is what the login page shows — so naming it after any one
+# project puts that project's brand on every other project's sign-in screen.
+# A photographer signing in to Race Lens should not be reading someone else's
+# domain name. Renaming the team is account-wide: every app under it moves, and
+# anything pinning the old value (this var, and animekizz.live's ingest Worker)
+# fails closed until redeployed.
+CF_ACCESS_TEAM = "workroom"
 # One Access application per hostname => one AUD tag each, so BOTH are listed.
 # This team also fronts unrelated apps signed by the same keys, so the audience
 # check is what scopes a valid signature to Race Lens rather than to any of them.

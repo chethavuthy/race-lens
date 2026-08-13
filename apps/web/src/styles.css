@@ -991,3 +991,45 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--err) 1
   .credit { flex-wrap: wrap; }
   .credit .btn { width: 100%; justify-content: center; }
 }
+
+/* ================================================================ invite ==
+   What a photographer sees at /admin before they are on the list. The page is
+   public; everything it can actually do is not — so this is the whole screen,
+   and it reads as a short letter rather than a locked door. */
+.invite {
+  max-width: 62ch;
+  display: flex; flex-direction: column; gap: var(--s-4);
+}
+.invite-points { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-3); }
+.invite-points li { font-size: var(--t-sm); color: var(--muted); }
+.invite-points strong { color: var(--text); font-weight: 600; }
+
+/* Same reason as .credit-modal .tg: .primary is styled on `button`, and the one
+   action here is an anchor. */
+.invite .tg {
+  align-self: flex-start;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent); border-color: var(--accent);
+  color: var(--accent-ink); font-weight: 600;
+}
+.invite .tg:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.invite .tg:active { background: var(--accent-press); border-color: var(--accent-press); }
+
+.invite-signin { margin: 0; border-top: 1px solid var(--line); padding-top: var(--s-4); }
+.invite-signin a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+
+/* Sits directly under the h1 as a caption, so it hugs the heading and keeps its
+   distance from the line below. Underlined because a bare accent-coloured word
+   next to plain text is not obviously clickable at this size. */
+.signed-in { margin: 0 0 var(--s-2); }
+.signed-in a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+
+/* One photographer can hand over several folders, so a credit row may carry more
+   than one album link. They wrap rather than squeezing the name. */
+.credit-albums { display: flex; gap: var(--s-2); flex-wrap: wrap; }
+
+/* The inspector uses the same columns as the public grid (see .masonry above),
+   but its tiles are buttons carrying an overlay rather than fixed-ratio boxes:
+   each image keeps its natural height so the face boxes, which are positioned as
+   percentages of the tile, land on the faces. */
+.masonry figcaption { margin-top: var(--s-1); }

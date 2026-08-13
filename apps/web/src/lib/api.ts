@@ -10,6 +10,11 @@ export interface EventSummary {
   /** False for events that hand out no bibs; bib search is unavailable. */
   bibs_enabled: boolean;
   created_at?: string;
+  /**
+   * Who created it. Only sent to the operator, and null on events that predate
+   * ownership — which are the operator's own.
+   */
+  owner_email?: string | null;
 }
 
 /**
@@ -60,6 +65,23 @@ export interface Job {
   total: number;
   error: string | null;
   updated_at: string;
+}
+
+/**
+ * Someone who has published at least one event — or who was banned before they
+ * got that far, so the screen that can undo it still lists them.
+ */
+export interface Organizer {
+  email: string;
+  events: number;
+  photos: number;
+  published: number;
+  /** Null until they publish something; they may be freshly invited. */
+  last_event: string | null;
+  /** Null for anyone who predates the guest list but owns events. */
+  added_at: string | null;
+  /** Set when their access has been withdrawn. */
+  banned_at: string | null;
 }
 
 export class ApiError extends Error {
@@ -146,6 +168,32 @@ export const api = {
     ),
 
   admin: {
+    /**
+     * Who is signed in. `owner` is false for every photographer let through the
+     * Access list, and gates the operator-only half of the admin pages.
+     */
+    me: () => req<{ email: string | null; owner: boolean }>('/api/admin/me'),
+
+    /** Operator only: the guest list, with what each person has published. */
+    organizers: () => req<{ organizers: Organizer[] }>('/api/admin/organizers'),
+
+    /** Let a photographer in. Also lifts a previous removal. */
+    addOrganizer: (email: string) =>
+      req<{ email: string }>('/api/admin/organizers', json({ email })),
+
+    /** Drop a row typed in error. Refused once they have events. */
+    removeOrganizer: (email: string) =>
+      req<{ ok: true }>(`/api/admin/organizers/${encodeURIComponent(email)}`,
+                        { method: 'DELETE' }),
+
+    ban: (email: string, opts: { reason?: string; unpublish?: boolean } = {}) =>
+      req<{ banned: string; unpublished: number }>(
+        `/api/admin/organizers/${encodeURIComponent(email)}/ban`, json(opts)),
+
+    unban: (email: string) =>
+      req<{ ok: true }>(`/api/admin/organizers/${encodeURIComponent(email)}/ban`,
+                        { method: 'DELETE' }),
+
     inspect: (url: string) =>
       req<{
         folder_id: string;

@@ -137,6 +137,30 @@ read before they are on the list, it ships no data, and everything it renders
 comes from `/api/admin`. `/admin/signin` is gated in its place so an organizer
 who IS on the list has a path that triggers the login.
 
+**The guest list is not in Cloudflare.** The Access policy allows any verified
+email; the `organizers` table decides which of those addresses may do anything.
+Access proves identity, Race Lens decides authorization — which is what lets the
+operator add a photographer by typing their address into the **Photographers**
+card on `/admin` instead of editing two policies in a dashboard. That middleware
+check is the whole gate now: no row is a 403, and a row with `banned_at` is a
+403, both before any route runs.
+
+*Remove access* sets `banned_at` and unpublishes their events in the same step;
+*Restore access* clears it but does not republish. *Remove* — offered only for
+someone who has published nothing — deletes the row outright, and the API
+refuses it once they own events.
+
+Access is one allowlist with no notion of whose album is whose, so ownership
+lives in the database instead: `events.owner_email` is stamped from the Access
+identity at creation, and every admin route is scoped to it. A photographer sees
+and can touch only the events they created; `OWNER_EMAIL` (wrangler.toml) sees
+everything, including the events that predate the column. Apply
+`migrations/005_events_owner_email.sql`, `006_admin_bans.sql` and
+`007_organizers.sql` to the remote D1 **before** deploying the Worker — creating
+an event writes the owner column and every admin request reads `organizers`, so
+the old schema 500s. 007 also drops `admin_bans`, which the previous Worker
+reads, so deploy immediately after it or admin errors in the gap.
+
 Access only works on the custom domains — the API is same-origin there. On
 `*.pages.dev` the admin UI calls the Worker cross-origin, and a host-scoped
 Access cookie will never be sent, so admin is expected to fail there.

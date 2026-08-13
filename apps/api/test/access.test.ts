@@ -14,7 +14,7 @@
 import { generateKeyPairSync, createSign, randomBytes } from 'node:crypto';
 import { verifyAccessJwt, onAccessHost } from '../src/access.ts';
 
-const TEAM = 'animekizz';
+const TEAM = 'workroom';
 const AUD_A = 'a'.repeat(64);
 const AUD_B = 'b'.repeat(64);
 const OTHER_APP_AUD = 'c'.repeat(64);   // e.g. the team's unrelated dashboard

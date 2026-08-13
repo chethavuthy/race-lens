@@ -16,8 +16,14 @@ CREATE TABLE IF NOT EXISTS events (
   -- Turns off bib OCR during indexing and bib search on the event page; face
   -- search is unaffected. Defaults to 1 so existing events keep their behaviour.
   bibs_enabled INTEGER NOT NULL DEFAULT 1,
+  -- The Access identity that created this event. Every admin route is scoped to
+  -- it, so a photographer let through the door reaches their own albums and
+  -- nothing else. NULL means "the operator's" — every event that predates
+  -- migrations/005_events_owner_email.sql, and OWNER_EMAIL sees all of them.
+  owner_email  TEXT,
   created_at   TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_events_owner ON events(owner_email);
 
 -- One event can absorb several Drive folders from different photographers.
 CREATE TABLE IF NOT EXISTS sources (
@@ -167,6 +173,19 @@ CREATE INDEX IF NOT EXISTS idx_jobs_event ON jobs(event_id, updated_at);
 -- Per-event ingest journal. The organizer pastes a link and walks away; when
 -- an album comes back short they need to know which link, how many photos, and
 -- why — without reading CI logs they have no access to.
+-- Who may use the admin. Cloudflare Access proves the email is theirs; this
+-- table decides whether that email is an organizer, so photographers are added
+-- from /admin rather than from a dashboard. The middleware refuses anyone with
+-- no row here (and anyone whose row is banned), so it must fail closed — see
+-- migrations/007_organizers.sql, which replaced the earlier admin_bans table.
+CREATE TABLE IF NOT EXISTS organizers (
+  email     TEXT PRIMARY KEY,   -- lowercased
+  added_at  TEXT NOT NULL,
+  added_by  TEXT,
+  banned_at TEXT,
+  reason    TEXT
+);
+
 -- One-off quality comparison for a folder: same photos, thumbnail vs original.
 -- Deliberately on demand, never automatic — it costs a CI run.
 CREATE TABLE IF NOT EXISTS benchmarks (
