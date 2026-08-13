@@ -20,8 +20,91 @@ const router = createRouter({
       : []),
     { path: '/:pathMatch(.*)*', component: () => import('./pages/NotFound.vue') },
   ],
-  scrollBehavior: () => ({ top: 0 }),
+  /**
+   * Back goes back to where you were. Everything else opens at the top.
+   *
+   * Nothing restored scroll before: this returned {top: 0} unconditionally and
+   * threw `savedPosition` away, so leaving an event 2,000px down and pressing
+   * Back reopened it at the top with the reader's place gone. The browser does
+   * this natively on a full page load, but a router that supplies a
+   * scrollBehavior takes ownership of it (vue-router sets
+   * history.scrollRestoration = 'manual'), so what it does not do, nobody does.
+   *
+   * savedPosition is set ONLY on a popstate — Back and Forward. A fresh push
+   * still opens at the top, which is what a clicked link should do.
+   *
+   * The wait is the part that matters. Every page here mounts empty and fills in
+   * from the API, so at the moment this runs the document is a header and a
+   * spinner: scrolling to 2,000px lands at the bottom of a 600px page and the
+   * position is silently lost. Tiles are sized by CSS aspect-ratio rather than by
+   * decoded images, so the page reaches its full height as soon as the rows
+   * exist — one frame after the data arrives, long before any photo has loaded.
+   */
+  scrollBehavior(_to, _from, savedPosition) {
+    if (!savedPosition) return { top: 0 };
+    restoreScroll(savedPosition.top);
+    // `false` means "leave the scroll alone" — restoreScroll owns it from here.
+    return false;
+  },
 });
+
+/**
+ * Put the reader back where they were, and keep putting them there while the
+ * page grows under them.
+ *
+ * Correcting repeatedly rather than waiting for the right moment and scrolling
+ * once. Two earlier attempts failed on exactly that question:
+ *
+ *   - Scroll immediately, and the page is still a header and a spinner. The
+ *     browser clamps 300px to the bottom of a 200px document and the position
+ *     is gone before the data arrives.
+ *   - Wait for the document to be tall enough, then scroll. But at the moment
+ *     scrollBehavior runs, the OUTGOING page can still be mounted — coming back
+ *     to /admin measured the event page's 2,095px, called it tall enough, and
+ *     scrolled into a document that was about to be replaced by a short one.
+ *
+ * There is no single instant that is right for every page, so this stops
+ * looking for one. It re-applies the target every 50ms until the scroll sticks
+ * or the window closes, which converges no matter when the content lands or
+ * which page was measured.
+ *
+ * setInterval, not requestAnimationFrame. rAF does not fire at all in a tab
+ * that is not being painted, so an rAF-gated promise never settles there — and
+ * vue-router awaits what scrollBehavior returns, which left the router hanging
+ * mid-navigation in exactly that case.
+ *
+ * 1.5s, and landing short is a fine outcome. An event page restores only the 60
+ * photos it re-fetches, so a reader who was 8,000px into an 8,523-photo album
+ * comes back as far as the content allows rather than to the top.
+ */
+const RESTORE_MS = 1500;
+let restoring = 0;
+
+function restoreScroll(top: number) {
+  clearInterval(restoring);
+
+  const stop = () => {
+    clearInterval(restoring);
+    restoring = 0;
+    for (const e of ['wheel', 'touchstart', 'keydown'] as const) {
+      window.removeEventListener(e, stop);
+    }
+  };
+
+  // The reader gets the last word. Once they have started moving the page
+  // themselves, yanking them back to a remembered offset is worse than
+  // forgetting it — so the first real input ends the correction.
+  for (const e of ['wheel', 'touchstart', 'keydown'] as const) {
+    window.addEventListener(e, stop, { passive: true });
+  }
+
+  const deadline = performance.now() + RESTORE_MS;
+  restoring = window.setInterval(() => {
+    const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    window.scrollTo(0, Math.min(top, max));
+    if (window.scrollY >= top - 1 || performance.now() > deadline) stop();
+  }, 50);
+}
 
 /**
  * Recover from a chunk that vanished mid-deploy.
