@@ -155,9 +155,6 @@ function onDialogClick(e: MouseEvent) {
   if (outside) d.close();
 }
 
-/** Sources with a recorded name. An unnamed one still gets a row in the block below. */
-const namedCredits = computed(() => credits.value.filter((c) => !!c.name));
-
 /**
  * What to call a source with no name recorded.
  *
@@ -166,8 +163,45 @@ const namedCredits = computed(() => credits.value.filter((c) => !!c.name));
  * Google Drive" is a list nobody can tell apart. The number at least says which
  * row is which until the credits are filled in.
  */
-const creditLabel = (c: Credit, i: number) =>
-  c.name || (credits.value.length > 1 ? `Album ${i + 1} from Google Drive` : 'Album from Google Drive');
+const creditLabel = (g: { name: string | null }, i: number) =>
+  g.name || (creditGroups.value.length > 1 ? `Album ${i + 1} from Google Drive` : 'Album from Google Drive');
+
+/**
+ * One entry per photographer, not per Drive folder.
+ *
+ * A photographer commonly hands over two or three folders for one race, and each
+ * is a separate source row credited with the same name — so the page was reading
+ * "by Unity Run Club and Unity Run Club", and the dialog listed the same person
+ * twice. Same name (trimmed, case-insensitively) is the same person: their photo
+ * counts add up and their albums are listed together.
+ *
+ * Unnamed sources are NOT grouped with each other. Two anonymous folders are two
+ * unknowns, and merging them would assert something nobody told us.
+ */
+interface CreditGroup { name: string | null; photo_count: number; albums: string[] }
+
+const creditGroups = computed<CreditGroup[]>(() => {
+  const groups: CreditGroup[] = [];
+  const byName = new Map<string, CreditGroup>();
+
+  for (const c of credits.value) {
+    const key = (c.name ?? '').trim().toLowerCase();
+    const existing = key ? byName.get(key) : undefined;
+    if (existing) {
+      existing.photo_count += c.photo_count;
+      existing.albums.push(c.album_url);
+      continue;
+    }
+    const group: CreditGroup = {
+      name: c.name?.trim() || null,
+      photo_count: c.photo_count,
+      albums: [c.album_url],
+    };
+    groups.push(group);
+    if (key) byName.set(key, group);
+  }
+  return groups;
+});
 
 /**
  * The byline for the meta line: "Sok Dara and Chan Nita".
@@ -177,7 +211,7 @@ const creditLabel = (c: Credit, i: number) =>
  * regardless, so nothing is lost — only deferred.
  */
 const byline = computed(() => {
-  const names = namedCredits.value.map((c) => c.name as string);
+  const names = creditGroups.value.map((g) => g.name).filter((n): n is string => !!n);
   if (!names.length) return null;
   if (names.length === 1) return names[0];
   if (names.length === 2) return `${names[0]} and ${names[1]}`;
@@ -720,14 +754,21 @@ async function onFile(e: Event) {
       </div>
 
       <ul class="credit-list">
-        <li v-for="(c, i) in credits" :key="c.album_url" class="credit">
+        <li v-for="(g, i) in creditGroups" :key="g.albums[0]" class="credit">
           <span class="who">
             <!-- An unnamed source is not given an invented byline; its album
                  link is the whole of what we can honestly say about it. -->
-            <span class="name">{{ creditLabel(c, i) }}</span>
-            <span class="count muted small">{{ plural(c.photo_count, 'photo') }}</span>
+            <span class="name">{{ creditLabel(g, i) }}</span>
+            <span class="count muted small">{{ plural(g.photo_count, 'photo') }}</span>
           </span>
-          <a class="btn" :href="c.album_url" target="_blank" rel="noopener">Open album ↗</a>
+          <!-- One photographer, several folders: every album still gets its own
+               link, numbered so they are told apart. -->
+          <span class="credit-albums">
+            <a v-for="(url, n) in g.albums" :key="url" class="btn"
+               :href="url" target="_blank" rel="noopener">
+              {{ g.albums.length > 1 ? `Album ${n + 1} ↗` : 'Open album ↗' }}
+            </a>
+          </span>
         </li>
       </ul>
 
