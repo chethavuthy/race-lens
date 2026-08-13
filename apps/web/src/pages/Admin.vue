@@ -32,13 +32,29 @@ const gated = ref<Gate | null>(null);
  * Cloudflare's own logout. Same origin, because the app-domain endpoint clears
  * the authorization cookie from this host immediately; the team-domain one
  * revokes the same session but leaves the cookie here to expire on its own.
- * Either way the revocation reaches the edge in 20-30 seconds, which is why the
- * copy says "in a moment" rather than promising an instant switch.
+ * The cookies are gone from the browser at once, so this page reverts to the
+ * invitation on the very next load; Cloudflare's own revocation reaches the edge
+ * 20-30 seconds later, which only matters to a token already in flight.
  *
- * Cloudflare renders its own page afterwards — there is no documented returnTo
- * — so the trip back to /admin is the visitor's, not ours to automate.
+ * returnTo brings them back here instead of stranding them on Cloudflare's
+ * "you have been logged out" page, which says nothing about Race Lens and offers
+ * no way back. It is UNDOCUMENTED — the session-management page describes no such
+ * parameter — but it is what the endpoint actually does, verified against the
+ * live host: with it the response is a 302 to this URL that also expires
+ * CF_Authorization, CF_Binding, CF_Device and CF_Session; without it the response
+ * is a 200 carrying Cloudflare's page and no Set-Cookie at all.
+ *
+ * If Cloudflare ever drops the parameter this degrades to what it replaced —
+ * still logged out, just landing on their page — so it is safe to depend on for
+ * the destination and not for the logout itself.
+ *
+ * Built from location.origin rather than a constant: two hostnames serve this
+ * app, the Access cookie is scoped to whichever one you are on, and sending a
+ * photographer to the other one would land them signed out on a host they never
+ * signed in to. Same-origin by construction, so it cannot become an open
+ * redirect for someone else's URL.
  */
-const LOGOUT = '/cdn-cgi/access/logout';
+const LOGOUT = `/cdn-cgi/access/logout?returnTo=${encodeURIComponent(`${location.origin}/admin`)}`;
 
 /**
  * Nothing is rendered until the answer is known.
