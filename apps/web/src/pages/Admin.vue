@@ -490,17 +490,42 @@ async function publish(ev: EventSummary) {
     <h1>Organizer</h1>
     <p class="lede">Turn your race photos into an album runners can search.</p>
 
+    <!--
+      Two ways in, and the easy one first.
+
+      This screen used to describe only the second: be added, sign in, run the
+      tools yourself. That is the smaller ask by far — most photographers have a
+      folder and a race name and want somebody else to do the work — so leading
+      with the account made the whole page look like an application form for
+      software they had not asked for.
+
+      The list is what a photographer actually has to gather, spelled out,
+      because every item that is missing costs a round trip on Telegram: without
+      the sharing setting the folder cannot be read at all, without the bib
+      answer the event ships with a search that returns nothing, and without a
+      name the album is credited to "Album from Google Drive".
+    -->
     <div class="card invite">
       <p style="margin: 0">
-        Send me a link to your Google Drive album and I'll index it. Runners then find
-        themselves by typing their bib number or taking a selfie. It's free.
+        Send me your album and I'll make it searchable. Runners then find their own
+        photos by typing their bib number or taking a selfie. It's free.
       </p>
 
-      <ul class="invite-points">
-        <li><strong>Your photos stay yours.</strong> Race Lens shows a small preview and links to your album — every full-size photo still opens from your Drive.</li>
-        <li><strong>Your name is on it.</strong> Every page that shows your work credits you, with a link to your album.</li>
-        <li><strong>Leave any time.</strong> One message and the album comes off the site, along with everything indexed from it.</li>
+      <p style="margin: 0">Message me on Telegram with:</p>
+
+      <ul class="invite-send">
+        <li>
+          Your <strong>Google Drive link</strong>, shared so that anyone with the link can
+          view it.
+        </li>
+        <li>The <strong>event name</strong> and the date it was held.</li>
+        <li>Whether runners wore <strong>bib numbers</strong>.</li>
+        <li>The <strong>name to credit</strong> — yours, your studio's, or the club's.</li>
       </ul>
+
+      <p style="margin: 0">
+        I'll index the album and send you the link once it's live.
+      </p>
 
       <!-- The address asked for is the one they will SIGN IN with, which is not
            necessarily the account that owns the Drive folder: the folder is read
@@ -509,10 +534,16 @@ async function publish(ev: EventSummary) {
            invited a photographer to hand over a work address they cannot receive
            a sign-in code at, and the mistake only surfaces at the door. -->
       <p style="margin: 0">
-        To be added, message me on Telegram with the email address you want to sign in
-        with, and which race you shot. Once you're on the list you can sign in here
-        straight away.
+        <strong>Would rather do it yourself?</strong> Organizers and photographers can have
+        their own sign-in and publish albums without me. Tell me the email address you
+        want to sign in with, and I'll set it up. Also free.
       </p>
+
+      <ul class="invite-points">
+        <li><strong>Your photos stay yours.</strong> Race Lens shows a small preview and links to your album — every full-size photo still opens from your Drive.</li>
+        <li><strong>Your name is on it.</strong> Every page that shows your work credits you, with a link to your album.</li>
+        <li><strong>Leave any time.</strong> One message and the album comes off the site, along with everything indexed from it.</li>
+      </ul>
 
       <a class="btn tg" :href="TELEGRAM" target="_blank" rel="noopener">Message @chethavuthy</a>
 
