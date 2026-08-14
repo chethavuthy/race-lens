@@ -7,26 +7,36 @@ import PhotoGrid from '../components/PhotoGrid.vue';
 import type { GridItem } from '../lib/grid';
 import PhotoGridSkeleton from '../components/PhotoGridSkeleton.vue';
 import { plural } from '../lib/format';
+import { bibSearchCache, eventPageCache, type Tab } from '../lib/cache';
 
 const props = defineProps<{ slug: string }>();
 
 const route = useRoute();
 const router = useRouter();
 
-type Tab = 'bib' | 'selfie' | 'upload';
 const ALL_TABS: { id: Tab; label: string }[] = [
   { id: 'bib', label: 'Bib' },
   { id: 'selfie', label: 'Selfie' },
   { id: 'upload', label: 'Upload' },
 ];
-const tab = ref<Tab>('bib');
+
+/* ------------------------------------------------------------- back button --
+   Everything this page fetched last time, so that coming back is a re-render
+   rather than a reload. Read here, during setup, so the first paint is the
+   finished page — see lib/cache.ts. */
+const restored = eventPageCache.read(props.slug);
+
+const tab = ref<Tab>(restored?.tab ?? 'bib');
 const tabRefs = ref<HTMLButtonElement[]>([]);
 
-const event = ref<EventSummary | null>(null);
-const credits = ref<Credit[]>([]);
-const browse = ref<Photo[]>([]);
-const cursor = ref<string | null>(null);
-const loadingEvent = ref(true);
+/* The photo array is stored by reference, so the pages this mount appends are
+   already in the cache — `remember` is only ever updating the cursor and the
+   tab alongside them. */
+const event = ref<EventSummary | null>(restored?.event ?? null);
+const credits = ref<Credit[]>(restored?.credits ?? []);
+const browse = ref<Photo[]>(restored?.photos ?? []);
+const cursor = ref<string | null>(restored?.cursor ?? null);
+const loadingEvent = ref(!restored);
 const loadingMore = ref(false);
 const loadError = ref<string | null>(null);
 /** Set when a page fails; latches auto-loading off until the reader retries. */
@@ -59,11 +69,15 @@ const prefetchMargin = () =>
   `${Math.round(Math.max(1200, window.innerHeight * PREFETCH_SCREENS))}px 0px`;
 let moreObserver: IntersectionObserver | null = null;
 
-const results = ref<GridItem[] | null>(null);
-const searchedBy = ref<Tab | null>(null);
+/* A face search is the one result set nothing can rebuild: it leaves no trace in
+   the URL and the selfie that produced it is gone the moment it is embedded. If
+   it is not carried across the unmount it is simply lost, and the reader is back
+   at "All photos" having to take another picture of themselves. */
+const results = ref<GridItem[] | null>(restored?.results ?? null);
+const searchedBy = ref<Tab | null>(restored?.searchedBy ?? null);
 const searching = ref(false);
 const searchError = ref<string | null>(null);
-const searchNote = ref<string | null>(null);
+const searchNote = ref<string | null>(restored?.searchNote ?? null);
 
 const bib = ref('');
 
@@ -89,7 +103,7 @@ const browseItems = computed<GridItem[]>(() => browse.value.map((photo) => ({ ph
  * Kept as an opt-in beside the count, for the group shot where someone genuinely
  * cannot tell which runner is them.
  */
-const cropToFace = ref(false);
+const cropToFace = ref(restored?.cropToFace ?? false);
 const faceSearched = computed(() => searchedBy.value === 'selfie' || searchedBy.value === 'upload');
 // Set when an exact search found nothing but a looser one might. Widening is
 // offered as a labelled choice, never done silently: a suffix match can return
@@ -243,7 +257,26 @@ watch(
   { immediate: true },
 );
 
+/** Hand the current browse state back to the cache for the next mount. */
+function remember() {
+  if (!event.value) return;
+  eventPageCache.write(props.slug, {
+    event: event.value,
+    credits: credits.value,
+    photos: browse.value,
+    cursor: cursor.value,
+    tab: tab.value,
+    results: results.value,
+    searchedBy: searchedBy.value,
+    searchNote: searchNote.value,
+    cropToFace: cropToFace.value,
+  });
+}
+
 onMounted(async () => {
+  // Already on screen. Re-fetching would replace a grid the reader is looking
+  // at — and, three pages deep, shrink it back to sixty photos underneath them.
+  if (restored) return;
   try {
     const r = await api.getEvent(props.slug);
     event.value = r.event;
@@ -253,6 +286,7 @@ onMounted(async () => {
     credits.value = r.credits ?? [];
     browse.value = r.photos;
     cursor.value = r.cursor;
+    remember();
   } catch (e: any) {
     loadError.value = e.message;
   } finally {
@@ -277,6 +311,9 @@ watch(sentinel, (el) => {
 onBeforeUnmount(() => {
   stopCamera();
   moreObserver?.disconnect();
+  // Leaving is the one moment the tab is certainly final, and it costs nothing
+  // to re-stamp the entry's age while we are here.
+  remember();
 });
 
 /**
@@ -294,6 +331,7 @@ async function loadMore() {
     const r = await api.getPhotos(props.slug, cursor.value);
     browse.value.push(...r.photos);
     cursor.value = r.cursor;
+    remember();
   } catch (e: any) {
     browseError.value = e?.message ?? 'Could not load more photos.';
   } finally {
@@ -397,18 +435,40 @@ let searchSeq = 0;
 async function searchBib(value: string, fuzzy: boolean) {
   const seq = ++searchSeq;
   clearResults();
+
+  /* A bib search is in the URL, so Back into one re-runs it — and re-ran it over
+     the network, which meant stepping out of a search and back into it emptied
+     the grid and spun. Applying the previous answer synchronously (this runs
+     before the first await, and the URL watcher is `immediate`) means the page
+     never renders the searching state at all. */
+  const key = `${props.slug}:${value}:${fuzzy}`;
+  const hit = bibSearchCache.read(key);
+  if (hit) {
+    results.value = hit.results;
+    searchedBy.value = 'bib';
+    fuzzyOffered.value = hit.fuzzyOffered;
+    searchNote.value = hit.note;
+    // An older request may still be out. Its own `seq` guard drops its results,
+    // but it will no longer be the one that turns this back off.
+    searching.value = false;
+    return;
+  }
+
   searching.value = true;
   try {
     const r = await api.searchBib(props.slug, value, fuzzy);
     if (seq !== searchSeq) return;      // a newer search has taken over
-    results.value = r.photos.map((photo) => ({ photo }));
+    const items = r.photos.map((photo) => ({ photo }));
+    const note =
+      r.matched === 'suffix'
+        ? `No photo of bib ${value} was found. These bibs merely END in ${value}, so they may be ` +
+          `other runners — check the photo before assuming it is you.`
+        : null;
+    results.value = items;
     searchedBy.value = 'bib';
     fuzzyOffered.value = r.fuzzy_available;
-    if (r.matched === 'suffix') {
-      searchNote.value =
-        `No photo of bib ${value} was found. These bibs merely END in ${value}, so they may be ` +
-        `other runners — check the photo before assuming it is you.`;
-    }
+    searchNote.value = note;
+    bibSearchCache.write(key, { results: items, note, fuzzyOffered: r.fuzzy_available });
   } catch (e: any) {
     if (seq === searchSeq) searchError.value = e.message;
   } finally {

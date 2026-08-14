@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { Photo } from '../lib/api';
 import type { GridItem } from '../lib/grid';
 import { clockTime } from '../lib/format';
+import { decodedThumbs } from '../lib/cache';
 
 const props = withDefaults(
   defineProps<{
@@ -85,7 +86,23 @@ const columns = computed<Placed[][]>(() => {
   return cols;
 });
 
-const loaded = ref(new Set<string>());
+/**
+ * Which tiles are already showing a picture.
+ *
+ * Seeded from the module-level set, because this component is re-created on
+ * every visit while the browser's image cache is not. Starting empty meant that
+ * coming back to an album put a grey placeholder under all 60 tiles and replayed
+ * the fade-in as each cached thumbnail re-decoded — a flash of loading for
+ * pictures the browser already had. A thumb that decoded once will decode again
+ * from cache, so treating it as present is honest; the worst case is a tile that
+ * stays empty for a moment instead of grey.
+ */
+const loaded = ref(new Set<string>(decodedThumbs));
+
+function markLoaded(id: string) {
+  loaded.value.add(id);
+  decodedThumbs.add(id);
+}
 // Thumbnails live in OUR R2 bucket. If one fails to load that is our problem —
 // a bad key, a misconfigured base URL, a network blip — and NOT evidence that
 // the photographer revoked anything. Blaming them for a config bug is exactly
@@ -210,8 +227,8 @@ function label(item: GridItem, i: number) {
           alt=""
           loading="lazy"
           decoding="async"
-          @load="loaded.add(item.photo.id)"
-          @error="failed.add(item.photo.id); loaded.add(item.photo.id)" />
+          @load="markLoaded(item.photo.id)"
+          @error="failed.add(item.photo.id); markLoaded(item.photo.id)" />
         <span v-if="showScore && item.score != null" class="badge">
           {{ item.score.toFixed(3) }}
         </span>

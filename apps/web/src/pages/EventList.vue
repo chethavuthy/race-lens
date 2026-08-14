@@ -3,14 +3,21 @@ import { onMounted, ref } from 'vue';
 import { RouterLink } from 'vue-router';
 import { api, type EventSummary } from '../lib/api';
 import { formatDate, plural } from '../lib/format';
+import { eventListCache } from '../lib/cache';
 
-const events = ref<EventSummary[]>([]);
-const loading = ref(true);
+// Read during setup, so coming back from an album re-renders the same list
+// instead of replacing it with skeleton cards for a second. See lib/cache.ts.
+const restored = eventListCache.read('events');
+
+const events = ref<EventSummary[]>(restored ?? []);
+const loading = ref(!restored);
 const error = ref<string | null>(null);
 
 onMounted(async () => {
+  if (restored) return;
   try {
     events.value = (await api.listEvents()).events;
+    eventListCache.write('events', events.value);
   } catch (e: any) {
     error.value = e.message;
   } finally {

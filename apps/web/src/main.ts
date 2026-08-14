@@ -73,9 +73,11 @@ const router = createRouter({
  * vue-router awaits what scrollBehavior returns, which left the router hanging
  * mid-navigation in exactly that case.
  *
- * 1.5s, and landing short is a fine outcome. An event page restores only the 60
- * photos it re-fetches, so a reader who was 8,000px into an 8,523-photo album
- * comes back as far as the content allows rather than to the top.
+ * 1.5s, and landing short is a fine outcome — though it should now be rare.
+ * Pages restore their own contents from lib/cache.ts before the first paint,
+ * grid included, so a reader who was 8,000px into an 8,523-photo album comes
+ * back to a document that is already that tall. Only a cold arrival — a reload,
+ * or an entry gone past its TTL — has to grow into the offset.
  */
 const RESTORE_MS = 1500;
 let restoring = 0;
@@ -98,10 +100,21 @@ function restoreScroll(top: number) {
     window.addEventListener(e, stop, { passive: true });
   }
 
-  const deadline = performance.now() + RESTORE_MS;
-  restoring = window.setInterval(() => {
+  const apply = () => {
     const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
     window.scrollTo(0, Math.min(top, max));
+  };
+
+  // Once before the first tick. A restored page is already its full height here,
+  // so this is usually the only application that happens — waiting 50ms for the
+  // interval showed the top of the album for a frame first. It cannot end the
+  // correction early, though: a short or outgoing document lands clamped, and
+  // only the loop below can tell the difference.
+  apply();
+
+  const deadline = performance.now() + RESTORE_MS;
+  restoring = window.setInterval(() => {
+    apply();
     if (window.scrollY >= top - 1 || performance.now() > deadline) stop();
   }, 50);
 }
