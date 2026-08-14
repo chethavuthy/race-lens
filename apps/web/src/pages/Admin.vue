@@ -492,25 +492,32 @@ async function publish(ev: EventSummary) {
 
     <div class="card invite">
       <p style="margin: 0">
-        Send me a Google Drive link and I'll index it. Runners then find themselves
-        by typing their bib number, or by taking a selfie. It's free.
+        Send me a link to your Google Drive album and I'll index it. Runners then find
+        themselves by typing their bib number or taking a selfie. It's free.
       </p>
 
       <ul class="invite-points">
-        <li><strong>Your photos stay yours.</strong> Race Lens shows a small preview and links to your album — every full-size photo still comes from you.</li>
-        <li><strong>Your name is on it.</strong> Every page that shows your work credits you and links back.</li>
-        <li><strong>Leave any time.</strong> One message and the album comes off, along with everything indexed from it.</li>
+        <li><strong>Your photos stay yours.</strong> Race Lens shows a small preview and links to your album — every full-size photo still opens from your Drive.</li>
+        <li><strong>Your name is on it.</strong> Every page that shows your work credits you, with a link to your album.</li>
+        <li><strong>Leave any time.</strong> One message and the album comes off the site, along with everything indexed from it.</li>
       </ul>
 
+      <!-- The address asked for is the one they will SIGN IN with, which is not
+           necessarily the account that owns the Drive folder: the folder is read
+           through a public link and an API key, so Race Lens never touches their
+           Drive account at all. Asking for "the email you use for Google Drive"
+           invited a photographer to hand over a work address they cannot receive
+           a sign-in code at, and the mistake only surfaces at the door. -->
       <p style="margin: 0">
-        To get in, message me on Telegram with the email you use for Google Drive,
-        and which race you shot. I'll add you and send the link back.
+        To be added, message me on Telegram with the email address you want to sign in
+        with, and which race you shot. Once you're on the list you can sign in here
+        straight away.
       </p>
 
       <a class="btn tg" :href="TELEGRAM" target="_blank" rel="noopener">Message @chethavuthy</a>
 
       <p class="muted small" style="margin: 0">
-        Opens Telegram. Send it from your own account so I know it's you.
+        Opens Telegram. Message me from your own account so I know it's you.
       </p>
 
       <!-- Three different people read this box. One has never signed in and
@@ -792,7 +799,7 @@ async function publish(ev: EventSummary) {
       <form class="row" style="padding-top: 0" @submit.prevent="addOrganizer">
         <input v-model="newOrganizer" class="row-main" type="email" inputmode="email"
                autocomplete="off" aria-label="Photographer's email"
-               placeholder="Their Google Drive email…" />
+               placeholder="Email they'll sign in with…" />
         <button class="primary" type="submit"
                 :disabled="peopleBusy === 'add' || !newOrganizer.trim()">
           <span v-if="peopleBusy === 'add'" class="spinner" /> Add photographer
