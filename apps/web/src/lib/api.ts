@@ -230,6 +230,11 @@ export const api = {
     // imageSource is optional on purpose: omitting it keeps whatever an existing
     // link is already set to. Defaulting it here to 'original' meant the Add-link
     // form, which never passes one, reset the row toggle every time it ran.
+    //
+    // The operator's Add-link form now always passes one — it makes the choice
+    // explicit before dispatching, since the run starts immediately and the row
+    // toggle is disabled for its duration. A photographer's form still omits it,
+    // and the API forces 'thumb' for them regardless.
     ingest: (eventId: string, driveUrl: string, imageSource?: 'original' | 'thumb') =>
       req<{ job_id: string; source_id: string; folder_id: string }>(
         '/api/admin/ingest',
@@ -286,6 +291,16 @@ export const api = {
     reindexSource: (sourceId: string) =>
       req<{ job_id: string }>(`/api/admin/sources/${sourceId}/reindex`, { method: 'POST' }),
 
+    /**
+     * Ask a pass to stop. Cooperative: a running pass ends at its next batch
+     * boundary, so `status` comes back 'stopping' rather than 'stopped' — the
+     * runner writes the final word. A pass that had not started yet stops
+     * outright and returns 'stopped'.
+     */
+    stopJob: (jobId: string) =>
+      req<{ stopped: boolean; status: string; reason?: string }>(
+        `/api/admin/jobs/${jobId}/stop`, { method: 'POST' }),
+
     photos: (eventId: string, cursor: string | null, filter = 'all') =>
       req<{
         photos: (Photo & {
@@ -319,7 +334,7 @@ export const api = {
                   indexed: number; missing: number };
         jobs: { id: string; source_id: string | null; status: string; done: number; total: number;
                 skipped: number; attempts: number; error: string | null; updated_at: string;
-                stale: boolean }[];
+                stop_requested: number; stale: boolean }[];
         log: { level: string; code: string | null; message: string;
                drive_file_id: string | null; created_at: string }[];
         summary: { level: string; code: string | null; n: number }[];

@@ -1,0 +1,21 @@
+-- Adds jobs.stop_requested so an organizer can stop a pass that is under way.
+--
+-- Apply with:
+--   npx wrangler d1 execute race-lens --remote \
+--     --config apps/api/wrangler.toml --file=./migrations/008_jobs_stop_requested.sql
+--
+-- Defaults to 0, so every job that predates this migration behaves exactly as
+-- it did: nothing reads the column as anything but "keep going".
+--
+-- WHY A FLAG AND NOT A STATUS. The runner is a GitHub Actions job we cannot
+-- reach into, so stopping is cooperative: the flag is a request, and the run
+-- honours it at its next batch boundary. That means there is a window where the
+-- job is both 'running' and stop_requested = 1, which is a real state the UI has
+-- to show ("Stopping…") and a status column alone cannot express without lying
+-- about one of the two facts.
+--
+-- index-event.yml sets cancel-in-progress: false precisely because cancelling
+-- the CI run leaves the job row stuck on 'running' forever. This flag is the
+-- opposite approach — the runner ends itself, having flushed, and writes its own
+-- final status.
+ALTER TABLE jobs ADD COLUMN stop_requested INTEGER NOT NULL DEFAULT 0;

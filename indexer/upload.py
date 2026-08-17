@@ -90,13 +90,27 @@ class Uploader:
             delay = min(delay * 2, 30)
         raise RuntimeError(f"POST {path} failed after retries")
 
-    def progress(self, job_id: str, **fields: Any) -> None:
+    def progress(self, job_id: str, **fields: Any) -> bool:
+        """Report progress; returns True when the organizer has asked to stop.
+
+        The stop flag comes back on this call rather than a poll of its own: the
+        runner already makes it every batch, and a pass busy downloading has no
+        spare round trips.
+
+        False on failure, deliberately. A ping that could not be delivered says
+        nothing about what the organizer wants, and the failure modes are not
+        symmetric — carrying on wastes a batch, whereas stopping on a network
+        blip would abandon a pass nobody asked to end, in a way that looks
+        identical to the stop button working.
+        """
         # Progress is advisory: never let a failed status ping kill a run that
         # is otherwise making progress.
         try:
-            self._post(f"/api/internal/jobs/{job_id}/progress", fields)
+            res = self._post(f"/api/internal/jobs/{job_id}/progress", fields)
         except Exception as exc:  # noqa: BLE001
             log.warning("progress update failed: %s", exc)
+            return False
+        return bool(res.get("stop"))
 
     def put_photos(self, event_id: str, source_id: str, photos: list[dict],
                    faces_pending: bool = True) -> dict[str, str]:

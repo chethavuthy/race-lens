@@ -85,7 +85,16 @@ def run(args: argparse.Namespace) -> int:
     up = Uploader(cfg)
     drive = DriveClient(cfg.google_api_key)
 
-    up.progress(args.job_id, status="running", done=0, total=0)
+    # Before the Drive walk, which is minutes of work on a large folder and would
+    # be thrown away. A job stopped while it was still queued has already been
+    # marked 'stopped' by the API; this ping sets it back to 'running', so the
+    # runner has to put it right on its way out rather than leaving the row
+    # claiming a pass that is no longer happening.
+    if up.progress(args.job_id, status="running", done=0, total=0):
+        log.info("Stop requested before this pass began — exiting without indexing")
+        up.progress(args.job_id, status="stopped", done=0, total=0,
+                    error="Stopped before it started. Press Continue to run it.")
+        return 0
 
     images: list[DriveImage] = drive.walk(args.folder_id)
     discovered = len(images)
@@ -175,6 +184,7 @@ def run(args: argparse.Namespace) -> int:
     faces_indexed = 0
     quota_hit = False
     deadline_hit = False
+    stop_hit = False
     deadline_s = cfg.deadline_min * 60
 
     work = cfg.work_dir
@@ -415,7 +425,15 @@ def run(args: argparse.Namespace) -> int:
             up.mark_photos_complete(args.event_id, read_ids)
 
         processed += len(local)
-        up.progress(args.job_id, done=processed, total=total)
+        # The same ping that reports this batch answers whether to start the next
+        # one. Acted on HERE, between batches, for the reason the deadline check
+        # above gives: vectors, bibs and faces_done for everything so far have
+        # landed, so a stop at this point costs nothing and resumes cleanly.
+        #
+        # Not acted on at the mid-batch pings inside the download loop, though
+        # they carry the same flag: stopping there would throw away photos
+        # already fetched from a quota that is measured in bytes.
+        stop_hit = up.progress(args.job_id, done=processed, total=total)
         log.info(
             "Batch %d: %d photos, %d faces so far, %d/%d done",
             batch_no + 1, len(local), faces_indexed, processed, total,
@@ -426,6 +444,12 @@ def run(args: argparse.Namespace) -> int:
             journal = []
 
         shutil.rmtree(work, ignore_errors=True)
+        if stop_hit:
+            log.info("Stop requested — ending after batch %d", batch_no + 1)
+            note("info", "stopped",
+                 "Stopped at your request. Everything indexed so far is live; "
+                 "press Continue to carry on from here.")
+            break
         if quota_hit:
             break
 
@@ -437,8 +461,12 @@ def run(args: argparse.Namespace) -> int:
 
     # Any photo we could not fetch means the album is not fully represented.
     # Reporting "done" there is a lie the organizer cannot see through.
-    incomplete = quota_hit or deadline_hit or skipped > 0
-    status = "partial" if incomplete else "done"
+    incomplete = quota_hit or deadline_hit or stop_hit or skipped > 0
+    # 'stopped' rather than 'partial' when the organizer asked for it. Both mean
+    # "there is more to do", but only one of them is something they did — and a
+    # pass that reports 'partial' next to the button they just pressed reads as a
+    # failure they now have to diagnose.
+    status = "stopped" if stop_hit else "partial" if incomplete else "done"
 
     # A run stopped by Drive's throttle or by its own clock has more to do and
     # will succeed later — ask for a continuation rather than making the
@@ -453,8 +481,13 @@ def run(args: argparse.Namespace) -> int:
     # (601 of 601) that made the second link's remaining -341, so `remaining > 0`
     # was false forever and the continuation was never requested — the chain
     # died silently while 260 photos were still missing.
+    # `not stop_hit`: a stop that only ended this run would be undone seconds
+    # later by the continuation it requested on the way out. The API refuses the
+    # request too — belt and braces, because the runner is the half that knows
+    # it stopped deliberately and the API is the half that survives the runner
+    # being killed outright.
     remaining = len(pending(folder_ids, up.already_indexed(args.event_id)))
-    if (quota_hit or deadline_hit) and remaining > 0 and not args.bibs_only:
+    if (quota_hit or deadline_hit) and not stop_hit and remaining > 0 and not args.bibs_only:
         # The reason travels with the request so the job's own error line — the
         # one the organizer reads while they wait — says which wall this pass hit.
         reason = "quota" if quota_hit else "time"
@@ -466,7 +499,8 @@ def run(args: argparse.Namespace) -> int:
             up.finalize(args.event_id, "partial")
             return 0
         log.warning("Continuation was not dispatched; finishing as partial")
-    stopped = (" — Drive rate limit hit" if quota_hit else
+    stopped = (" — stopped at your request" if stop_hit else
+               " — Drive rate limit hit" if quota_hit else
                " — stopped at this run's time limit" if deadline_hit else "")
     note("info", "summary",
          f"Pass finished: {downloaded} downloaded, {skipped} could not be fetched, "
@@ -475,7 +509,12 @@ def run(args: argparse.Namespace) -> int:
 
     up.progress(
         args.job_id, status=status, done=processed, total=total,
-        error=(f"{skipped} of {total} photos could not be downloaded from Drive"
+        # The stop message wins over the skipped count: it is the answer to
+        # "what happened", and the skipped photos are picked up by the next pass
+        # exactly as they would have been anyway.
+        error=("Stopped. Everything indexed so far is live — press Continue "
+               "to carry on." if stop_hit else
+               f"{skipped} of {total} photos could not be downloaded from Drive"
                if skipped else None),
     )
     counts = up.finalize(args.event_id, "partial" if incomplete else "ready")

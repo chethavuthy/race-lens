@@ -158,7 +158,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   id         TEXT PRIMARY KEY,
   event_id   TEXT NOT NULL,
   source_id  TEXT,
-  status     TEXT NOT NULL,                    -- queued|running|done|partial|failed
+  status     TEXT NOT NULL,                    -- queued|running|done|partial|failed|stopped
   done       INTEGER NOT NULL DEFAULT 0,
   total      INTEGER NOT NULL DEFAULT 0,
   error      TEXT,
@@ -166,6 +166,15 @@ CREATE TABLE IF NOT EXISTS jobs (
   -- Bounds the chain so a permanently-failing folder cannot loop forever.
   attempts   INTEGER NOT NULL DEFAULT 0,
   skipped    INTEGER NOT NULL DEFAULT 0,       -- photos this job could not fetch
+  -- The organizer asked for this pass to stop. Cooperative, not a kill: the
+  -- runner reads it off its next progress ping and ends itself between batches,
+  -- where nothing is in flight. Cancelling the CI run instead would strand this
+  -- row on 'running' forever — see the concurrency note in index-event.yml.
+  --
+  -- Stopping is the same act as pausing. Every photo a pass finishes is marked
+  -- faces_done and skipped by the next resume, so a stopped job is picked up
+  -- exactly where it left off by the ordinary Continue button.
+  stop_requested INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_event ON jobs(event_id, updated_at);

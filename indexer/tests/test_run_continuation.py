@@ -108,7 +108,8 @@ class FakeDrive:
 
 
 class FakeUploader:
-    def __init__(self, indexed_event_wide, bibs_enabled=True):
+    def __init__(self, indexed_event_wide, bibs_enabled=True, stop_after=None):
+        self.stop_after = stop_after
         self._indexed = set(indexed_event_wide)
         self.continue_requested = False
         self.continue_reason = None
@@ -129,6 +130,13 @@ class FakeUploader:
 
     def progress(self, job_id, **fields):
         self.progress_calls.append(fields)
+        # Mirrors the real signature: the stop flag rides home on the progress
+        # ping. `stop_after` counts the pings that return False before the first
+        # True, so a test can place the stop at a chosen point in the run —
+        # 0 stops it before the Drive walk, 1 after the first batch.
+        if self.stop_after is None:
+            return False
+        return len(self.progress_calls) > self.stop_after
 
     def already_indexed(self, _event_id, complete_only=False):
         return set(self._indexed)
@@ -206,9 +214,10 @@ def _images(prefix, n):
 def wired(monkeypatch, tmp_path):
     """Patch run()'s collaborators, keeping numpy/Pillow real."""
     def _build(folder_images, indexed_event_wide, quota_after, bibs_enabled=True,
-               deadline_min=10_000):
+               deadline_min=10_000, stop_after=None):
         drive = FakeDrive(folder_images, quota_after)
-        up = FakeUploader(indexed_event_wide, bibs_enabled=bibs_enabled)
+        up = FakeUploader(indexed_event_wide, bibs_enabled=bibs_enabled,
+                          stop_after=stop_after)
 
         cfg = types.SimpleNamespace(
             google_api_key="k", batch_size=25, thumb_max_edge=1000,
@@ -610,3 +619,89 @@ def test_bibs_only_neither_completes_nor_reopens_photos(wired):
     assert run_mod.run(_args(bibs_only=True)) == 0
     assert up.faces_pending_seen == [False]
     assert up.completed == []
+
+
+# --- stop ------------------------------------------------------------------
+#
+# Stopping is cooperative: the API sets jobs.stop_requested, and the runner
+# reads it off the progress ping it already makes every batch. What these cover
+# is the half that cannot be asserted from the Worker side — that the runner
+# ends between batches with its writes flushed, and does not chain a successor.
+
+
+def test_a_stop_ends_the_pass_between_batches(wired):
+    """Stop after batch 1 of 4. The pass stops; it does not run to the end."""
+    # 100 photos at batch_size 25. stop_after=2: the status ping at entry, then
+    # the first batch's own ping is the one that comes back True.
+    _, up = wired(_images("src2", 100), set(), quota_after=10_000, stop_after=2)
+
+    assert run_mod.run(_args()) == 0
+
+    final = up.progress_calls[-1]
+    assert final["status"] == "stopped"
+    # One batch of 25 landed, and nothing beyond it was downloaded.
+    assert final["done"] == 25
+    assert len(up.completed) == 25
+
+
+def test_a_stopped_pass_does_not_chain_a_continuation(wired):
+    """The point of the whole feature.
+
+    A stop that only ended the current run would be undone seconds later by the
+    continuation the runner requests on its way out — the chain, not the run, is
+    what an organizer means by "stop".
+    """
+    _, up = wired(_images("src2", 100), set(), quota_after=10_000, stop_after=2)
+
+    assert run_mod.run(_args()) == 0
+
+    assert not up.continue_requested, "a stopped pass must not ask for another"
+    assert up.finalized == ["partial"], "the album is incomplete, and says so"
+
+
+def test_a_stop_beats_a_deadline_that_would_have_continued(wired, clock):
+    """Both walls hit at once. The organizer's wins.
+
+    A pass that stops on its own clock asks for a continuation; one the organizer
+    stopped must not, or the chain restarts itself and the button did nothing.
+    """
+    clock(60)
+    _, up = wired(_images("src2", 100), set(), quota_after=10_000,
+                  deadline_min=1, stop_after=2)
+
+    assert run_mod.run(_args()) == 0
+
+    assert not up.continue_requested
+    assert up.progress_calls[-1]["status"] == "stopped"
+
+
+def test_a_stop_before_the_pass_starts_indexes_nothing(wired):
+    """Stopped while still queued: the runner exits before the Drive walk.
+
+    The first ping sets the row back to 'running', so the runner has to put it
+    right on its way out rather than leaving it claiming a pass that is not
+    happening.
+    """
+    drive, up = wired(_images("src2", 100), set(), quota_after=10_000, stop_after=0)
+
+    assert run_mod.run(_args()) == 0
+
+    assert drive.served == 0, "nothing may be downloaded after a stop"
+    assert up.progress_calls[-1]["status"] == "stopped"
+    assert up.finalized == [], "a pass that did nothing must not restate the event"
+
+
+def test_an_undelivered_ping_does_not_stop_the_pass(wired, monkeypatch):
+    """progress() returns False when it could not reach the Worker.
+
+    A network blip is not an instruction. Stopping on one would abandon a pass
+    nobody asked to end, in a way that looks identical to the button working.
+    """
+    from indexer.upload import Uploader
+
+    # The real method against a self whose _post always raises — the one place
+    # these tests exercise Uploader.progress rather than the fake.
+    unreachable = types.SimpleNamespace(
+        _post=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("network down")),
+    )
+    assert Uploader.progress(unreachable, "job-1", done=1) is False

@@ -27,6 +27,23 @@ const notice = ref<string | null>(null);
 const busy = ref<string | null>(null);
 const levelFilter = ref<'all' | 'error' | 'warn'>('all');
 const newLink = ref('');
+/**
+ * Image size for the link about to be added. Starts unset, and Add link stays
+ * disabled until the operator picks one.
+ *
+ * Deliberately not defaulted. Adding a link dispatches the indexing run in the
+ * same request, so whatever this says is committed the moment the button is
+ * pressed — and the row's own Original/Resized toggle is disabled while a job
+ * is active, which it now is. A default here would therefore not be a starting
+ * point the operator could correct; it would be the decision, made silently,
+ * with the only way back a full re-index. That was the old behaviour: the form
+ * sent no size at all and the API fell through to 'original', so every new
+ * folder went to full-size downloads at ~25 photos a round.
+ *
+ * A photographer never sees this — the API forces 'thumb' for anyone who is not
+ * the operator, so for them the form still sends nothing and nothing changes.
+ */
+const newLinkSource = ref<'original' | 'thumb' | null>(null);
 let poll: number | undefined;
 
 /**
@@ -74,8 +91,32 @@ const visibleLog = computed(() => filteredLog.value.slice(0, logShown.value));
 // "Show more" never appears with nothing left to show.
 watch(levelFilter, () => { logShown.value = PAGE; });
 
+// 'stopped' stays neutral rather than warn: it is the outcome the organizer
+// asked for, and colouring their own deliberate act as a problem sends them
+// looking for a fault that is not there.
 const jobState = (s: string) =>
   s === 'failed' ? 'err' : s === 'partial' ? 'warn' : s === 'done' ? 'ok' : 'idle';
+
+/**
+ * A stop already asked for but not yet acted on. The runner honours it between
+ * batches, so there is a real interval — up to one batch — where the pass is
+ * still indexing and the button must not invite a second press.
+ */
+const stopping = computed(() => !!activeJob.value?.stop_requested);
+
+/**
+ * There is no Resume, on purpose. Every photo a pass finishes is marked
+ * faces_done and skipped by the next resume, so Continue — the button already
+ * on the row — is the resume. A second control that did the same thing under a
+ * different name would only raise the question of how they differ.
+ */
+function stopJob() {
+  const job = activeJob.value;
+  if (!job) return;
+  run('stop', () => api.admin.stopJob(job.id),
+      'Stopping — the pass ends after the batch in progress, which can take a '
+      + 'few minutes. Everything indexed so far stays live.');
+}
 
 async function load(quiet = false) {
   if (!quiet) loading.value = true;
@@ -276,8 +317,22 @@ const setBibs = (on: boolean) =>
 function addLink() {
   const url = newLink.value.trim();
   if (!url) return;
-  run('add', async () => { await api.admin.ingest(props.id, url); newLink.value = ''; },
-      'Link added — indexing started.');
+  // An operator with no pick is a bug in the disabled state above, not something
+  // to paper over with a default — see newLinkSource.
+  if (owner.value && !newLinkSource.value) return;
+  const size = newLinkSource.value ?? undefined;
+  run('add', async () => {
+    await api.admin.ingest(props.id, url, size);
+    newLink.value = '';
+    newLinkSource.value = null;
+    // Named after what the API will actually do, which for a photographer is
+    // 'thumb' regardless of what this form sent — so their message must not be
+    // derived from `size`, which is always undefined for them.
+  }, !owner.value
+    ? 'Link added — indexing started.'
+    : size === 'thumb'
+      ? 'Link added — indexing started on Drive’s resized copies.'
+      : 'Link added — indexing started on full originals.');
 }
 
 function onBanner(e: Event) {
@@ -325,9 +380,27 @@ const when = (iso: string) => new Date(iso).toLocaleString();
             <div class="stat-value" :class="totals.missing ? 'warn' : 'ok'">{{ totals.missing }}</div>
           </div>
         </div>
+        <!-- Stop lives here rather than on the Drive-link row because it acts on
+             the PASS, not the folder — and this banner is the only place the
+             pass itself is represented. Operator only: a photographer cannot
+             start one either. -->
         <p v-if="activeJob" class="notice" style="margin-top: var(--s-4)">
-          <span class="spinner" /> Indexing now — {{ activeJob.done }} / {{ activeJob.total }}.
-          A big album is done in rounds, and it carries on by itself. You can close this page.
+          <template v-if="stopping">
+            <span class="spinner" /> Stopping after the batch in progress —
+            {{ activeJob.done }} / {{ activeJob.total }} done so far. Everything already
+            indexed stays live, and <strong>Continue</strong> picks up from here.
+          </template>
+          <template v-else>
+            <span class="spinner" /> Indexing now — {{ activeJob.done }} / {{ activeJob.total }}.
+            A big album is done in rounds, and it carries on by itself. You can close this page.
+          </template>
+          <button v-if="owner" style="margin-left: var(--s-3)"
+                  :disabled="busy === 'stop' || stopping"
+                  title="Finish the batch in progress, then stop. Nothing indexed is lost."
+                  @click="stopJob">
+            <span v-if="busy === 'stop'" class="spinner" />
+            {{ stopping ? 'Stopping…' : 'Stop' }}
+          </button>
         </p>
         <p v-else-if="stalledJob" class="notice warn" style="margin-top: var(--s-4)">
           A round stopped early. Nothing is lost — press <strong>Continue</strong> to pick up
@@ -489,12 +562,38 @@ const when = (iso: string) => new Date(iso).toLocaleString();
           </div>
         </div>
 
+        <!-- The size is chosen HERE, before the link is added, because adding it
+             starts the run. The matching toggle on the row above only exists
+             once the source row does, and it is disabled while a job is active
+             — so by the time it appears, the download it governs is already
+             under way and the setting cannot be changed without a re-index.
+             type="button" on both: a bare <button> inside a <form> submits. -->
         <form class="row" style="border-bottom: 0" @submit.prevent="addLink">
           <input v-model="newLink" class="row-main" placeholder="Add another Drive folder URL…" />
-          <button class="primary" type="submit" :disabled="busy === 'add' || !newLink.trim()">
+          <div v-if="owner" class="segmented tiny" role="group" aria-label="Image size to download">
+            <button type="button" :aria-selected="newLinkSource === 'original'"
+                    :disabled="busy === 'add'"
+                    title="Download the full-size original from Drive"
+                    @click="newLinkSource = 'original'">Original</button>
+            <button type="button" :aria-selected="newLinkSource === 'thumb'"
+                    :disabled="busy === 'add'"
+                    title="Download Drive's resized copy — same faces and bibs, many more photos per round"
+                    @click="newLinkSource = 'thumb'">Resized</button>
+          </div>
+          <button class="primary" type="submit"
+                  :title="owner && !newLinkSource ? 'Pick Original or Resized first' : undefined"
+                  :disabled="busy === 'add' || !newLink.trim() || (owner && !newLinkSource)">
             <span v-if="busy === 'add'" class="spinner" /> Add link
           </button>
         </form>
+        <!-- Only once there is something to decide about: an empty box asking
+             for a size before a URL exists is noise. -->
+        <p v-if="owner && newLink.trim() && !newLinkSource" class="muted small"
+           style="margin: 0 0 var(--s-3)">
+          Pick a size first. Resized moves about 600 photos a round against
+          roughly 25 for originals, for the same faces and bibs — this cannot be
+          changed once indexing starts.
+        </p>
       </div>
 
       <!-- What a photographer needs from the pass list and the log: whether

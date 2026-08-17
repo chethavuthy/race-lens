@@ -670,7 +670,8 @@ adminRoutes.get('/events/:id/report', async (c) => {
   const LOG_LIMIT = 300;
 
   const { results: rawJobs } = await c.env.DB.prepare(
-    `SELECT id, source_id, status, done, total, skipped, attempts, error, updated_at
+    `SELECT id, source_id, status, done, total, skipped, attempts, error,
+            stop_requested, updated_at
        FROM jobs WHERE event_id = ? ORDER BY updated_at DESC LIMIT ?`,
   ).bind(eventId, JOBS_LIMIT).all<any>();
 
@@ -1208,6 +1209,58 @@ adminRoutes.get('/jobs/:id', async (c) => {
   // the one route a stranger's id would most easily be tried against.
   await ownEvent(c, row.event_id);
   return c.json({ job: row });
+});
+
+/**
+ * Stop a pass that is under way. Cooperative — see jobs.stop_requested.
+ *
+ * Sets the flag and lets the runner end itself at its next batch boundary,
+ * having flushed. Two things make that safe to expose as a button:
+ *
+ *  * Stopping cannot lose work. Every batch writes its vectors, bibs and
+ *    faces_done before the next one starts, so the most a stop discards is the
+ *    downloads of the batch in flight — which the next pass simply redoes.
+ *  * Stopping is pausing. faces_done is what the resume filter reads, so the
+ *    ordinary Continue button picks the album up exactly where it stopped.
+ *    There is deliberately no separate Resume: a second control for the same
+ *    act would only invite the question of how they differ.
+ *
+ * A job that has not started yet is stopped outright here rather than waiting
+ * for a runner to notice — it may have none. The dispatched workflow still runs,
+ * finds the flag on its first progress ping and exits without downloading.
+ */
+adminRoutes.post('/jobs/:id/stop', async (c) => {
+  const id = c.req.param('id');
+  const job = await c.env.DB.prepare('SELECT * FROM jobs WHERE id = ?')
+    .bind(id).first<JobRow & { stop_requested: number }>();
+  if (!job) throw new HttpError(404, 'Job not found', 'no_job');
+  await ownEvent(c, job.event_id);
+
+  // Anything already finished stays as it finished. Rewriting a 'done' pass to
+  // 'stopped' would rewrite history for a run that had nothing left to stop.
+  if (!['queued', 'running'].includes(job.status)) {
+    return c.json({ stopped: false, status: job.status, reason: 'not_running' });
+  }
+
+  // 'queued' has no runner mid-batch to wait for, so it ends here. 'running'
+  // keeps its status until the runner writes its own — the pass is genuinely
+  // still going, and claiming otherwise would have the page report an idle
+  // album while a runner is still downloading into it.
+  const queued = job.status === 'queued';
+  await c.env.DB.prepare(
+    `UPDATE jobs SET stop_requested = 1,
+                     status = CASE WHEN ?1 = 1 THEN 'stopped' ELSE status END,
+                     error = ?2, updated_at = ?3
+      WHERE id = ?4`,
+  ).bind(
+    queued ? 1 : 0,
+    queued
+      ? 'Stopped before it started. Press Continue to run it.'
+      : 'Stopping after the batch in progress — press Continue to carry on later.',
+    nowIso(), id,
+  ).run();
+
+  return c.json({ stopped: true, status: queued ? 'stopped' : 'stopping' });
 });
 
 adminRoutes.get('/events/:id/jobs', async (c) => {

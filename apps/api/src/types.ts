@@ -73,9 +73,11 @@ export interface JobRow {
   id: string;
   event_id: string;
   source_id: string | null;
-  status: 'queued' | 'running' | 'done' | 'partial' | 'failed';
+  status: 'queued' | 'running' | 'done' | 'partial' | 'failed' | 'stopped';
   done: number;
   total: number;
   error: string | null;
+  /** The organizer asked this pass to stop; the runner honours it between batches. */
+  stop_requested?: number;
   updated_at: string;
 }

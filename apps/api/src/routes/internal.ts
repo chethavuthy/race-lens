@@ -43,7 +43,18 @@ internalRoutes.post('/jobs/:id/progress', async (c) => {
     b.done ?? null, b.total ?? null, b.status ?? null,
     clearError ? 1 : 0, b.error ?? null, nowIso(), id,
   ).run();
-  return c.json({ ok: true });
+
+  // The stop signal rides home on a request the runner already makes every
+  // batch, rather than on a poll of its own. A pass that is downloading has no
+  // spare round trips to give — and a poll that failed would be indistinguishable
+  // from "keep going", which is the wrong way for a stop to fail.
+  //
+  // Read AFTER the update: the same statement the runner uses to report a batch
+  // is the one that tells it to stop, so the answer is never older than the
+  // progress it just wrote.
+  const job = await c.env.DB.prepare('SELECT stop_requested FROM jobs WHERE id = ?')
+    .bind(id).first<{ stop_requested: number }>();
+  return c.json({ ok: true, stop: (job?.stop_requested ?? 0) === 1 });
 });
 
 interface PhotoIn {
@@ -100,6 +111,23 @@ internalRoutes.post('/jobs/:id/continue', async (c) => {
 
   const job = await c.env.DB.prepare('SELECT * FROM jobs WHERE id = ?').bind(id).first<any>();
   if (!job) throw new HttpError(404, 'Job not found', 'no_job');
+
+  // Guard 0: the organizer asked this pass to stop, so it does not get to
+  // dispatch its own successor.
+  //
+  // A stop that only ended the current run would be undone seconds later by the
+  // continuation the runner requests on its way out — the chain, not the run, is
+  // what an organizer means by "stop". This is also the backstop for a runner
+  // that never saw the flag: whatever it does locally, the chain ends here.
+  if ((job.stop_requested ?? 0) === 1) {
+    await c.env.DB.prepare(
+      "UPDATE jobs SET status = 'stopped', error = ?, updated_at = ? WHERE id = ?",
+    ).bind(
+      'Stopped. Everything indexed so far is live — press Continue to carry on.',
+      nowIso(), id,
+    ).run();
+    return c.json({ dispatched: false, reason: 'stop_requested' });
+  }
 
   // Guard 1: a pass that indexed nothing would repeat itself for nothing.
   if ((job.done ?? 0) === 0) {
