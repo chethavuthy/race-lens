@@ -1,0 +1,32 @@
+-- Adds events.bib_prefix_required: at this race EVERY bib carries a category
+-- letter, so a bare number is not a bib.
+--
+-- Apply with:
+--   env -u CLOUDFLARE_API_TOKEN npx wrangler d1 execute race-lens --remote \
+--     --config apps/api/wrangler.toml --file=./migrations/012_events_bib_prefix_required.sql
+--
+-- (The token in .env.deploy has no D1 permission; the OAuth login does.)
+--
+-- WHAT IT FIXES.
+--
+-- migrations/010 made the letter part of the stored bib, because at a race
+-- numbering by category 0001, F-0001 and M-0001 are three different runners.
+-- That leaves one ambiguity it cannot resolve on its own: when the OCR reads the
+-- digits but MISSES the letter — cropped out of the torso window, folded, turned
+-- away — the pass stores the bare number. Where bare numbers are themselves
+-- valid, that silently files a 10k woman under the marathon runner who owns her
+-- digits, and nothing in the image says the letter was ever there.
+--
+-- At a race where every bib is prefixed there are no bare numbers to confuse it
+-- with, so the safe reading is to reject the bare token instead of guessing. The
+-- runner loses one photo; she does not appear in a stranger's results.
+--
+-- DEFAULT 0, so nothing changes for any existing event — including one that has
+-- prefixes configured but also hands out bare numbers, which is the case this
+-- must not break.
+--
+-- Ignored when the event lists no prefixes: requiring a letter that no letter is
+-- allowed would compile to a pattern matching nothing, and an empty bib search
+-- with no error is the failure this whole area keeps producing. See bib_pattern
+-- in indexer/bibs.py.
+ALTER TABLE events ADD COLUMN bib_prefix_required INTEGER NOT NULL DEFAULT 0;

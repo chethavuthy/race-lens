@@ -23,6 +23,7 @@ from indexer.bibs import (
     DEFAULT_MIN_DIGITS,
     MAX_DIGITS,
     BibHit,
+    BibReader,
     _prefer_prefixed,
     bib_pattern,
     normalize_bib,
@@ -225,3 +226,65 @@ def test_a_bare_number_is_never_the_prefixed_one():
 ])
 def test_prefix_parsing_matches_the_worker(raw, expected):
     assert parse_prefixes(raw) == expected
+
+
+# --- "every bib has a letter" -------------------------------------------------
+
+
+def test_requiring_a_prefix_rejects_the_bare_number():
+    """The whole point: at a race with no plain bibs, a read that lost the letter
+    must be dropped rather than filed under whoever owns those digits."""
+    pat = bib_pattern(4, ("F", "M"), 4, prefix_required=True)
+    assert pat.match("F-0001") and pat.match("M0001") and pat.match("F 0001")
+    assert not pat.match("0001"), "a bare number is not a bib at this race"
+
+
+def test_not_requiring_a_prefix_keeps_the_mixed_race_working():
+    """0001 marathon / F-0001 10k — both are real, so both must read."""
+    pat = bib_pattern(4, ("F", "M"), 4, prefix_required=False)
+    assert pat.match("0001") and pat.match("F-0001")
+
+
+def test_requiring_a_prefix_without_listing_any_is_ignored():
+    """Otherwise the pattern matches nothing and the album reads no bibs at all —
+    with no error anywhere, which is the failure this area keeps producing.
+
+    The flag is a refinement of the whitelist, so it cannot mean anything without
+    one. Degrades to plain digits rather than to silence.
+    """
+    pat = bib_pattern(4, (), 4, prefix_required=True)
+    assert pat.match("0001"), "no letters listed -> behave exactly as digits-only"
+
+
+def test_requiring_a_prefix_still_rejects_undeclared_letters():
+    pat = bib_pattern(4, ("F",), 4, prefix_required=True)
+    assert pat.match("F-0001")
+    assert not pat.match("K-0001")
+    assert not pat.match("0001F")
+
+
+def test_the_reader_ignores_the_flag_when_it_has_no_prefixes(monkeypatch):
+    """The same guard one layer up, where main.py actually passes the setting.
+
+    BibReader is constructed for real — with a stub OCR engine, since neither
+    RapidOCR nor PaddleOCR is installed in the test env — because the guard lives
+    in __init__ and asserting it on bib_pattern alone would not cover the wiring.
+    """
+    import sys
+    import types
+
+    stub = types.ModuleType("rapidocr_onnxruntime")
+    stub.RapidOCR = lambda *a, **k: (lambda img: ([], None))
+    monkeypatch.setitem(sys.modules, "rapidocr_onnxruntime", stub)
+
+    # Letters listed: the flag applies.
+    with_letters = BibReader(min_digits=4, prefixes="F,M", max_digits=4,
+                             prefix_required=True)
+    assert with_letters.prefix_required is True
+    assert not with_letters.bib_re.match("0001")
+    assert with_letters.bib_re.match("F-0001")
+
+    # No letters listed: the flag is dropped rather than left to match nothing.
+    without = BibReader(min_digits=4, prefixes="", max_digits=4, prefix_required=True)
+    assert without.prefix_required is False
+    assert without.bib_re.match("0001")

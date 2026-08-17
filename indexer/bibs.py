@@ -91,7 +91,8 @@ def normalize_bib(printed: str) -> str:
 
 
 def bib_pattern(min_digits: int, prefixes: "tuple[str, ...] | None" = None,
-                max_digits: "int | None" = None) -> re.Pattern[str]:
+                max_digits: "int | None" = None,
+                prefix_required: bool = False) -> re.Pattern[str]:
     """What counts as a bib token on a photo, for THIS event.
 
     Both bounds are clamped rather than trusted: they arrive from D1 via the
@@ -110,6 +111,16 @@ def bib_pattern(min_digits: int, prefixes: "tuple[str, ...] | None" = None,
     `prefixes` is a whitelist. Empty means digits only, which is every event that
     predates the setting. A bare number stays acceptable even when prefixes are
     configured, because a mixed race has both ("0001" marathon, "F-0001" 10k).
+
+    `prefix_required` is for a race where EVERY bib carries a letter, so a bare
+    number is not a bib at all. It closes the gap that a whitelist alone cannot:
+    when the OCR reads the digits and misses the letter, storing the bare number
+    files that runner under whoever owns those digits. Rejecting it loses one
+    photo instead of putting her in a stranger's results.
+
+    Ignored without a whitelist — requiring a letter where none is allowed would
+    compile to a pattern matching nothing, and an empty bib search with no error
+    is the failure this whole area keeps producing.
     """
     high = min(max(int(max_digits or MAX_DIGITS), 1), MAX_DIGITS)
     low = min(max(int(min_digits or DEFAULT_MIN_DIGITS), 1), high)
@@ -125,7 +136,9 @@ def bib_pattern(min_digits: int, prefixes: "tuple[str, ...] | None" = None,
     # "F 0001" and "F0001" all match while "42Km" and "0092F" do not: a trailing
     # letter is kit text or a unit, never a category.
     alt = "|".join(sorted({p.upper() for p in clean}, key=lambda p: (-len(p), p)))
-    return re.compile(rf"^(?:(?:{alt})[-\s]?)?{digits}$", re.IGNORECASE)
+    # The only difference is whether the prefix group is optional.
+    group = rf"(?:{alt})[-\s]?" if prefix_required else rf"(?:(?:{alt})[-\s]?)?"
+    return re.compile(rf"^{group}{digits}$", re.IGNORECASE)
 
 
 def parse_prefixes(raw: "str | None") -> tuple[str, ...]:
@@ -348,7 +361,8 @@ def _prefer_prefixed(hits: list[BibHit]) -> list[BibHit]:
 class BibReader:
     def __init__(self, min_digits: int = DEFAULT_MIN_DIGITS,
                  prefixes: "str | tuple[str, ...] | None" = None,
-                 max_digits: "int | None" = None) -> None:
+                 max_digits: "int | None" = None,
+                 prefix_required: bool = False) -> None:
         self.engine = None
         self.kind = None
         # Compiled once per run rather than consulted per token: _read runs on
@@ -360,7 +374,11 @@ class BibReader:
                          else tuple(prefixes or ()))
         self.max_digits = min(max(int(max_digits or MAX_DIGITS), 1), MAX_DIGITS)
         self.min_digits = min(self.min_digits, self.max_digits)
-        self.bib_re = bib_pattern(min_digits, self.prefixes, self.max_digits)
+        # False without a whitelist, so the flag can never be the reason an event
+        # reads no bibs at all.
+        self.prefix_required = bool(prefix_required) and bool(self.prefixes)
+        self.bib_re = bib_pattern(min_digits, self.prefixes, self.max_digits,
+                                  self.prefix_required)
 
         try:
             from rapidocr_onnxruntime import RapidOCR

@@ -169,6 +169,10 @@ def run(args: argparse.Namespace) -> int:
     # every event that predates the setting.
     bib_prefixes = parse_prefixes(event_cfg.get("bib_prefixes"))
     bib_max_digits = event_cfg.get("bib_max_digits") or MAX_DIGITS
+    # Every bib carries a letter at this race, so a bare number is not one.
+    # BibReader ignores this without a prefix list, so it can never be the reason
+    # an album reads no bibs at all.
+    bib_prefix_required = bool(event_cfg.get("bib_prefix_required"))
     if args.bibs_only and not read_bibs:
         # A bibs-only pass over an event with no bibs would download and decode
         # every photo to write nothing at all.
@@ -184,7 +188,8 @@ def run(args: argparse.Namespace) -> int:
 
     engine = FaceEngine(det_size=cfg.det_size)
     reader = (BibReader(min_digits=bib_min_digits, prefixes=bib_prefixes,
-                        max_digits=bib_max_digits)
+                        max_digits=bib_max_digits,
+                        prefix_required=bib_prefix_required)
               if read_bibs else None)
     if reader:
         # Logged and journalled: this single number decides whether an album's bib
@@ -194,7 +199,8 @@ def run(args: argparse.Namespace) -> int:
         shape = (f"{reader.min_digits} digits" if reader.min_digits == reader.max_digits
                  else f"{reader.min_digits} to {reader.max_digits} digits")
         if reader.prefixes:
-            shape += ", with or without " + "/".join(reader.prefixes)
+            shape += (", each starting with " if reader.prefix_required
+                      else ", with or without ") + "/".join(reader.prefixes)
         log.info("Bib numbers: %s", shape)
         note("info", "bib_digits",
              f"Reading bib numbers of {shape}. Anything else is ignored — change "

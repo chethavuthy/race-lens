@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { Env, EventRow, JobRow } from '../types';
 import { chunk, clampLimit, HttpError, newId, nowIso, publicEvent, publicPhoto, r2Url, slugify } from '../lib';
-import { normalizeBib, parsePrefixes } from '../bib';
+import { PREFIX_SEP, normalizeBib, parsePrefixes } from '../bib';
 import { bannerKey, bannerType } from '../banner';
 import { faceBox } from '../bbox';
 import { parseFolderId, sampleThumbUrl, walkFolder } from '../drive';
@@ -446,6 +446,7 @@ adminRoutes.patch('/events/:id', async (c) => {
   const body = await c.req.json<{
     name?: string; event_date?: string; status?: string; bibs_enabled?: boolean;
     bib_min_digits?: number; bib_max_digits?: number; bib_prefixes?: string;
+    bib_prefix_required?: boolean;
   }>();
   const allowed = ['draft', 'indexing', 'ready', 'partial'];
   if (body.status && !allowed.includes(body.status)) {
@@ -496,6 +497,36 @@ adminRoutes.patch('/events/:id', async (c) => {
     }
     prefixes = parsed.join(',');
   }
+
+  // "Every bib has a letter" needs letters to require. Checked against the state
+  // AFTER this write, like the digit range above, so setting both in one request
+  // works and setting only one cannot leave the pair contradictory.
+  //
+  // The indexer ignores the flag without a prefix list rather than reading no
+  // bibs at all — but an operator who ticks it on an event with no letters has
+  // made a mistake worth reporting, not silently absorbing.
+  // Clearing the letters clears the flag with them. Leaving it set would store a
+  // contradiction — "every bib has a letter" at a race with no letters listed —
+  // which the indexer ignores but which springs back to life the moment letters
+  // are added again, changing behaviour nobody asked to change.
+  let prefixRequired: number | null =
+    body.bib_prefix_required === undefined ? null : (body.bib_prefix_required ? 1 : 0);
+  if (body.bib_prefixes !== undefined && !parsePrefixes(prefixes).length) {
+    prefixRequired = 0;
+  }
+
+  if (body.bib_prefix_required === true) {
+    const listAfter = body.bib_prefixes !== undefined
+      ? prefixes
+      : (await c.env.DB.prepare('SELECT bib_prefixes FROM events WHERE id = ?')
+          .bind(id).first<{ bib_prefixes: string | null }>())?.bib_prefixes ?? '';
+    if (!parsePrefixes(listAfter).length) {
+      throw new HttpError(
+        400,
+        'List the category letters first — "every bib has a letter" needs to know which letters',
+        'bad_bib_prefix_required');
+    }
+  }
   // Turning bibs off leaves any bibs already read in place rather than deleting
   // them: the flag hides them and stops future passes reading more, so flipping
   // it back on restores what was there instead of forcing a re-index.
@@ -509,6 +540,7 @@ adminRoutes.patch('/events/:id', async (c) => {
                        bibs_enabled = COALESCE(?4, bibs_enabled),
                        bib_min_digits = COALESCE(?5, bib_min_digits),
                        bib_max_digits = COALESCE(?9, bib_max_digits),
+                       bib_prefix_required = COALESCE(?10, bib_prefix_required),
                        -- Not COALESCE: '' must be able to CLEAR the list back to
                        -- digits only, and COALESCE reads only NULL as "leave it".
                        -- Same presence-not-value trick as jobs.error in
@@ -519,7 +551,8 @@ adminRoutes.patch('/events/:id', async (c) => {
          body.bibs_enabled === undefined ? null : (body.bibs_enabled ? 1 : 0),
          body.bib_min_digits ?? null,
          body.bib_prefixes === undefined ? 0 : 1, prefixes, id,
-         body.bib_max_digits ?? null).run();
+         body.bib_max_digits ?? null,
+         prefixRequired).run();
   const row = await c.env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(id).first<EventRow>();
   if (!row) throw new HttpError(404, 'Event not found', 'no_event');
   // Neither bib setting is in publicEvent — runners have no use for them — so the
@@ -530,6 +563,7 @@ adminRoutes.patch('/events/:id', async (c) => {
     bib_min_digits: row.bib_min_digits,
     bib_max_digits: row.bib_max_digits,
     bib_prefixes: row.bib_prefixes ?? '',
+    bib_prefix_required: (row.bib_prefix_required ?? 0) === 1,
   } });
 });
 
@@ -1056,6 +1090,7 @@ adminRoutes.get('/events/:id', async (c) => {
     bib_min_digits: row.bib_min_digits,
     bib_max_digits: row.bib_max_digits,
     bib_prefixes: row.bib_prefixes ?? '',
+    bib_prefix_required: (row.bib_prefix_required ?? 0) === 1,
   } });
 });
 
@@ -1137,6 +1172,35 @@ adminRoutes.get('/events/:id/photos', async (c) => {
  * 'manual', which the indexer's replace path never deletes, so a correction
  * outlives every future re-index.
  */
+/**
+ * Reject a hand-typed bare number where every bib carries a letter.
+ *
+ * The OCR path already refuses these, so accepting one here would let the manual
+ * control write a bib the pipeline considers impossible — and at such a race a
+ * bare number is not a different runner, it is a missing letter. Worth saying so
+ * rather than storing something no search will ever be right about.
+ *
+ * Silent when the event lists no letters, matching the indexer: the flag alone
+ * must never be the reason an entry is refused.
+ */
+async function requirePrefixIfEventDoes(
+  c: AdminCtx, eventId: string, normalized: string, typed: string,
+): Promise<void> {
+  if (normalized.includes(PREFIX_SEP)) return;
+  const ev = await c.env.DB
+    .prepare('SELECT bib_prefixes, bib_prefix_required FROM events WHERE id = ?')
+    .bind(eventId).first<{ bib_prefixes: string | null; bib_prefix_required: number }>();
+  const letters = parsePrefixes(ev?.bib_prefixes);
+  if ((ev?.bib_prefix_required ?? 0) === 1 && letters.length) {
+    throw new HttpError(
+      400,
+      // Suggests what they TYPED with a letter in front, not the normalized form:
+      // "try F-1" reads as a different number from the 0001 printed on the bib.
+      `Every bib at this race starts with a letter — try ${letters[0]}-${typed || normalized}`,
+      'bib_prefix_required');
+  }
+}
+
 adminRoutes.post('/photos/:id/bibs', async (c) => {
   await ownPhoto(c, c.req.param('id'));
   const photoId = c.req.param('id');
@@ -1157,6 +1221,7 @@ adminRoutes.post('/photos/:id/bibs', async (c) => {
   const photo = await c.env.DB.prepare('SELECT event_id FROM photos WHERE id = ?')
     .bind(photoId).first<{ event_id: string }>();
   if (!photo) throw new HttpError(404, 'Photo not found', 'no_photo');
+  await requirePrefixIfEventDoes(c, photo.event_id, norm, raw);
 
   await c.env.DB.prepare(
     `INSERT INTO bibs (event_id, bib, photo_id, conf, bib_raw, source)
@@ -1243,6 +1308,7 @@ adminRoutes.post('/faces/:id/bib', async (c) => {
       400, 'Enter a bib like 0056, or F-0056 if this race uses category letters',
       'bad_bib');
   }
+  await requirePrefixIfEventDoes(c, face.event_id, norm, raw);
   await c.env.DB.batch([
     c.env.DB.prepare('UPDATE faces SET bib = ? WHERE id = ?').bind(norm, faceId),
     // Photo-level row too, since that is what bib search actually queries.

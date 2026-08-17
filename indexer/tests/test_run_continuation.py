@@ -75,10 +75,12 @@ def _install_cv_stubs() -> None:
         # Mirrors the real signature: main.py passes the event's settings, and a
         # stub that refused them would fail every test for a reason unrelated to
         # what they cover.
-        def __init__(self, min_digits=3, prefixes=(), max_digits=5):
+        def __init__(self, min_digits=3, prefixes=(), max_digits=5,
+                     prefix_required=False):
             self.min_digits = min_digits
             self.max_digits = max_digits
             self.prefixes = tuple(prefixes or ())
+            self.prefix_required = bool(prefix_required) and bool(self.prefixes)
 
         def read_torso(self, _bgr, _bbox):
             return None

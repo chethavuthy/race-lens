@@ -339,6 +339,7 @@ const BIB_DIGIT_HINTS: Record<number, string> = {
  */
 const bibMaxDigits = computed(() => event.value?.bib_max_digits ?? 5);
 const bibPrefixes = computed(() => event.value?.bib_prefixes ?? '');
+const bibPrefixRequired = computed(() => event.value?.bib_prefix_required === true);
 const prefixInput = ref<string | null>(null);
 
 /**
@@ -362,6 +363,21 @@ const setBibDigits = (n: number) =>
 const setBibMax = (n: number) =>
   run('bibmax', () => api.admin.setBibRules(props.id, { bib_max_digits: n }),
       `Longest bib is now ${n} digits.` + REREAD_NOTE);
+
+/**
+ * "Every bib has a letter" — for a race with no bare numbers at all.
+ *
+ * It buys precision the letter whitelist alone cannot. When a pass reads the
+ * digits but misses the letter, the bare number it would store belongs to
+ * whoever owns those digits; where no bare numbers exist, rejecting the read
+ * loses one photo instead of filing a runner under a stranger's bib.
+ */
+const setBibPrefixRequired = (on: boolean) =>
+  run('bibreq', () => api.admin.setBibRules(props.id, { bib_prefix_required: on }),
+      (on
+        ? 'Every bib must now start with a letter — a number read without one is ignored.'
+        : 'Plain numbers count as bibs again, alongside the lettered ones.')
+      + REREAD_NOTE);
 
 /** '' clears the list back to digits only. */
 const saveBibPrefixes = () => {
@@ -907,6 +923,41 @@ const when = (iso: string) => new Date(iso).toLocaleString();
               recovers it.
             </template>
           </p>
+
+          <!-- Only once there are letters to require. Sits inside the prefixes
+               block because it is meaningless without them, and the API refuses
+               it in that state rather than storing a contradiction. -->
+          <div v-if="bibPrefixes" style="margin-top: var(--s-4)">
+            <label>Do any bibs have no letter?</label>
+            <div class="segmented" role="radiogroup"
+                 aria-label="Whether every bib at this race carries a category letter">
+              <button role="radio" :aria-checked="!bibPrefixRequired"
+                      :aria-selected="!bibPrefixRequired"
+                      :disabled="busy === 'bibreq' || !!activeJob"
+                      title="Some bibs are plain numbers, like 0001 for the marathon"
+                      @click="setBibPrefixRequired(false)">Mixed — some plain</button>
+              <button role="radio" :aria-checked="bibPrefixRequired"
+                      :aria-selected="bibPrefixRequired"
+                      :disabled="busy === 'bibreq' || !!activeJob"
+                      title="Every bib starts with a category letter"
+                      @click="setBibPrefixRequired(true)">Every bib has a letter</button>
+            </div>
+            <p class="muted small" style="margin: var(--s-2) 0 0">
+              <template v-if="bibPrefixRequired">
+                A number read without a letter is ignored rather than stored. That
+                loses the occasional photo where the letter was folded or out of
+                frame — but it cannot file a runner under someone else's number,
+                which is what storing the bare digits would do.
+              </template>
+              <template v-else>
+                Plain numbers count too, so <code>0001</code> and
+                <code>{{ bibPrefixes.split(',')[0] }}-0001</code> are two different
+                runners. If a pass reads the digits but misses the letter, that photo
+                lands on the plain number — pick the other option if this race has no
+                plain bibs at all.
+              </template>
+            </p>
+          </div>
         </div>
       </div>
     </div>

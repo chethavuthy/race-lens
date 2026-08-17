@@ -17,6 +17,11 @@ export interface EventSummary {
   bib_max_digits?: number;
   /** Category letters, 'F,M'. '' means digits only. Admin shapes only. */
   bib_prefixes?: string;
+  /**
+   * True when every bib carries a letter, so a bare number is not a bib. Only
+   * meaningful alongside bib_prefixes.
+   */
+  bib_prefix_required?: boolean;
   created_at?: string;
   /**
    * Who created it. Only sent to the operator, and null on events that predate
@@ -258,6 +263,7 @@ export const api = {
      */
     setBibRules: (eventId: string, rules: {
       bib_min_digits?: number; bib_max_digits?: number; bib_prefixes?: string;
+      bib_prefix_required?: boolean;
     }) =>
       req<{ event: EventSummary }>(`/api/admin/events/${eventId}`, {
         ...json(rules),

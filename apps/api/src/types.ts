@@ -68,6 +68,12 @@ export interface EventRow {
    */
   bib_prefixes: string | null;
   /**
+   * 1 when every bib carries a letter, so a bare number is not a bib. Closes the
+   * gap a whitelist cannot: a read that misses the letter would otherwise file
+   * that runner under whoever owns the bare digits. Ignored without prefixes.
+   */
+  bib_prefix_required: number;
+  /**
    * The Access identity that created it. NULL on every event that predates
    * ownership, which means the operator's — see migrations/005.
    */

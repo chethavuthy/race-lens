@@ -41,6 +41,12 @@ CREATE TABLE IF NOT EXISTS events (
   -- is a 10k woman, dropping the letter merges two people. It is therefore part
   -- of the stored bib — see CANONICAL BIB FORM in indexer/bibs.py.
   bib_prefixes TEXT,
+  -- 1 when EVERY bib at this race carries a letter, so a bare number is not a
+  -- bib. Resolves the one ambiguity bib_prefixes cannot: a pass that reads the
+  -- digits but misses the letter would otherwise store the bare number, filing a
+  -- 10k woman under the marathon runner who owns her digits. Ignored when no
+  -- prefixes are listed. Defaults to 0 — a mixed race has both forms.
+  bib_prefix_required INTEGER NOT NULL DEFAULT 0,
   -- The Access identity that created this event. Every admin route is scoped to
   -- it, so a photographer let through the door reaches their own albums and
   -- nothing else. NULL means "the operator's" — every event that predates

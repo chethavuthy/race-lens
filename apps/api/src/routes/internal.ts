@@ -375,11 +375,12 @@ internalRoutes.get('/events/:id/indexed', async (c) => {
  */
 internalRoutes.get('/events/:id/config', async (c) => {
   const row = await c.env.DB
-    .prepare(`SELECT bibs_enabled, bib_min_digits, bib_max_digits, bib_prefixes
+    .prepare(`SELECT bibs_enabled, bib_min_digits, bib_max_digits, bib_prefixes,
+                     bib_prefix_required
                 FROM events WHERE id = ?`)
     .bind(c.req.param('id'))
     .first<{ bibs_enabled: number; bib_min_digits: number; bib_max_digits: number;
-             bib_prefixes: string | null }>();
+             bib_prefixes: string | null; bib_prefix_required: number }>();
   if (!row) throw new HttpError(404, 'Event not found', 'no_event');
   // bib_min_digits travels with bibs_enabled because the runner reads both in
   // one call, and event_config() falls back to "bibs on" when that call fails —
@@ -392,6 +393,7 @@ internalRoutes.get('/events/:id/config', async (c) => {
     // '' rather than null: BibReader parses a string, and a missing list must
     // mean "digits only" — the behaviour of every event before prefixes existed.
     bib_prefixes: row.bib_prefixes ?? '',
+    bib_prefix_required: (row.bib_prefix_required ?? 0) === 1,
   });
 });
 
