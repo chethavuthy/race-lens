@@ -112,6 +112,29 @@ const newName = ref('');
 // community runs often hand out none at all, and for those the bib pipeline can
 // only waste OCR time and invent numbers off signage.
 const bibsEnabled = ref(true);
+/**
+ * Bib format for a NEW event, behind a disclosure.
+ *
+ * Set here rather than only on the event page because these rules govern what
+ * passes READ: an album indexed under the wrong ones has to be downloaded a second
+ * time to fix, which is what SheRuns cost. Collapsed by default so the common case
+ * — 3 to 5 digits, no letters — stays a single line of text.
+ */
+const bibFormatOpen = ref(false);
+const newBibMin = ref(3);
+const newBibMax = ref(5);
+const newBibPrefixes = ref('');
+const newBibRequired = ref(false);
+const bibFormatSummary = computed(() => {
+  const digits = newBibMin.value === newBibMax.value
+    ? `exactly ${newBibMin.value} digits`
+    : `${newBibMin.value} to ${newBibMax.value} digits`;
+  const letters = newBibPrefixes.value.trim()
+    ? `, ${newBibRequired.value ? 'always starting' : 'some starting'} with `
+      + newBibPrefixes.value.trim().toUpperCase()
+    : ', no letters';
+  return digits + letters;
+});
 const newDate = ref('');
 const newSlug = ref('');
 const bannerFile = ref<File | null>(null);
@@ -270,6 +293,14 @@ async function start() {
         event_date: newDate.value || undefined,
         slug: newSlug.value.trim() || undefined,
         bibs_enabled: bibsEnabled.value,
+        // Sent only when bibs are on — the rules are meaningless otherwise, and
+        // the API would still store them.
+        ...(bibsEnabled.value ? {
+          bib_min_digits: newBibMin.value,
+          bib_max_digits: newBibMax.value,
+          bib_prefixes: newBibPrefixes.value.trim(),
+          bib_prefix_required: newBibRequired.value,
+        } : {}),
       });
       eventId = created.event.id;
       if (bannerFile.value) await api.admin.uploadBanner(eventId, bannerFile.value);
@@ -315,6 +346,9 @@ function resetForm() {
   newSlug.value = '';
   bannerFile.value = null;
   bibsEnabled.value = true;
+  bibFormatOpen.value = false;
+  newBibMin.value = 3; newBibMax.value = 5;
+  newBibPrefixes.value = ''; newBibRequired.value = false;
   mode.value = 'new';
   targetEventId.value = '';
   bench.value = null;
@@ -732,6 +766,58 @@ async function publish(ev: EventSummary) {
             ? 'Bib numbers are read from each photo so runners can search by number.'
             : 'Skips bib reading entirely — faster indexing, and no numbers invented from signage. Face search still works.' }}
         </p>
+
+        <!-- Worth setting BEFORE the first pass, not after: these rules govern what
+             a pass reads, so an album indexed under the wrong ones must be
+             downloaded a second time to fix. Collapsed, because the default suits
+             most races and this form is already long. -->
+        <template v-if="bibsEnabled">
+          <p class="muted small" style="margin: var(--s-2) 0 0">
+            Bibs here are <strong>{{ bibFormatSummary }}</strong>.
+            <button type="button" class="link" @click="bibFormatOpen = !bibFormatOpen">
+              {{ bibFormatOpen ? 'Done' : 'Change' }}
+            </button>
+          </p>
+
+          <div v-if="bibFormatOpen" style="margin-top: var(--s-3)">
+            <label for="bibrange">Digits printed on a bib, shortest to longest</label>
+            <div class="row" style="border-bottom: 0; padding-top: 0">
+              <select id="bibrange" v-model.number="newBibMin" style="max-width: 8rem">
+                <option v-for="n in [2, 3, 4, 5]" :key="n" :value="n">{{ n }}</option>
+              </select>
+              <span class="muted small">to</span>
+              <select v-model.number="newBibMax" style="max-width: 8rem">
+                <option v-for="n in [2, 3, 4, 5]" :key="n" :value="n"
+                        :disabled="n < newBibMin">{{ n }}</option>
+              </select>
+            </div>
+            <p class="muted small" style="margin: 0 0 var(--s-3)">
+              Numbers outside this range are ignored, which is what keeps years off
+              banners and distance markers out of bib search.
+            </p>
+
+            <label for="bibpfxnew">Category letters (optional)</label>
+            <input id="bibpfxnew" v-model="newBibPrefixes" placeholder="none — e.g. F, M" />
+            <p class="muted small" style="margin: var(--s-2) 0 0">
+              Only if this race numbers by category — <code>0001</code> for the
+              marathon, <code>F-0001</code> and <code>M-0001</code> for the 10k.
+              Without them a bib with a letter is read and then discarded.
+            </p>
+
+            <div v-if="newBibPrefixes.trim()" style="margin-top: var(--s-3)">
+              <label>Do any bibs have no letter?</label>
+              <div class="segmented" role="radiogroup"
+                   aria-label="Whether every bib carries a category letter">
+                <button type="button" role="radio" :aria-checked="!newBibRequired"
+                        :aria-selected="!newBibRequired"
+                        @click="newBibRequired = false">Mixed — some plain</button>
+                <button type="button" role="radio" :aria-checked="newBibRequired"
+                        :aria-selected="newBibRequired"
+                        @click="newBibRequired = true">Every bib has a letter</button>
+              </div>
+            </div>
+          </div>
+        </template>
       </div>
     </template>
 

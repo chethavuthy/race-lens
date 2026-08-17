@@ -228,7 +228,14 @@ export const api = {
 
     listEvents: () => req<{ events: EventSummary[] }>('/api/admin/events'),
 
-    createEvent: (body: { name: string; event_date?: string; slug?: string; bibs_enabled?: boolean }) =>
+    createEvent: (body: {
+      name: string; event_date?: string; slug?: string; bibs_enabled?: boolean;
+      // Settable at creation, because these govern what LATER passes read: an
+      // event created with the wrong ones indexes the whole album, reads the wrong
+      // bibs or none, and then needs a full re-read.
+      bib_min_digits?: number; bib_max_digits?: number; bib_prefixes?: string;
+      bib_prefix_required?: boolean;
+    }) =>
       req<{ event: EventSummary }>('/api/admin/events', json(body)),
 
     uploadBanner: (eventId: string, file: File) => {

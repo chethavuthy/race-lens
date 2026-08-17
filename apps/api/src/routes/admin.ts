@@ -412,9 +412,62 @@ adminRoutes.get('/events', async (c) => {
   });
 });
 
+/**
+ * The bib rules, checked as a set. Shared by create and update so the two cannot
+ * drift — and checked TOGETHER because each is only valid relative to the others:
+ * a floor above the ceiling matches no bib at all, and "every bib has a letter"
+ * means nothing without letters.
+ *
+ * Validated rather than clamped, unlike the indexer's guard on the same values. A
+ * bad value arriving here is an operator mistake worth reporting; the indexer is
+ * defending against whatever reaches it and must never stop a pass over one.
+ *
+ * 1 digit is deliberately not offered: a single digit is a partial read of almost
+ * anything, and no race here prints one.
+ */
+function assertBibRules(r: {
+  min: number; max: number; prefixes: string; required: boolean;
+}): void {
+  for (const [label, v, code] of [
+    ['Shortest', r.min, 'bad_bib_min_digits'],
+    ['Longest', r.max, 'bad_bib_max_digits'],
+  ] as const) {
+    if (!(Number.isInteger(v) && v >= 2 && v <= 5)) {
+      throw new HttpError(400, `${label} bib must be a whole number from 2 to 5`, code);
+    }
+  }
+  if (r.min > r.max) {
+    throw new HttpError(
+      400, `Shortest bib (${r.min}) cannot be longer than the longest (${r.max})`,
+      'bad_bib_range');
+  }
+  if (r.required && !parsePrefixes(r.prefixes).length) {
+    throw new HttpError(
+      400,
+      'List the category letters first — "every bib has a letter" needs to know which letters',
+      'bad_bib_prefix_required');
+  }
+}
+
+/**
+ * 'f, m' -> 'F,M', so the indexer and this route never disagree about what a
+ * prefix list says. '' clears it back to digits only; a value with nothing usable
+ * in it is a typo worth reporting rather than silently storing as "no prefixes".
+ */
+function canonicalPrefixes(raw: string): string {
+  const parsed = parsePrefixes(raw);
+  if (!parsed.length && raw.trim() !== '') {
+    throw new HttpError(
+      400, 'Bib prefixes must be single letters or pairs, like F, M', 'bad_bib_prefixes');
+  }
+  return parsed.join(',');
+}
+
 adminRoutes.post('/events', async (c) => {
   const body = await c.req.json<{
     name?: string; event_date?: string; slug?: string; bibs_enabled?: boolean;
+    bib_min_digits?: number; bib_max_digits?: number; bib_prefixes?: string;
+    bib_prefix_required?: boolean;
   }>();
   const name = (body.name ?? '').trim();
   if (!name) throw new HttpError(400, 'name is required', 'bad_request');
@@ -425,16 +478,33 @@ adminRoutes.post('/events', async (c) => {
   const existing = await c.env.DB.prepare('SELECT id FROM events WHERE slug = ?').bind(slug).first();
   if (existing) throw new HttpError(409, `Slug "${slug}" is already taken`, 'dup_slug');
 
+  // Set at CREATION, not only afterwards. These rules govern what LATER passes
+  // read, so an event created with the wrong ones indexes its whole album, reads
+  // the wrong bibs or none, and then needs a full re-read — every photo downloaded
+  // twice. SheRuns cost exactly that. Defaults are unchanged, so an organizer who
+  // says nothing gets the behaviour every event had before.
+  const rules = {
+    min: body.bib_min_digits ?? 3,
+    max: body.bib_max_digits ?? 5,
+    prefixes: canonicalPrefixes(body.bib_prefixes ?? ''),
+    required: body.bib_prefix_required === true,
+  };
+  assertBibRules(rules);
+
   const id = newId();
   // Absent means bibs are expected — the overwhelmingly common case, and the
   // behaviour every event had before this flag existed.
   // Ownership is recorded here and nowhere else. No route reassigns it: an owner
   // the API can change is not an owner.
   await c.env.DB.prepare(
-    `INSERT INTO events (id, slug, name, event_date, status, bibs_enabled, owner_email, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO events (id, slug, name, event_date, status, bibs_enabled,
+                         bib_min_digits, bib_max_digits, bib_prefixes,
+                         bib_prefix_required, owner_email, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(id, slug, name, body.event_date ?? null, 'draft',
-         body.bibs_enabled === false ? 0 : 1, c.get('email'), nowIso()).run();
+         body.bibs_enabled === false ? 0 : 1,
+         rules.min, rules.max, rules.prefixes, rules.required ? 1 : 0,
+         c.get('email'), nowIso()).run();
 
   const row = await c.env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(id).first<EventRow>();
   return c.json({ event: publicEvent(c.env, row!) }, 201);
@@ -452,81 +522,33 @@ adminRoutes.patch('/events/:id', async (c) => {
   if (body.status && !allowed.includes(body.status)) {
     throw new HttpError(400, 'Invalid status', 'bad_status');
   }
-  // Validated here rather than clamped, unlike the indexer's own guard: a value
-  // out of range from this route is an operator mistake worth reporting, whereas
-  // the indexer is defending against whatever reaches it and must never stop a
-  // pass over it. 1 is deliberately excluded — a single digit is a partial read
-  // of almost anything, and no race here prints one.
-  if (body.bib_min_digits !== undefined
-      && !(Number.isInteger(body.bib_min_digits)
-           && body.bib_min_digits >= 2 && body.bib_min_digits <= 5)) {
-    throw new HttpError(
-      400, 'Shortest bib must be a whole number from 2 to 5', 'bad_bib_min_digits');
-  }
-  // Stored canonically — 'f, m' becomes 'F,M' — so the indexer and this route
-  // never disagree about what a prefix list says. An empty string clears it back
-  // to digits only; a value with nothing usable in it is a typo worth reporting
-  // rather than silently storing as "no prefixes".
-  if (body.bib_max_digits !== undefined
-      && !(Number.isInteger(body.bib_max_digits)
-           && body.bib_max_digits >= 2 && body.bib_max_digits <= 5)) {
-    throw new HttpError(
-      400, 'Longest bib must be a whole number from 2 to 5', 'bad_bib_max_digits');
-  }
-  // Checked against the OTHER bound as it will be after this write, not as it is
-  // now: sending only one of the pair must not be able to leave the event with a
-  // floor above its ceiling, which compiles to a pattern matching no bib at all.
+  // Every rule is checked against the state AFTER this write, not as it is now:
+  // sending one half of a pair must not be able to leave the event contradictory.
   const existing = await c.env.DB
-    .prepare('SELECT bib_min_digits, bib_max_digits FROM events WHERE id = ?')
-    .bind(id).first<{ bib_min_digits: number; bib_max_digits: number }>();
-  const nextMin = body.bib_min_digits ?? existing?.bib_min_digits ?? 3;
-  const nextMax = body.bib_max_digits ?? existing?.bib_max_digits ?? 5;
-  if (nextMin > nextMax) {
-    throw new HttpError(
-      400,
-      `Shortest bib (${nextMin}) cannot be longer than the longest (${nextMax})`,
-      'bad_bib_range');
-  }
+    .prepare(`SELECT bib_min_digits, bib_max_digits, bib_prefixes, bib_prefix_required
+                FROM events WHERE id = ?`)
+    .bind(id).first<{ bib_min_digits: number; bib_max_digits: number;
+                      bib_prefixes: string | null; bib_prefix_required: number }>();
+  const prefixes = body.bib_prefixes === undefined
+    ? null : canonicalPrefixes(body.bib_prefixes);
 
-  let prefixes: string | null = null;
-  if (body.bib_prefixes !== undefined) {
-    const parsed = parsePrefixes(body.bib_prefixes);
-    if (!parsed.length && body.bib_prefixes.trim() !== '') {
-      throw new HttpError(
-        400, 'Bib prefixes must be single letters or pairs, like F, M', 'bad_bib_prefixes');
-    }
-    prefixes = parsed.join(',');
-  }
-
-  // "Every bib has a letter" needs letters to require. Checked against the state
-  // AFTER this write, like the digit range above, so setting both in one request
-  // works and setting only one cannot leave the pair contradictory.
-  //
-  // The indexer ignores the flag without a prefix list rather than reading no
-  // bibs at all — but an operator who ticks it on an event with no letters has
-  // made a mistake worth reporting, not silently absorbing.
   // Clearing the letters clears the flag with them. Leaving it set would store a
-  // contradiction — "every bib has a letter" at a race with no letters listed —
-  // which the indexer ignores but which springs back to life the moment letters
-  // are added again, changing behaviour nobody asked to change.
+  // contradiction — "every bib has a letter" at a race with none listed — which
+  // the indexer ignores, but which springs back to life the moment letters are
+  // added again, changing behaviour nobody asked to change.
   let prefixRequired: number | null =
     body.bib_prefix_required === undefined ? null : (body.bib_prefix_required ? 1 : 0);
-  if (body.bib_prefixes !== undefined && !parsePrefixes(prefixes).length) {
-    prefixRequired = 0;
-  }
+  if (prefixes !== null && !parsePrefixes(prefixes).length) prefixRequired = 0;
 
-  if (body.bib_prefix_required === true) {
-    const listAfter = body.bib_prefixes !== undefined
-      ? prefixes
-      : (await c.env.DB.prepare('SELECT bib_prefixes FROM events WHERE id = ?')
-          .bind(id).first<{ bib_prefixes: string | null }>())?.bib_prefixes ?? '';
-    if (!parsePrefixes(listAfter).length) {
-      throw new HttpError(
-        400,
-        'List the category letters first — "every bib has a letter" needs to know which letters',
-        'bad_bib_prefix_required');
-    }
-  }
+  assertBibRules({
+    min: body.bib_min_digits ?? existing?.bib_min_digits ?? 3,
+    max: body.bib_max_digits ?? existing?.bib_max_digits ?? 5,
+    prefixes: prefixes ?? existing?.bib_prefixes ?? '',
+    required: prefixRequired === null
+      ? (existing?.bib_prefix_required ?? 0) === 1
+      : prefixRequired === 1,
+  });
+
   // Turning bibs off leaves any bibs already read in place rather than deleting
   // them: the flag hides them and stops future passes reading more, so flipping
   // it back on restores what was there instead of forcing a re-index.
