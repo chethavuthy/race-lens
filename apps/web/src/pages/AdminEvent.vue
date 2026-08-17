@@ -352,9 +352,51 @@ const prefixInput = ref<string | null>(null);
  * operator to Recheck, which correctly reported everything already indexed and
  * read no bibs at all.
  */
-const REREAD_NOTE = ' Photos already indexed keep the numbers they have — Recheck '
-  + 'will not change them, because it only looks at photos that are not indexed yet. '
-  + 'Ask for a bib re-read to apply this to the whole album.';
+const REREAD_NOTE = ' Photos already indexed keep the numbers they have — press '
+  + '"Re-read bib numbers" below to apply this to the whole album.';
+
+/**
+ * Estimated rounds for a full re-read, from the same per-round rates the link
+ * rows quote. Shown BEFORE the press, because a re-read on full originals is
+ * ~27 rounds of manual Continue and that is not something to discover afterwards.
+ */
+const rereadRounds = computed(() => {
+  const srcs = (report.value?.sources ?? []).filter((s) => !s.removed_at);
+  return srcs.reduce(
+    (n, s) => n + Math.max(1, Math.ceil(s.indexed / (s.image_source === 'thumb' ? 600 : 25))),
+    0);
+});
+const rereadConfirm = ref(false);
+
+/**
+ * Applies the current bib rules to photos already indexed — the pass Recheck
+ * cannot be.
+ *
+ * Confirmed first, not because it is destructive (it replaces bibs per photo and
+ * leaves faces, thumbnails and the vector index alone) but because it re-downloads
+ * the whole album and does not chain a continuation. On originals that is a lot of
+ * rounds, each needing a press.
+ */
+function rereadBibs() {
+  if (!rereadConfirm.value) { rereadConfirm.value = true; return; }
+  rereadConfirm.value = false;
+  // Not run(), which replaces the notice with its own `ok` string after the call:
+  // this message has to be built FROM the response, because a multi-link event
+  // dispatches one pass per link and how many actually started is the useful part.
+  busy.value = 'reread';
+  api.admin.rereadBibs(props.id).then(async (r) => {
+    const rounds = rereadRounds.value;
+    notice.value = `Re-reading bib numbers on ${plural(r.started.length, 'Drive link')}`
+      + (r.failed.length ? ` — ${r.failed.length} could not be started` : '')
+      + `. Every photo is downloaded again, so expect about ${rounds} `
+      + `${rounds === 1 ? 'round' : 'rounds'}. Faces and thumbnails are untouched.`;
+    error.value = null;
+    await load(true);
+  }).catch((e: any) => {
+    notice.value = null;
+    error.value = e.message;
+  }).finally(() => { busy.value = null; });
+}
 
 const setBibDigits = (n: number) =>
   run('bibdigits', () => api.admin.setBibRules(props.id, { bib_min_digits: n }),
@@ -650,39 +692,41 @@ const when = (iso: string) => new Date(iso).toLocaleString();
              — so by the time it appears, the download it governs is already
              under way and the setting cannot be changed without a re-index.
              type="button" on both: a bare <button> inside a <form> submits. -->
-        <!-- Stacked rather than one flex row. On a phone the URL box, an unlabelled
-             Original/Resized pair and Add link were sharing a line, so the size
-             choice read as two dead buttons with nothing saying what they governed
-             — and it is a REQUIRED choice, which makes that the worst thing to
-             leave ambiguous. -->
-        <form class="add-link" @submit.prevent="addLink">
-          <input v-model="newLink" class="add-link-url"
-                 placeholder="Add another Drive folder URL…" />
-          <div v-if="owner" class="add-link-size">
-            <span :class="['add-link-label', { req: newLink.trim() && !newLinkSource }]">
-              Download at
-            </span>
-            <div class="segmented tiny" role="radiogroup"
-                 aria-label="Image size to download for this link">
-              <button type="button" role="radio"
-                      :aria-checked="newLinkSource === 'original'"
-                      :aria-selected="newLinkSource === 'original'"
-                      :disabled="busy === 'add'"
-                      title="Full-size originals — about 25 photos a round"
-                      @click="newLinkSource = 'original'">Original</button>
-              <button type="button" role="radio"
-                      :aria-checked="newLinkSource === 'thumb'"
-                      :aria-selected="newLinkSource === 'thumb'"
-                      :disabled="busy === 'add'"
-                      title="Drive's resized copy — same faces and bibs, about 600 photos a round"
-                      @click="newLinkSource = 'thumb'">Resized</button>
+        <!-- Built from .row + .row-actions, exactly like the Drive-link rows above:
+             URL where the folder id sits, then the size toggle and the action in the
+             same group Recheck and Remove occupy. Adding a link and re-running one
+             are the same kind of act, so they should not look like different kinds
+             of form — and .row-actions already handles the narrow case, taking the
+             full width below the URL rather than crushing three controls onto one
+             line.
+             type="button" on the toggle: a bare <button> inside a <form> submits. -->
+        <form @submit.prevent="addLink">
+          <div class="row" style="border-bottom: 0">
+            <input v-model="newLink" class="row-main"
+                   placeholder="Add another Drive folder URL…" />
+            <div class="row-actions">
+              <div v-if="owner" class="segmented tiny" role="radiogroup"
+                   aria-label="Image size to download for this link">
+                <button type="button" role="radio"
+                        :aria-checked="newLinkSource === 'original'"
+                        :aria-selected="newLinkSource === 'original'"
+                        :disabled="busy === 'add'"
+                        title="Full-size originals — about 25 photos a round"
+                        @click="newLinkSource = 'original'">Original</button>
+                <button type="button" role="radio"
+                        :aria-checked="newLinkSource === 'thumb'"
+                        :aria-selected="newLinkSource === 'thumb'"
+                        :disabled="busy === 'add'"
+                        title="Drive's resized copy — same faces and bibs, about 600 photos a round"
+                        @click="newLinkSource = 'thumb'">Resized</button>
+              </div>
+              <button class="primary" type="submit"
+                      :title="owner && !newLinkSource ? 'Pick Original or Resized first' : undefined"
+                      :disabled="busy === 'add' || !newLink.trim() || (owner && !newLinkSource)">
+                <span v-if="busy === 'add'" class="spinner" /> Add link
+              </button>
             </div>
           </div>
-          <button class="primary add-link-go" type="submit"
-                  :title="owner && !newLinkSource ? 'Pick Original or Resized first' : undefined"
-                  :disabled="busy === 'add' || !newLink.trim() || (owner && !newLinkSource)">
-            <span v-if="busy === 'add'" class="spinner" /> Add link
-          </button>
         </form>
         <!-- Only once there is something to decide about: an empty box asking
              for a size before a URL exists is noise. -->
@@ -890,6 +934,48 @@ const when = (iso: string) => new Date(iso).toLocaleString();
             <template v-else>
               Longer numbers are ignored. Set this to match the race and numbers off
               signage stop being read as bibs.
+            </template>
+          </p>
+        </div>
+
+        <!-- The pass that applies the rules above to photos already indexed.
+             Placed with the SETTINGS, not among the Drive-link actions, because
+             that is the question it answers — "make the album match what I just
+             changed". Recheck sits on the link rows and cannot do this: it skips
+             photos that are already indexed, which is every photo on a finished
+             album, so it correctly reports the album complete and reads nothing. -->
+        <div v-if="owner && bibsEnabled" class="field-group" style="margin-top: var(--s-4)">
+          <label>Apply these rules to photos already indexed</label>
+          <div class="btn-row">
+            <button :class="{ danger: rereadConfirm }"
+                    :disabled="busy === 'reread' || !!activeJob || !totals.indexed"
+                    :title="activeJob
+                      ? 'A pass is already running on this album'
+                      : 'Download every photo again and re-read only the bib numbers'"
+                    @click="rereadBibs">
+              <span v-if="busy === 'reread'" class="spinner" />
+              {{ rereadConfirm
+                  ? `Yes — start ${rereadRounds} ${rereadRounds === 1 ? 'round' : 'rounds'}`
+                  : 'Re-read bib numbers' }}
+            </button>
+            <button v-if="rereadConfirm" @click="rereadConfirm = false">Cancel</button>
+          </div>
+          <p class="muted small" style="margin: var(--s-2) 0 0">
+            <template v-if="rereadConfirm">
+              Every photo is downloaded from Drive again — about
+              <strong>{{ rereadRounds }} {{ rereadRounds === 1 ? 'round' : 'rounds' }}</strong>
+              at the current sizes, and rounds do not chain by themselves, so you may
+              need to press Continue between them. Faces, thumbnails and face search
+              are untouched, and bibs you corrected by hand are kept.
+            </template>
+            <template v-else-if="!totals.indexed">
+              Nothing is indexed yet, so there is nothing to re-read.
+            </template>
+            <template v-else>
+              Changing a rule above only affects later passes. This is the pass —
+              it re-reads the numbers on all {{ totals.indexed.toLocaleString() }}
+              photos. <strong>Recheck will not do it</strong>, because it only looks
+              at photos that are not indexed yet.
             </template>
           </p>
         </div>

@@ -1070,20 +1070,6 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--err) 1
    into the middle of the prose and read as a word rather than a button. */
 .notice-action { margin-top: var(--s-3); min-height: var(--tap); }
 
-/* Add-link form. Stacked, not one flex row: on a phone the URL box, the size
-   choice and Add link shared a line, which left the size — a REQUIRED choice —
-   looking like two dead buttons with nothing saying what they governed. */
-.add-link { display: flex; flex-direction: column; gap: var(--s-3); padding: var(--s-3) 0; }
-.add-link-url { width: 100%; }
-.add-link-size { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }
-.add-link-label { font-size: var(--t-sm); color: var(--muted); }
-/* Once a URL is typed the choice is the only thing standing between the operator
-   and a run, so it stops being a quiet label. */
-.add-link-label.req { color: var(--warn); font-weight: 600; }
-.add-link-go { align-self: flex-start; min-height: var(--tap); }
-@media (max-width: 560px) {
-  /* Full width so the primary action is a comfortable target, and so it cannot
-     end up beside the size control on a narrow screen. */
-  .add-link-go { align-self: stretch; justify-content: center; }
-  .add-link-size .segmented { flex: 1 1 auto; }
-}
+/* The add-link form needs no rules of its own: it is a .row with .row-actions,
+   the same as the Drive-link rows it sits under, so it inherits their layout and
+   their narrow-screen behaviour. */

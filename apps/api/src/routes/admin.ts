@@ -751,6 +751,127 @@ adminRoutes.post('/ingest', async (c) => {
  * access to CI logs: every link bound to the event, what each one found versus
  * what actually landed, and the reason for each miss.
  */
+/**
+ * Dispatch one indexing pass. Returns null on success, or the upstream status.
+ *
+ * Extracted because this same fetch was written out verbatim at every site that
+ * starts a pass, and the payload has a history of drifting between them: omitting
+ * image_source silently downgraded continuations of a 'thumb' source back to
+ * full-size downloads, straight into the quota that had ended the previous pass.
+ * One place to add a key means one place to get it wrong.
+ */
+async function dispatchIndex(
+  c: AdminCtx, payload: Record<string, unknown>,
+): Promise<number | null> {
+  const res = await fetch(`https://api.github.com/repos/${c.env.GH_REPO}/dispatches`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${c.env.GH_DISPATCH_TOKEN}`,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'race-lens-worker', 'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ event_type: 'index-event', client_payload: payload }),
+  });
+  if (res.ok) return null;
+  // Body to the log, not to the caller: it names the repository and the API.
+  console.error('index dispatch failed', res.status, (await res.text()).slice(0, 300));
+  return res.status;
+}
+
+/**
+ * Re-read bib numbers for an album that is already indexed.
+ *
+ * The gap this closes: changing a bib rule only affects what LATER passes read,
+ * and Recheck cannot be that pass — it skips every photo with faces_done, which
+ * on a finished album is all of them. So an organizer who set "bibs here are two
+ * digits" pressed Recheck, was correctly told every photo was already indexed,
+ * and got no bibs. The only thing that re-reads is --bibs-only, which until now
+ * had no UI at all and had to be dispatched by hand.
+ *
+ * One pass per live Drive link. They queue rather than run together — the
+ * workflow's concurrency group is per event — so this is safe to fire for a
+ * multi-link album.
+ *
+ * NOT cheap, and the UI says so: --bibs-only forces no_resume, so every photo is
+ * downloaded again, and it deliberately does not chain a continuation, so a quota
+ * stop needs one press of Continue. It leaves faces, thumbnails and the vector
+ * index untouched.
+ */
+adminRoutes.post('/events/:id/bibs/reread', async (c) => {
+  const eventId = c.req.param('id');
+  const event = await ownEvent(c, eventId);
+
+  // A bibs-only pass over an event with no bibs downloads every photo to write
+  // nothing. The runner refuses it too; better to say so before the download.
+  if (event.bibs_enabled === 0) {
+    throw new HttpError(
+      400, 'This event is marked as having no bib numbers, so there is nothing to re-read',
+      'no_bibs');
+  }
+
+  // Refuse while a pass is already moving. Two passes over one event would race
+  // on the same photos' bib rows, and the workflow queues rather than cancels, so
+  // the second would sit behind the first anyway. Stale jobs do not count — same
+  // 20-minute rule the report uses, or a runner GitHub reclaimed would block this
+  // forever.
+  const STALE_MS = 20 * 60 * 1000;
+  const { results: live } = await c.env.DB.prepare(
+    `SELECT id, updated_at FROM jobs
+      WHERE event_id = ? AND status IN ('queued', 'running')`,
+  ).bind(eventId).all<{ id: string; updated_at: string }>();
+  if (live.some((j) => Date.now() - Date.parse(j.updated_at) < STALE_MS)) {
+    throw new HttpError(
+      409, 'A pass is already running on this album. Wait for it to finish, or stop it first.',
+      'job_active');
+  }
+
+  const { results: sources } = await c.env.DB.prepare(
+    `SELECT id, drive_folder_id, image_source,
+            (SELECT COUNT(*) FROM photos p WHERE p.source_id = s.id) AS photos
+       FROM sources s WHERE s.event_id = ? AND s.removed_at IS NULL`,
+  ).bind(eventId).all<{ id: string; drive_folder_id: string; image_source: string | null;
+                        photos: number }>();
+  if (!sources.length) {
+    throw new HttpError(400, 'This event has no Drive links to re-read', 'no_sources');
+  }
+
+  const started: { job_id: string; source_id: string; photos: number; rounds: number }[] = [];
+  const failed: { source_id: string; status: number }[] = [];
+  for (const src of sources) {
+    const jobId = newId();
+    await c.env.DB.prepare(
+      'INSERT INTO jobs (id, event_id, source_id, status, total, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+    ).bind(jobId, eventId, src.id, 'queued', src.photos, nowIso()).run();
+    const status = await dispatchIndex(c, {
+      event_id: eventId, source_id: src.id, folder_id: src.drive_folder_id,
+      job_id: jobId,
+      // Carried explicitly: the workflow defaults to 'original' when absent, which
+      // would turn a ~2-round pass into ~27.
+      image_source: src.image_source ?? 'original',
+      bibs_only: true,
+    });
+    if (status !== null) {
+      await c.env.DB.prepare("UPDATE jobs SET status='failed', error=?, updated_at=? WHERE id=?")
+        .bind(`could not start the bib re-read (${status})`, nowIso(), jobId).run();
+      failed.push({ source_id: src.id, status });
+      continue;
+    }
+    // Same per-round rates the event page quotes for a link's remaining work.
+    const perRound = (src.image_source ?? 'original') === 'thumb' ? 600 : 25;
+    started.push({ job_id: jobId, source_id: src.id, photos: src.photos,
+                   rounds: Math.max(1, Math.ceil(src.photos / perRound)) });
+  }
+
+  // Partial failure is reported rather than thrown: passes that DID start are
+  // running, and a 502 here would read as "nothing happened".
+  if (!started.length) {
+    throw new HttpError(
+      502, `Could not start the bib re-read (${failed[0]?.status}). Try again in a minute.`,
+      'dispatch_failed');
+  }
+  return c.json({ started, failed }, 202);
+});
+
 adminRoutes.get('/events/:id/report', async (c) => {
   await ownEvent(c, c.req.param('id'));
   const eventId = c.req.param('id');
@@ -1058,26 +1179,15 @@ adminRoutes.post('/sources/:id/reindex', async (c) => {
     'INSERT INTO jobs (id, event_id, source_id, status, updated_at) VALUES (?, ?, ?, ?, ?)',
   ).bind(jobId, src.event_id, sourceId, 'queued', nowIso()).run();
 
-  const res = await fetch(`https://api.github.com/repos/${c.env.GH_REPO}/dispatches`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${c.env.GH_DISPATCH_TOKEN}`,
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'race-lens-worker', 'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      event_type: 'index-event',
-      client_payload: {
-        event_id: src.event_id, source_id: sourceId,
-        folder_id: src.drive_folder_id, job_id: jobId,
-        image_source: src.image_source ?? 'original',
-      },
-    }),
+  const status = await dispatchIndex(c, {
+    event_id: src.event_id, source_id: sourceId,
+    folder_id: src.drive_folder_id, job_id: jobId,
+    image_source: src.image_source ?? 'original',
   });
-  if (!res.ok) {
+  if (status !== null) {
     await c.env.DB.prepare("UPDATE jobs SET status='failed', error=?, updated_at=? WHERE id=?")
-      .bind(`could not start indexing (${res.status})`, nowIso(), jobId).run();
-    throw new HttpError(502, `Could not start indexing (${res.status}). Try again in a minute.`, 'dispatch_failed');
+      .bind(`could not start indexing (${status})`, nowIso(), jobId).run();
+    throw new HttpError(502, `Could not start indexing (${status}). Try again in a minute.`, 'dispatch_failed');
   }
   return c.json({ job_id: jobId }, 202);
 });

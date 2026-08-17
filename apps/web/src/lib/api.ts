@@ -335,6 +335,24 @@ export const api = {
       req<{ job_id: string }>(`/api/admin/sources/${sourceId}/reindex`, { method: 'POST' }),
 
     /**
+     * Re-read bib numbers across the whole album, applying the current rules to
+     * photos already indexed.
+     *
+     * The only thing that does this. Recheck cannot: it skips photos that are
+     * already indexed, which on a finished album is all of them — so an organizer
+     * who changes a bib rule and presses Recheck is correctly told everything is
+     * indexed and gets no new bibs.
+     *
+     * One pass per live Drive link, queued behind each other. Re-downloads every
+     * photo and does not auto-continue, so the caller must say what it costs.
+     */
+    rereadBibs: (eventId: string) =>
+      req<{
+        started: { job_id: string; source_id: string; photos: number; rounds: number }[];
+        failed: { source_id: string; status: number }[];
+      }>(`/api/admin/events/${eventId}/bibs/reread`, { method: 'POST' }),
+
+    /**
      * Ask a pass to stop. Cooperative: a running pass ends at its next batch
      * boundary, so `status` comes back 'stopping' rather than 'stopped' — the
      * runner writes the final word. A pass that had not started yet stops
