@@ -1,0 +1,31 @@
+-- Adds events.bib_min_digits: the shortest number that counts as a bib here.
+--
+-- Apply with:
+--   env -u CLOUDFLARE_API_TOKEN npx wrangler d1 execute race-lens --remote \
+--     --config apps/api/wrangler.toml --file=./migrations/009_events_bib_min_digits.sql
+--
+-- (The token in .env.deploy has no D1 permission; the OAuth login does.)
+--
+-- WHY THIS IS PER EVENT AND NOT A CONSTANT.
+--
+-- bibs.py hard-coded ^\d{3,5}$, with a good reason recorded beside it: at the
+-- Angkor album bibs are 3-4 digits and zero-padded, so a 1-2 digit token is by
+-- definition a PARTIAL read of a longer number, and an invented bib puts a
+-- stranger's photo in a runner's results.
+--
+-- That reasoning is correct there and wrong at SheRuns, where the printed bib
+-- really is two digits. Measured over 40 SheRuns originals / 199 faces:
+--
+--   min 3 digits (shipped)   0 of 199 faces got a bib   -- not degraded: zero
+--   min 2 digits            67 of 199 faces got a bib
+--
+-- The whole album's bib search was empty because of this line. The 2-digit reads
+-- are genuine, not noise: median confidence 1.00 and median width 2.44% of the
+-- frame, inside the 2.3-3.2% band bibs.py itself records for real bibs. Of 70
+-- such reads only 2 would have failed on confidence and 3 on width, so the gates
+-- that actually reject junk are doing their job without help from the length
+-- rule.
+--
+-- DEFAULT 3, so Angkor and every other existing event keep the behaviour they
+-- were tuned for. Only an event told otherwise changes.
+ALTER TABLE events ADD COLUMN bib_min_digits INTEGER NOT NULL DEFAULT 3;

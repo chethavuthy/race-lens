@@ -25,7 +25,7 @@ import uuid
 import numpy as np
 from PIL import Image, ImageOps
 
-from .bibs import BibReader
+from .bibs import DEFAULT_MIN_DIGITS, MAX_DIGITS, BibReader
 from .config import Config
 from .drive import DriveClient, DriveImage, QuotaExceeded
 from .faces import FaceEngine, quantize
@@ -159,7 +159,12 @@ def run(args: argparse.Namespace) -> int:
     # them is then pure cost: OCR is the most expensive stage per photo, and the
     # only thing it can produce is false positives off race signage and kit
     # numbers. Skipping it also avoids loading the OCR model entirely.
-    read_bibs = bool(up.event_config(args.event_id).get("bibs_enabled", True))
+    event_cfg = up.event_config(args.event_id)
+    read_bibs = bool(event_cfg.get("bibs_enabled", True))
+    # Shortest number that counts as a bib at this race. BibReader clamps it, so
+    # a missing or nonsense value degrades to the default rather than to a
+    # pattern that matches every number in the frame.
+    bib_min_digits = event_cfg.get("bib_min_digits") or DEFAULT_MIN_DIGITS
     if args.bibs_only and not read_bibs:
         # A bibs-only pass over an event with no bibs would download and decode
         # every photo to write nothing at all.
@@ -174,7 +179,17 @@ def run(args: argparse.Namespace) -> int:
              "was skipped. Face search is unaffected.")
 
     engine = FaceEngine(det_size=cfg.det_size)
-    reader = BibReader() if read_bibs else None
+    reader = BibReader(min_digits=bib_min_digits) if read_bibs else None
+    if reader:
+        # Logged and journalled: this single number decides whether an album's bib
+        # search works at all, and when it is wrong the pipeline's only symptom is
+        # an empty result nobody can explain. SheRuns read 0 bibs across 199 faces
+        # for exactly this reason.
+        log.info("Bib numbers: %d-%d digits", reader.min_digits, MAX_DIGITS)
+        note("info", "bib_digits",
+             f"Reading bib numbers of {reader.min_digits} to {MAX_DIGITS} digits. "
+             "Numbers shorter than that are ignored — change this on the event if "
+             "this race prints shorter bibs.")
 
     embeddings: list[np.ndarray] = []
     face_rows: list[dict] = []

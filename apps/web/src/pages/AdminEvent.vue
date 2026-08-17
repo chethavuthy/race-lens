@@ -314,6 +314,29 @@ const setBibs = (on: boolean) =>
         ? 'Bib numbers on — the next round will read bibs. Run the album again to read them for photos already done.'
         : 'Bib numbers off — bib search is hidden and later rounds skip reading numbers. Existing bibs are kept.');
 
+/**
+ * Shortest number that counts as a bib at this race, as printed.
+ *
+ * Defaults to 3 while the event loads and for any event that predates the
+ * setting — the value bibs.py hard-coded, which is what Angkor was tuned for.
+ */
+const bibMinDigits = computed(() => event.value?.bib_min_digits ?? 3);
+
+/**
+ * Operator only, and deliberately not offered to photographers: it is the one
+ * bib setting that can silently empty an album's search in either direction.
+ * Too high discards every bib at a race printing shorter ones — SheRuns read 0
+ * bibs across 199 faces under a floor of 3. Too low lets a partial read of a
+ * longer number in, where it is indistinguishable from a real short bib.
+ */
+const setBibDigits = (n: number) =>
+  run('bibdigits', () => api.admin.setBibMinDigits(props.id, n),
+      // Says plainly that this does not fix what is already indexed. The tokens
+      // an earlier pass rejected were never stored, so there is nothing to
+      // reinterpret — only re-reading the photos can recover them.
+      `Now reading bibs of ${n} digits or more. Photos already indexed keep the `
+      + 'numbers they have — run the album again to re-read them.');
+
 function addLink() {
   const url = newLink.value.trim();
   if (!url) return;
@@ -728,6 +751,37 @@ const when = (iso: string) => new Date(iso).toLocaleString();
               Bib search is hidden and later passes skip OCR entirely — faster, and no numbers
               invented from signage. Face search is unaffected. Bibs already read are kept, so
               turning this back on restores them without a re-index.
+            </template>
+          </p>
+        </div>
+
+        <!-- Only where it can matter: an event with no bibs has no shortest bib,
+             and a photographer cannot act on this even if they knew the answer.
+             Sits under the bibs toggle because it is meaningless without it. -->
+        <div v-if="owner && bibsEnabled" class="field-group" style="margin-top: var(--s-4)">
+          <label>Shortest bib number</label>
+          <div class="segmented" role="radiogroup" aria-label="Shortest bib number at this race">
+            <button v-for="n in [2, 3, 4]" :key="n" role="radio"
+                    :aria-checked="bibMinDigits === n" :aria-selected="bibMinDigits === n"
+                    :disabled="busy === 'bibdigits' || !!activeJob"
+                    :title="n === 2
+                      ? 'Bibs printed with two digits, like 46'
+                      : n === 3
+                        ? 'Bibs printed with three or four digits, like 0056 — the usual case'
+                        : 'Bibs printed with four or five digits'"
+                    @click="setBibDigits(n)">{{ n }} digits</button>
+          </div>
+          <p class="muted small" style="margin: var(--s-2) 0 0">
+            How many digits the bibs at this race are printed with, at the
+            shortest. Anything shorter is ignored, because a short number is
+            usually half of a longer one misread — and a bib invented that way
+            puts a stranger's photo in someone's results.
+            <template v-if="bibMinDigits > 2">
+              If this race hands out two-digit bibs, this is why none are found.
+            </template>
+            <template v-else>
+              Two-digit bibs are read. Numbers on signage and kit are more likely
+              to slip through at this setting, so check a few photos.
             </template>
           </p>
         </div>

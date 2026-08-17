@@ -16,6 +16,16 @@ CREATE TABLE IF NOT EXISTS events (
   -- Turns off bib OCR during indexing and bib search on the event page; face
   -- search is unaffected. Defaults to 1 so existing events keep their behaviour.
   bibs_enabled INTEGER NOT NULL DEFAULT 1,
+  -- Shortest number that counts as a bib at THIS race, as printed.
+  --
+  -- Not a constant, because the right answer differs per event and getting it
+  -- wrong is silent either way. Too high and every bib is discarded — SheRuns
+  -- read 0 bibs across 199 faces under a floor of 3, because its bibs are two
+  -- digits. Too low and a partial read of a longer number ("45" off "0456")
+  -- enters the index indistinguishable from a real short bib.
+  --
+  -- Defaults to 3, the value bibs.py hard-coded and Angkor was tuned for.
+  bib_min_digits INTEGER NOT NULL DEFAULT 3,
   -- The Access identity that created this event. Every admin route is scoped to
   -- it, so a photographer let through the door reaches their own albums and
   -- nothing else. NULL means "the operator's" — every event that predates

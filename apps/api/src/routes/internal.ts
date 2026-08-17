@@ -374,10 +374,18 @@ internalRoutes.get('/events/:id/indexed', async (c) => {
  * cannot be forgotten by a caller that does not exist.
  */
 internalRoutes.get('/events/:id/config', async (c) => {
-  const row = await c.env.DB.prepare('SELECT bibs_enabled FROM events WHERE id = ?')
-    .bind(c.req.param('id')).first<{ bibs_enabled: number }>();
+  const row = await c.env.DB
+    .prepare('SELECT bibs_enabled, bib_min_digits FROM events WHERE id = ?')
+    .bind(c.req.param('id')).first<{ bibs_enabled: number; bib_min_digits: number }>();
   if (!row) throw new HttpError(404, 'Event not found', 'no_event');
-  return c.json({ bibs_enabled: row.bibs_enabled !== 0 });
+  // bib_min_digits travels with bibs_enabled because the runner reads both in
+  // one call, and event_config() falls back to "bibs on" when that call fails —
+  // so a missing value here must land on the safe default rather than on 0,
+  // which would compile to a pattern matching every number on the frame.
+  return c.json({
+    bibs_enabled: row.bibs_enabled !== 0,
+    bib_min_digits: row.bib_min_digits ?? 3,
+  });
 });
 
 internalRoutes.post('/events/:id/bibs', async (c) => {

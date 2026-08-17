@@ -444,10 +444,22 @@ adminRoutes.patch('/events/:id', async (c) => {
   await ownEvent(c, id);
   const body = await c.req.json<{
     name?: string; event_date?: string; status?: string; bibs_enabled?: boolean;
+    bib_min_digits?: number;
   }>();
   const allowed = ['draft', 'indexing', 'ready', 'partial'];
   if (body.status && !allowed.includes(body.status)) {
     throw new HttpError(400, 'Invalid status', 'bad_status');
+  }
+  // Validated here rather than clamped, unlike the indexer's own guard: a value
+  // out of range from this route is an operator mistake worth reporting, whereas
+  // the indexer is defending against whatever reaches it and must never stop a
+  // pass over it. 1 is deliberately excluded — a single digit is a partial read
+  // of almost anything, and no race here prints one.
+  if (body.bib_min_digits !== undefined
+      && !(Number.isInteger(body.bib_min_digits)
+           && body.bib_min_digits >= 2 && body.bib_min_digits <= 5)) {
+    throw new HttpError(
+      400, 'Shortest bib must be a whole number from 2 to 5', 'bad_bib_min_digits');
   }
   // Turning bibs off leaves any bibs already read in place rather than deleting
   // them: the flag hides them and stops future passes reading more, so flipping
@@ -456,13 +468,18 @@ adminRoutes.patch('/events/:id', async (c) => {
     `UPDATE events SET name = COALESCE(?, name),
                        event_date = COALESCE(?, event_date),
                        status = COALESCE(?, status),
-                       bibs_enabled = COALESCE(?, bibs_enabled)
+                       bibs_enabled = COALESCE(?, bibs_enabled),
+                       bib_min_digits = COALESCE(?, bib_min_digits)
       WHERE id = ?`,
   ).bind(body.name ?? null, body.event_date ?? null, body.status ?? null,
-         body.bibs_enabled === undefined ? null : (body.bibs_enabled ? 1 : 0), id).run();
+         body.bibs_enabled === undefined ? null : (body.bibs_enabled ? 1 : 0),
+         body.bib_min_digits ?? null, id).run();
   const row = await c.env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(id).first<EventRow>();
   if (!row) throw new HttpError(404, 'Event not found', 'no_event');
-  return c.json({ event: publicEvent(c.env, row) });
+  // bib_min_digits is not in publicEvent — runners have no use for it — so the
+  // admin shapes carry it explicitly. Returned here as well as from GET so the
+  // page reflects a save without re-fetching.
+  return c.json({ event: { ...publicEvent(c.env, row), bib_min_digits: row.bib_min_digits } });
 });
 
 const BANNER_MAX_BYTES = 8 * 1024 * 1024;
@@ -982,7 +999,11 @@ adminRoutes.post('/sources/:id/reindex', async (c) => {
 
 adminRoutes.get('/events/:id', async (c) => {
   const row = await ownEvent(c, c.req.param('id'));
-  return c.json({ event: { ...publicEvent(c.env, row), created_at: row.created_at } });
+  return c.json({ event: {
+    ...publicEvent(c.env, row),
+    created_at: row.created_at,
+    bib_min_digits: row.bib_min_digits,
+  } });
 });
 
 /**

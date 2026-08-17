@@ -9,6 +9,11 @@ export interface EventSummary {
   face_count: number;
   /** False for events that hand out no bibs; bib search is unavailable. */
   bibs_enabled: boolean;
+  /**
+   * Shortest number that counts as a bib here, as printed. Admin shapes only —
+   * runners have no use for it, so it is absent from the public event payload.
+   */
+  bib_min_digits?: number;
   created_at?: string;
   /**
    * Who created it. Only sent to the operator, and null on events that predate
@@ -224,6 +229,20 @@ export const api = {
     setBibsEnabled: (eventId: string, bibsEnabled: boolean) =>
       req<{ event: EventSummary }>(`/api/admin/events/${eventId}`, {
         ...json({ bibs_enabled: bibsEnabled }),
+        method: 'PATCH',
+      }),
+
+    /**
+     * Shortest number that counts as a bib at this race, as printed. 2 to 5;
+     * the API rejects anything outside that.
+     *
+     * Applies to what LATER passes read — it cannot reinterpret numbers already
+     * discarded, because the rejected tokens were never stored. Recovering them
+     * needs a bibs-only pass.
+     */
+    setBibMinDigits: (eventId: string, digits: number) =>
+      req<{ event: EventSummary }>(`/api/admin/events/${eventId}`, {
+        ...json({ bib_min_digits: digits }),
         method: 'PATCH',
       }),
 

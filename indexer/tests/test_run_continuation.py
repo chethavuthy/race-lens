@@ -65,6 +65,12 @@ def _install_cv_stubs() -> None:
     bibs = types.ModuleType("indexer.bibs")
 
     class BibReader:
+        # min_digits mirrors the real signature: main.py passes the event's
+        # setting, and a stub that refused it would fail every test for a reason
+        # unrelated to what they cover.
+        def __init__(self, min_digits=3):
+            self.min_digits = min_digits
+
         def read_torso(self, _bgr, _bbox):
             return None
 
@@ -72,6 +78,8 @@ def _install_cv_stubs() -> None:
             return []
 
     bibs.BibReader = BibReader
+    bibs.DEFAULT_MIN_DIGITS = 3
+    bibs.MAX_DIGITS = 5
     sys.modules["indexer.bibs"] = bibs
 
 

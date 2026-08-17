@@ -35,11 +35,39 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-# At least 3 digits AS PRINTED. Real bibs at this race are 3-4 digits, usually
-# zero-padded ("0056"). Accepting 1-2 digit tokens let partial reads of a longer
-# number ("5", "56", "60") into the index, where they are indistinguishable from
-# a genuine short bib and pollute every suffix comparison.
-BIB_RE = re.compile(r"^\d{3,5}$")
+# Shortest number that counts as a bib, AS PRINTED. Per event, not global —
+# events.bib_min_digits, passed to BibReader.
+#
+# 3 was hard-coded here, for a reason that holds at the album it was tuned on:
+# Angkor bibs are 3-4 digits and zero-padded ("0056"), so a 1-2 digit token is by
+# definition a PARTIAL read of a longer number, indistinguishable from a genuine
+# short bib and poison to every suffix comparison.
+#
+# It is wrong wherever the printed bib is shorter than that, and wrong silently.
+# Measured over 40 SheRuns originals / 199 faces: a floor of 3 accepted 0 bibs —
+# not fewer, none — because every bib at that race is two digits. The album's bib
+# search was empty and nothing in the pipeline said why.
+#
+# The upper bound stays at 5 for every event: no race here prints longer, and it
+# is what keeps timestamps and phone numbers out.
+DEFAULT_MIN_DIGITS = 3
+MAX_DIGITS = 5
+
+
+def bib_pattern(min_digits: int) -> re.Pattern[str]:
+    """Clamped rather than trusted: this value arrives from the database via the
+    Worker, and a 0 or a negative would compile to a pattern that accepts every
+    integer on the frame — jersey numbers, lap counts, sponsor phone numbers."""
+    low = min(max(int(min_digits or DEFAULT_MIN_DIGITS), 1), MAX_DIGITS)
+    # [0-9] rather than \d, which in Python also matches Unicode decimal digits —
+    # "١٢" satisfied ^\d{2,5}$. The Worker normalizes a search with JavaScript's
+    # \D, which is ASCII-only, so such a token would be stored as a bib that no
+    # runner could ever match: junk in the index and a photo attached to nobody.
+    return re.compile(rf"^[0-9]{{{low},{MAX_DIGITS}}}$")
+
+
+# Kept for callers that have no event context — benchmark.py, and any ad-hoc use.
+BIB_RE = bib_pattern(DEFAULT_MIN_DIGITS)
 # 0.6 admitted reads the engine itself was unsure of. Every correct bib observed
 # on real photos scored 0.88-1.00, so this costs nothing and drops guesses.
 MIN_CONF = 0.7
@@ -137,9 +165,13 @@ def _tokens_from_paddle(result) -> list[tuple[str, float]]:
 
 
 class BibReader:
-    def __init__(self) -> None:
+    def __init__(self, min_digits: int = DEFAULT_MIN_DIGITS) -> None:
         self.engine = None
         self.kind = None
+        # Compiled once per run rather than consulted per token: _read runs on
+        # every torso crop and every tile of every photo.
+        self.min_digits = min_digits
+        self.bib_re = bib_pattern(min_digits)
 
         try:
             from rapidocr_onnxruntime import RapidOCR
@@ -192,7 +224,7 @@ class BibReader:
         hits: list[BibHit] = []
         for text, conf in pairs:
             token = text.strip().replace(" ", "")
-            if conf >= MIN_CONF and BIB_RE.match(token):
+            if conf >= MIN_CONF and self.bib_re.match(token):
                 # Store leading zeros stripped. The Worker normalizes the query
                 # the same way, so "0123" and "123" both land here.
                 hits.append(BibHit(bib=token.lstrip("0") or "0", conf=conf, raw=token))

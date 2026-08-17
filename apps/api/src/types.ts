@@ -51,6 +51,12 @@ export interface EventRow {
   /** 0 for events with no bibs at all; turns off bib OCR and bib search. */
   bibs_enabled: number;
   /**
+   * Shortest number that counts as a bib here, as printed. 3 by default — the
+   * value bibs.py hard-coded — because too low admits partial reads of longer
+   * numbers, and too high discards every bib at a race that prints short ones.
+   */
+  bib_min_digits: number;
+  /**
    * The Access identity that created it. NULL on every event that predates
    * ownership, which means the operator's — see migrations/005.
    */
