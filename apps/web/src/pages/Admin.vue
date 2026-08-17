@@ -803,8 +803,12 @@ async function publish(ev: EventSummary) {
             <span v-if="bannerBusy === e.id"> · <span class="spinner" /> uploading banner…</span>
           </div>
         </div>
-        <img v-if="e.banner_url" class="banner-thumb" :src="e.banner_url" alt="" />
-        <div v-else class="banner-thumb" />
+        <div class="banner-box banner-sm">
+          <template v-if="e.banner_url">
+            <img class="banner-fill" :src="e.banner_url" alt="" aria-hidden="true" loading="lazy" />
+            <img class="banner-img" :src="e.banner_url" alt="" loading="lazy" />
+          </template>
+        </div>
         <div class="row-actions">
           <RouterLink :to="`/admin/e/${e.id}`" class="btn file-btn">Open</RouterLink>
           <label :for="`bn-${e.id}`" class="btn file-btn">

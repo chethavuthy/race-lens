@@ -265,21 +265,38 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
    real image, and fill the bars with a blurred, overscanned copy of itself.
    The gap reads as an extension of the artwork rather than a hole, and the
    card keeps its 16:9 footprint. */
-.event-card .banner {
+/* One treatment, every surface a banner appears on.
+ *
+ * The admin previews used object-fit: cover, which crops — the one thing the note
+ * above says we cannot do to a poster. So an operator checking their upload saw a
+ * different, cropped picture from the one runners get, which is precisely the
+ * comparison that preview exists to support. Same class now on all three. */
+.banner-box {
   position: relative; aspect-ratio: 16 / 9; width: 100%; display: block;
   overflow: hidden; background: var(--surface-2);
+  border-radius: var(--radius-sm);
 }
-.event-card .banner-fill,
-.event-card .banner-img {
+.banner-box .banner-fill,
+.banner-box .banner-img {
   position: absolute; inset: 0; width: 100%; height: 100%; display: block;
 }
-.event-card .banner-fill {
+.banner-box .banner-fill {
   object-fit: cover;
   /* Overscan so the blur samples image instead of dragging in the edge. */
   transform: scale(1.2);
   filter: blur(28px) saturate(1.35) brightness(0.5);
 }
-.event-card .banner-img { object-fit: contain; }
+.banner-box .banner-img { object-fit: contain; }
+/* The card already clips to its own radius, so a second one shows as a seam. */
+.event-card .banner-box { border-radius: 0; }
+/* Admin sizes. Width only — the aspect ratio and fit come from .banner-box.
+   Named banner-* rather than reusing `preview`/`thumb`: `.thumb` already exists
+   for photo thumbnails at 3:2 with object-fit cover, so `class="banner-box thumb"`
+   silently inherited it and the banner came out 96x64 instead of 16:9. */
+.banner-box.banner-lg { width: 260px; max-width: 100%; margin-top: var(--s-3); }
+/* align-self, because this sits in a flex row whose default `stretch` would
+   override aspect-ratio and make the box a different shape from the listing. */
+.banner-box.banner-sm { width: 96px; flex: none; align-self: flex-start; }
 .event-card .body { padding: var(--s-3) var(--s-4) var(--s-4); }
 .event-card .name { font-weight: 600; margin-bottom: 2px; }
 
@@ -468,15 +485,8 @@ label { display: block; font-size: var(--t-sm); color: var(--muted); margin: 0 0
 .state.err  { color: var(--err); }
 .state.idle { color: var(--text); }
 
-.banner-preview {
-  width: 240px; aspect-ratio: 16 / 9; object-fit: cover; display: block;
-  border-radius: var(--radius-sm); background: var(--surface-2);
-  margin-top: var(--s-3);
-}
-.banner-thumb {
-  width: 96px; aspect-ratio: 16 / 9; object-fit: cover; display: block;
-  border-radius: var(--radius-sm); background: var(--surface-2); flex: none;
-}
+/* .banner-preview / .banner-thumb are gone: both are .banner-box variants now,
+   so there is one definition of how a banner is presented. */
 
 /* A file input styled as a button: the native control cannot be restyled, so
    the label is the affordance and the input is visually hidden but focusable. */
@@ -1053,3 +1063,27 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--err) 1
    each image keeps its natural height so the face boxes, which are positioned as
    percentages of the tile, land on the faces. */
 .masonry figcaption { margin-top: var(--s-1); }
+
+
+/* A control that belongs to a notice but not to its sentence.
+   The Stop button was inline inside the banner's <p>, so on a phone it wrapped
+   into the middle of the prose and read as a word rather than a button. */
+.notice-action { margin-top: var(--s-3); min-height: var(--tap); }
+
+/* Add-link form. Stacked, not one flex row: on a phone the URL box, the size
+   choice and Add link shared a line, which left the size — a REQUIRED choice —
+   looking like two dead buttons with nothing saying what they governed. */
+.add-link { display: flex; flex-direction: column; gap: var(--s-3); padding: var(--s-3) 0; }
+.add-link-url { width: 100%; }
+.add-link-size { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }
+.add-link-label { font-size: var(--t-sm); color: var(--muted); }
+/* Once a URL is typed the choice is the only thing standing between the operator
+   and a run, so it stops being a quiet label. */
+.add-link-label.req { color: var(--warn); font-weight: 600; }
+.add-link-go { align-self: flex-start; min-height: var(--tap); }
+@media (max-width: 560px) {
+  /* Full width so the primary action is a comfortable target, and so it cannot
+     end up beside the size control on a narrow screen. */
+  .add-link-go { align-self: stretch; justify-content: center; }
+  .add-link-size .segmented { flex: 1 1 auto; }
+}

@@ -444,24 +444,30 @@ const when = (iso: string) => new Date(iso).toLocaleString();
              the PASS, not the folder — and this banner is the only place the
              pass itself is represented. Operator only: a photographer cannot
              start one either. -->
-        <p v-if="activeJob" class="notice" style="margin-top: var(--s-4)">
-          <template v-if="stopping">
-            <span class="spinner" /> Stopping after the batch in progress —
-            {{ activeJob.done }} / {{ activeJob.total }} done so far. Everything already
-            indexed stays live, and <strong>Continue</strong> picks up from here.
-          </template>
-          <template v-else>
-            <span class="spinner" /> Indexing now — {{ activeJob.done }} / {{ activeJob.total }}.
-            A big album is done in rounds, and it carries on by itself. You can close this page.
-          </template>
-          <button v-if="owner" style="margin-left: var(--s-3)"
+        <!-- A div, not a p: the button was INSIDE the paragraph, so on a phone it
+             wrapped into the middle of the sentence and landed after "page." as
+             though it were a word. A control never belongs in running prose. -->
+        <div v-if="activeJob" class="notice" style="margin-top: var(--s-4)">
+          <p style="margin: 0">
+            <template v-if="stopping">
+              <span class="spinner" /> Stopping after the batch in progress —
+              {{ activeJob.done }} / {{ activeJob.total }} done so far. Everything already
+              indexed stays live, and <strong>Continue</strong> picks up from here.
+            </template>
+            <template v-else>
+              <span class="spinner" /> Indexing now — {{ activeJob.done }} / {{ activeJob.total }}.
+              A big album is done in rounds, and it carries on by itself. You can close
+              this page.
+            </template>
+          </p>
+          <button v-if="owner" class="notice-action"
                   :disabled="busy === 'stop' || stopping"
                   title="Finish the batch in progress, then stop. Nothing indexed is lost."
                   @click="stopJob">
             <span v-if="busy === 'stop'" class="spinner" />
             {{ stopping ? 'Stopping…' : 'Stop' }}
           </button>
-        </p>
+        </div>
         <p v-else-if="stalledJob" class="notice warn" style="margin-top: var(--s-4)">
           A round stopped early. Nothing is lost — press <strong>Continue</strong> to pick up
           where it left off.
@@ -628,19 +634,35 @@ const when = (iso: string) => new Date(iso).toLocaleString();
              — so by the time it appears, the download it governs is already
              under way and the setting cannot be changed without a re-index.
              type="button" on both: a bare <button> inside a <form> submits. -->
-        <form class="row" style="border-bottom: 0" @submit.prevent="addLink">
-          <input v-model="newLink" class="row-main" placeholder="Add another Drive folder URL…" />
-          <div v-if="owner" class="segmented tiny" role="group" aria-label="Image size to download">
-            <button type="button" :aria-selected="newLinkSource === 'original'"
-                    :disabled="busy === 'add'"
-                    title="Download the full-size original from Drive"
-                    @click="newLinkSource = 'original'">Original</button>
-            <button type="button" :aria-selected="newLinkSource === 'thumb'"
-                    :disabled="busy === 'add'"
-                    title="Download Drive's resized copy — same faces and bibs, many more photos per round"
-                    @click="newLinkSource = 'thumb'">Resized</button>
+        <!-- Stacked rather than one flex row. On a phone the URL box, an unlabelled
+             Original/Resized pair and Add link were sharing a line, so the size
+             choice read as two dead buttons with nothing saying what they governed
+             — and it is a REQUIRED choice, which makes that the worst thing to
+             leave ambiguous. -->
+        <form class="add-link" @submit.prevent="addLink">
+          <input v-model="newLink" class="add-link-url"
+                 placeholder="Add another Drive folder URL…" />
+          <div v-if="owner" class="add-link-size">
+            <span :class="['add-link-label', { req: newLink.trim() && !newLinkSource }]">
+              Download at
+            </span>
+            <div class="segmented tiny" role="radiogroup"
+                 aria-label="Image size to download for this link">
+              <button type="button" role="radio"
+                      :aria-checked="newLinkSource === 'original'"
+                      :aria-selected="newLinkSource === 'original'"
+                      :disabled="busy === 'add'"
+                      title="Full-size originals — about 25 photos a round"
+                      @click="newLinkSource = 'original'">Original</button>
+              <button type="button" role="radio"
+                      :aria-checked="newLinkSource === 'thumb'"
+                      :aria-selected="newLinkSource === 'thumb'"
+                      :disabled="busy === 'add'"
+                      title="Drive's resized copy — same faces and bibs, about 600 photos a round"
+                      @click="newLinkSource = 'thumb'">Resized</button>
+            </div>
           </div>
-          <button class="primary" type="submit"
+          <button class="primary add-link-go" type="submit"
                   :title="owner && !newLinkSource ? 'Pick Original or Resized first' : undefined"
                   :disabled="busy === 'add' || !newLink.trim() || (owner && !newLinkSource)">
             <span v-if="busy === 'add'" class="spinner" /> Add link
@@ -650,9 +672,9 @@ const when = (iso: string) => new Date(iso).toLocaleString();
              for a size before a URL exists is noise. -->
         <p v-if="owner && newLink.trim() && !newLinkSource" class="muted small"
            style="margin: 0 0 var(--s-3)">
-          Pick a size first. Resized moves about 600 photos a round against
-          roughly 25 for originals, for the same faces and bibs — this cannot be
-          changed once indexing starts.
+          Pick a size first — it cannot be changed once indexing starts. Resized
+          moves about 600 photos a round against roughly 25 for originals, for the
+          same faces and bibs.
         </p>
       </div>
 
@@ -765,7 +787,13 @@ const when = (iso: string) => new Date(iso).toLocaleString();
           </label>
           <input id="ev-banner" type="file" accept="image/*" class="sr-only" @change="onBanner" />
         </div>
-        <img v-if="event.banner_url" class="banner-preview" :src="event.banner_url" alt="" />
+        <!-- Same presentation as the public listing, so this preview answers
+             "how will runners see it" rather than showing a cropped variant
+             nobody else gets. -->
+        <div v-if="event.banner_url" class="banner-box banner-lg">
+          <img class="banner-fill" :src="event.banner_url" alt="" aria-hidden="true" />
+          <img class="banner-img" :src="event.banner_url" alt="Event banner" />
+        </div>
         <p class="muted small">
           Unpublishing hides the event from runners. Photos and search data are kept.
         </p>
