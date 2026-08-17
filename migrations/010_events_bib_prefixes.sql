@@ -1,0 +1,26 @@
+-- Adds events.bib_prefixes: the category letters this race prints on bibs.
+--
+-- Apply with:
+--   env -u CLOUDFLARE_API_TOKEN npx wrangler d1 execute race-lens --remote \
+--     --config apps/api/wrangler.toml --file=./migrations/010_events_bib_prefixes.sql
+--
+-- Comma-separated, uppercase, no separator characters: 'F,M'. NULL or empty
+-- means digits only, which is every event that exists today — so nothing changes
+-- for them.
+--
+-- WHY A WHITELIST AND NOT "ANY LETTER".
+--
+-- Some races number by category: 0001 is a marathon runner, F-0001 is a 10k
+-- woman, M-0001 is a 10k man. Three different people who share their digits.
+-- Until now the last two were invisible: RapidOCR reads "F-0001" correctly, at
+-- confidence 1.00, and bibs.py then discarded it for containing a letter.
+--
+-- Accepting any letter+digits instead would turn kit text, sponsor boards and
+-- distance markers into bibs — "XL-500" is a shirt size. The race knows its own
+-- categories, so it says them, and everything else stays rejected.
+--
+-- THE PREFIX IS IDENTITY, NOT DECORATION. It must survive normalization: strip
+-- the letter and F-0001, M-0001 and 0001 collapse into one bib, which puts three
+-- runners' photos in each other's results. See CANONICAL BIB FORM in
+-- indexer/bibs.py, mirrored in apps/api/src/bib.ts.
+ALTER TABLE events ADD COLUMN bib_prefixes TEXT;

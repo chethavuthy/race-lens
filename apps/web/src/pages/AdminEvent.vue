@@ -322,6 +322,14 @@ const setBibs = (on: boolean) =>
  */
 const bibMinDigits = computed(() => event.value?.bib_min_digits ?? 3);
 
+/** Per-option wording. 5 is exactly five, because the ceiling is 5 everywhere. */
+const BIB_DIGIT_HINTS: Record<number, string> = {
+  2: 'Bibs as short as two digits, like 46',
+  3: 'Bibs as short as three digits, like 056 — the usual case',
+  4: 'Bibs as short as four digits, like 0092',
+  5: 'Only five-digit bibs, like 10092',
+};
+
 /**
  * Operator only, and deliberately not offered to photographers: it is the one
  * bib setting that can silently empty an album's search in either direction.
@@ -329,13 +337,42 @@ const bibMinDigits = computed(() => event.value?.bib_min_digits ?? 3);
  * bibs across 199 faces under a floor of 3. Too low lets a partial read of a
  * longer number in, where it is indistinguishable from a real short bib.
  */
+const bibMaxDigits = computed(() => event.value?.bib_max_digits ?? 5);
+const bibPrefixes = computed(() => event.value?.bib_prefixes ?? '');
+const prefixInput = ref<string | null>(null);
+
+/**
+ * Every message here ends the same way, and it is the important half.
+ *
+ * A changed rule applies only to what LATER passes read. Tokens an earlier pass
+ * rejected were never stored, so there is nothing to reinterpret — and Recheck
+ * cannot do it either, since it skips photos already indexed. Only a bibs-only
+ * pass re-reads them. Saying "run the album again" was not enough: it sent an
+ * operator to Recheck, which correctly reported everything already indexed and
+ * read no bibs at all.
+ */
+const REREAD_NOTE = ' Photos already indexed keep the numbers they have — Recheck '
+  + 'will not change them, because it only looks at photos that are not indexed yet. '
+  + 'Ask for a bib re-read to apply this to the whole album.';
+
 const setBibDigits = (n: number) =>
-  run('bibdigits', () => api.admin.setBibMinDigits(props.id, n),
-      // Says plainly that this does not fix what is already indexed. The tokens
-      // an earlier pass rejected were never stored, so there is nothing to
-      // reinterpret — only re-reading the photos can recover them.
-      `Now reading bibs of ${n} digits or more. Photos already indexed keep the `
-      + 'numbers they have — run the album again to re-read them.');
+  run('bibdigits', () => api.admin.setBibRules(props.id, { bib_min_digits: n }),
+      `Shortest bib is now ${n} digits.` + REREAD_NOTE);
+
+const setBibMax = (n: number) =>
+  run('bibmax', () => api.admin.setBibRules(props.id, { bib_max_digits: n }),
+      `Longest bib is now ${n} digits.` + REREAD_NOTE);
+
+/** '' clears the list back to digits only. */
+const saveBibPrefixes = () => {
+  const value = (prefixInput.value ?? bibPrefixes.value).trim();
+  run('bibprefix', async () => {
+    await api.admin.setBibRules(props.id, { bib_prefixes: value });
+    prefixInput.value = null;      // fall back to whatever the server stored
+  }, value
+    ? `Bibs may start with ${value.toUpperCase()}.` + REREAD_NOTE
+    : 'Bibs are digits only now.' + REREAD_NOTE);
+};
 
 function addLink() {
   const url = newLink.value.trim();
@@ -759,17 +796,17 @@ const when = (iso: string) => new Date(iso).toLocaleString();
              and a photographer cannot act on this even if they knew the answer.
              Sits under the bibs toggle because it is meaningless without it. -->
         <div v-if="owner && bibsEnabled" class="field-group" style="margin-top: var(--s-4)">
-          <label>Shortest bib number</label>
-          <div class="segmented" role="radiogroup" aria-label="Shortest bib number at this race">
-            <button v-for="n in [2, 3, 4]" :key="n" role="radio"
+          <label>Shortest bib number — digits</label>
+          <div class="segmented" role="radiogroup" aria-label="Shortest bib number at this race, in digits">
+            <!-- 2 to 5, matching what the API accepts and what MAX_DIGITS allows.
+                 Offering fewer than the API does is how "what if it is 5 digits"
+                 becomes an unanswerable question in the UI. 5 means exactly five,
+                 since the ceiling is 5 for every event. -->
+            <button v-for="n in [2, 3, 4, 5]" :key="n" role="radio"
                     :aria-checked="bibMinDigits === n" :aria-selected="bibMinDigits === n"
                     :disabled="busy === 'bibdigits' || !!activeJob"
-                    :title="n === 2
-                      ? 'Bibs printed with two digits, like 46'
-                      : n === 3
-                        ? 'Bibs printed with three or four digits, like 0056 — the usual case'
-                        : 'Bibs printed with four or five digits'"
-                    @click="setBibDigits(n)">{{ n }} digits</button>
+                    :title="BIB_DIGIT_HINTS[n]"
+                    @click="setBibDigits(n)">{{ n }}</button>
           </div>
           <p class="muted small" style="margin: var(--s-2) 0 0">
             How many digits the bibs at this race are printed with, at the
@@ -782,6 +819,64 @@ const when = (iso: string) => new Date(iso).toLocaleString();
             <template v-else>
               Two-digit bibs are read. Numbers on signage and kit are more likely
               to slip through at this setting, so check a few photos.
+            </template>
+          </p>
+        </div>
+
+        <!-- The ceiling, beside the floor: a floor alone cannot exclude numbers
+             LONGER than the bibs, and at a two-digit race every longer number is
+             junk. SheRuns stored 2025/2024/2026 off banners and 100 off a distance
+             marker until this existed. -->
+        <div v-if="owner && bibsEnabled" class="field-group" style="margin-top: var(--s-4)">
+          <label>Longest bib number — digits</label>
+          <div class="segmented" role="radiogroup" aria-label="Longest bib number at this race, in digits">
+            <button v-for="n in [2, 3, 4, 5]" :key="n" role="radio"
+                    :aria-checked="bibMaxDigits === n" :aria-selected="bibMaxDigits === n"
+                    :disabled="busy === 'bibmax' || !!activeJob || n < bibMinDigits"
+                    :title="n < bibMinDigits
+                      ? `Cannot be shorter than the shortest bib (${bibMinDigits})`
+                      : `Bibs no longer than ${n} digits`"
+                    @click="setBibMax(n)">{{ n }}</button>
+          </div>
+          <p class="muted small" style="margin: var(--s-2) 0 0">
+            <template v-if="bibMinDigits === bibMaxDigits">
+              Bibs here are exactly {{ bibMinDigits }} digits. Every other number in
+              the photo — a year on a banner, a distance marker — is ignored.
+            </template>
+            <template v-else>
+              Longer numbers are ignored. Set this to match the race and numbers off
+              signage stop being read as bibs.
+            </template>
+          </p>
+        </div>
+
+        <!-- Category letters. Only shown to the operator, and phrased around what
+             is printed on the bib rather than around prefixes as a concept. -->
+        <div v-if="owner && bibsEnabled" class="field-group" style="margin-top: var(--s-4)">
+          <label for="bibpfx">Category letters on bibs</label>
+          <div class="row" style="border-bottom: 0; padding-top: 0">
+            <input id="bibpfx" class="row-main" placeholder="none — e.g. F, M"
+                   :value="prefixInput ?? bibPrefixes"
+                   :disabled="busy === 'bibprefix' || !!activeJob"
+                   @input="prefixInput = ($event.target as HTMLInputElement).value"
+                   @keyup.enter="saveBibPrefixes" />
+            <button :disabled="busy === 'bibprefix' || !!activeJob" @click="saveBibPrefixes">
+              <span v-if="busy === 'bibprefix'" class="spinner" /> Save
+            </button>
+          </div>
+          <p class="muted small" style="margin: var(--s-2) 0 0">
+            <template v-if="bibPrefixes">
+              Bibs may be plain numbers or start with
+              <strong>{{ bibPrefixes.split(',').join(' / ') }}</strong> —
+              <code>{{ bibPrefixes.split(',')[0] }}-0001</code> and
+              <code>0001</code> are different runners, and stay separate in search.
+            </template>
+            <template v-else>
+              Leave empty if bibs are plain numbers. If this race numbers by
+              category — <code>0001</code> for the marathon, <code>F-0001</code> and
+              <code>M-0001</code> for the 10k — list the letters here. Without them
+              a bib with a letter is read and then discarded, and no digit setting
+              recovers it.
             </template>
           </p>
         </div>

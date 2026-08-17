@@ -98,6 +98,12 @@ export interface BibSearchState {
   results: GridItem[];
   note: string | null;
   fuzzyOffered: boolean;
+  /**
+   * Same digits, different category ('F-1', 'M-1'). Cached with the results
+   * because a reader coming back via Back must see the same offer they left —
+   * otherwise the way out of an empty search silently disappears.
+   */
+  alternatives: string[];
 }
 
 /** One album's browse state is large and readers rarely alternate between three. */

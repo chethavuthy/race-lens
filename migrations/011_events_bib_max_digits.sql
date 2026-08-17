@@ -1,0 +1,33 @@
+-- Adds events.bib_max_digits: the LONGEST number that counts as a bib here.
+--
+-- Apply with:
+--   env -u CLOUDFLARE_API_TOKEN npx wrangler d1 execute race-lens --remote \
+--     --config apps/api/wrangler.toml --file=./migrations/011_events_bib_max_digits.sql
+--
+-- Defaults to 5, the ceiling bibs.py has always used, so nothing changes for any
+-- existing event.
+--
+-- WHY A CEILING TOO.
+--
+-- migrations/009 let a race say its bibs are as short as two digits, which is
+-- what SheRuns needed. It does not stop LONGER numbers being read, and at a race
+-- whose bibs are exactly two digits every longer number is junk by definition.
+-- What production actually held for SheRuns after its first pass, every row of it
+-- signage rather than a runner:
+--
+--   bib     photos
+--   0           19
+--   100          9
+--   2025         3
+--   2024         2
+--   2026         2
+--   1111         1
+--   1000         1
+--
+-- Years off banners, distance markers, a sponsor's phone number. A floor alone
+-- cannot exclude them; a ceiling of 2 excludes all of them at once.
+--
+-- Kept separate from bib_min_digits rather than folded into one "bib length"
+-- field: plenty of races genuinely span a range (Angkor prints 3 and 4 digit
+-- bibs), so collapsing the two would break those to fix this.
+ALTER TABLE events ADD COLUMN bib_max_digits INTEGER NOT NULL DEFAULT 5;

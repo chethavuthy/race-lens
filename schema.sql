@@ -26,6 +26,21 @@ CREATE TABLE IF NOT EXISTS events (
   --
   -- Defaults to 3, the value bibs.py hard-coded and Angkor was tuned for.
   bib_min_digits INTEGER NOT NULL DEFAULT 3,
+  -- Longest number that counts as a bib. 5 by default, the ceiling bibs.py has
+  -- always used. A floor alone cannot exclude numbers LONGER than the bibs: at
+  -- SheRuns, which prints two digits, the first pass stored 2025/2024/2026 off
+  -- banners and 100 off a distance marker. bib_max_digits = 2 excludes them all.
+  bib_max_digits INTEGER NOT NULL DEFAULT 5,
+  -- Category letters this race prints on bibs: 'F,M'. NULL or empty means digits
+  -- only, which is every event that predates the column.
+  --
+  -- A whitelist rather than "any letter", because any-letter turns kit sizes and
+  -- sponsor boards into bibs. The race knows its own categories.
+  --
+  -- The prefix is IDENTITY: at a race where 0001 is a marathon runner and F-0001
+  -- is a 10k woman, dropping the letter merges two people. It is therefore part
+  -- of the stored bib — see CANONICAL BIB FORM in indexer/bibs.py.
+  bib_prefixes TEXT,
   -- The Access identity that created this event. Every admin route is scoped to
   -- it, so a photographer let through the door reaches their own albums and
   -- nothing else. NULL means "the operator's" — every event that predates

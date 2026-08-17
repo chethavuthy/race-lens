@@ -14,6 +14,9 @@ export interface EventSummary {
    * runners have no use for it, so it is absent from the public event payload.
    */
   bib_min_digits?: number;
+  bib_max_digits?: number;
+  /** Category letters, 'F,M'. '' means digits only. Admin shapes only. */
+  bib_prefixes?: string;
   created_at?: string;
   /**
    * Who created it. Only sent to the operator, and null on events that predate
@@ -162,6 +165,15 @@ export const api = {
     req<{
       matched: 'exact' | 'suffix' | null;
       bib_read: string | null;
+      /** The bib searched, canonicalized — 'F-1' for a typed "f 0001". */
+      bib: string;
+      /**
+       * Same digits, different category — at a race that numbers by category,
+       * 0001 / F-0001 / M-0001 are three runners. Labels only: their photos are
+       * NOT mixed in, because a runner shown three people's photos cannot tell
+       * which are theirs.
+       */
+      alternatives: string[];
       photos: Photo[];
       fuzzy_available: boolean;
     }>(`/api/events/${slug}/bib/${encodeURIComponent(bib)}${fuzzy ? '?fuzzy=1' : ''}`),
@@ -233,16 +245,22 @@ export const api = {
       }),
 
     /**
-     * Shortest number that counts as a bib at this race, as printed. 2 to 5;
-     * the API rejects anything outside that.
+     * What counts as a bib at this race: the digit range, and the category
+     * letters if it numbers by category.
      *
-     * Applies to what LATER passes read — it cannot reinterpret numbers already
-     * discarded, because the rejected tokens were never stored. Recovering them
-     * needs a bibs-only pass.
+     * One call for all three because they are one decision — a floor above the
+     * ceiling matches no bib at all, and the API rejects that pair rather than
+     * letting a half-applied change empty an album's search.
+     *
+     * Applies to what LATER passes read. It cannot reinterpret numbers already
+     * discarded, because rejected tokens were never stored, so recovering them
+     * needs a bibs-only pass over photos already indexed.
      */
-    setBibMinDigits: (eventId: string, digits: number) =>
+    setBibRules: (eventId: string, rules: {
+      bib_min_digits?: number; bib_max_digits?: number; bib_prefixes?: string;
+    }) =>
       req<{ event: EventSummary }>(`/api/admin/events/${eventId}`, {
-        ...json({ bib_min_digits: digits }),
+        ...json(rules),
         method: 'PATCH',
       }),
 

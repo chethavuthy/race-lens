@@ -109,6 +109,13 @@ const faceSearched = computed(() => searchedBy.value === 'selfie' || searchedBy.
 // offered as a labelled choice, never done silently: a suffix match can return
 // a different runner's photos and the runner has no way to tell.
 const fuzzyOffered = ref(false);
+/**
+ * Same number, different category — at a race numbering by category, 0001,
+ * F-0001 and M-0001 are three runners. Offered as a next step rather than merged
+ * into the results: a runner shown three people's photos cannot tell which are
+ * theirs, and that is the one thing this product has to get right.
+ */
+const bibAlternatives = ref<string[]>([]);
 
 const video = ref<HTMLVideoElement | null>(null);
 const stream = ref<MediaStream | null>(null);
@@ -356,6 +363,7 @@ function retryBrowse() {
 /** Drop the current results without touching the URL. */
 function clearResults() {
   fuzzyOffered.value = false;
+  bibAlternatives.value = [];
   results.value = null;
   searchedBy.value = null;
   searchError.value = null;
@@ -420,6 +428,20 @@ function submitBib(fuzzy = false) {
 }
 
 /**
+ * Search one of the other categories carrying the same digits.
+ *
+ * Goes through the URL like every other bib search, so it is bookmarkable and
+ * Back steps out of it — and so the generation guard below applies. Clears fuzzy:
+ * this is an EXACT search for a different runner, not a widening of the last one.
+ */
+function searchAlternative(label: string) {
+  bib.value = label;
+  const query: Record<string, string> = { ...(route.query as Record<string, string>), bib: label };
+  delete query.fuzzy;
+  router.push({ query });
+}
+
+/**
  * Which search is current.
  *
  * The submit button is disabled while `searching`, but the URL watcher is not:
@@ -447,6 +469,7 @@ async function searchBib(value: string, fuzzy: boolean) {
     results.value = hit.results;
     searchedBy.value = 'bib';
     fuzzyOffered.value = hit.fuzzyOffered;
+    bibAlternatives.value = hit.alternatives ?? [];
     searchNote.value = hit.note;
     // An older request may still be out. Its own `seq` guard drops its results,
     // but it will no longer be the one that turns this back off.
@@ -467,8 +490,12 @@ async function searchBib(value: string, fuzzy: boolean) {
     results.value = items;
     searchedBy.value = 'bib';
     fuzzyOffered.value = r.fuzzy_available;
+    bibAlternatives.value = r.alternatives ?? [];
     searchNote.value = note;
-    bibSearchCache.write(key, { results: items, note, fuzzyOffered: r.fuzzy_available });
+    bibSearchCache.write(key, {
+      results: items, note, fuzzyOffered: r.fuzzy_available,
+      alternatives: r.alternatives ?? [],
+    });
   } catch (e: any) {
     if (seq === searchSeq) searchError.value = e.message;
   } finally {
@@ -706,6 +733,19 @@ async function onFile(e: Event) {
       </div>
 
       <p v-if="searchNote" class="notice" style="margin: var(--s-3) 0">{{ searchNote }}</p>
+      <!-- Shown even when the search DID find photos: these results are one
+           runner's, but another category shares the number, and a runner who
+           landed on the wrong one has no other way to discover that. Offered, not
+           merged — mixing them would show three people's photos with no way to
+           tell them apart. -->
+      <p v-if="bibAlternatives.length && searchedBy === 'bib' && results.length"
+         class="muted small" style="margin: var(--s-3) 0">
+        Showing bib {{ bib.trim() }}. This race numbers by category and the same
+        number also exists as
+        <template v-for="(alt, i) in bibAlternatives" :key="alt"
+          ><button class="link" @click="searchAlternative(alt)">{{ alt }}</button
+          >{{ i < bibAlternatives.length - 1 ? ', ' : '' }}</template>.
+      </p>
 
       <template v-if="results.length">
         <p class="muted small" style="margin: var(--s-3) 0 var(--s-4)">
@@ -728,6 +768,20 @@ async function onFile(e: Event) {
             No photo of bib {{ bib }} has been indexed. Bib numbers get missed when they are
             folded, covered by a hand, or turned away from the camera.
           </p>
+          <!-- Before the selfie suggestion: at a race numbering by category, a
+               runner typing 0001 without their letter has an exact answer waiting,
+               and telling them to photograph themselves instead would be absurd. -->
+          <template v-if="bibAlternatives.length">
+            <p class="muted" style="margin-top: 0">
+              This race numbers by category. The same number exists as
+              <strong>{{ bibAlternatives.join(', ') }}</strong> — if your bib has a
+              letter on it, that is you.
+            </p>
+            <div class="btn-row" style="margin-bottom: var(--s-4)">
+              <button v-for="alt in bibAlternatives" :key="alt" class="primary"
+                      @click="searchAlternative(alt)">Show {{ alt }}</button>
+            </div>
+          </template>
           <p class="muted small">Try finding yourself by face instead — it works even when your bib is hidden.</p>
           <div class="btn-row">
             <button class="primary" @click="selectTab('selfie')">Take a selfie</button>

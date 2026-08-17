@@ -25,7 +25,7 @@ import uuid
 import numpy as np
 from PIL import Image, ImageOps
 
-from .bibs import DEFAULT_MIN_DIGITS, MAX_DIGITS, BibReader
+from .bibs import DEFAULT_MIN_DIGITS, MAX_DIGITS, BibReader, parse_prefixes
 from .config import Config
 from .drive import DriveClient, DriveImage, QuotaExceeded
 from .faces import FaceEngine, quantize
@@ -165,6 +165,10 @@ def run(args: argparse.Namespace) -> int:
     # a missing or nonsense value degrades to the default rather than to a
     # pattern that matches every number in the frame.
     bib_min_digits = event_cfg.get("bib_min_digits") or DEFAULT_MIN_DIGITS
+    # Category letters this race prints, 'F,M'. Empty means digits only, which is
+    # every event that predates the setting.
+    bib_prefixes = parse_prefixes(event_cfg.get("bib_prefixes"))
+    bib_max_digits = event_cfg.get("bib_max_digits") or MAX_DIGITS
     if args.bibs_only and not read_bibs:
         # A bibs-only pass over an event with no bibs would download and decode
         # every photo to write nothing at all.
@@ -179,17 +183,25 @@ def run(args: argparse.Namespace) -> int:
              "was skipped. Face search is unaffected.")
 
     engine = FaceEngine(det_size=cfg.det_size)
-    reader = BibReader(min_digits=bib_min_digits) if read_bibs else None
+    reader = (BibReader(min_digits=bib_min_digits, prefixes=bib_prefixes,
+                        max_digits=bib_max_digits)
+              if read_bibs else None)
     if reader:
         # Logged and journalled: this single number decides whether an album's bib
         # search works at all, and when it is wrong the pipeline's only symptom is
         # an empty result nobody can explain. SheRuns read 0 bibs across 199 faces
         # for exactly this reason.
-        log.info("Bib numbers: %d-%d digits", reader.min_digits, MAX_DIGITS)
+        shape = (f"{reader.min_digits} digits" if reader.min_digits == reader.max_digits
+                 else f"{reader.min_digits} to {reader.max_digits} digits")
+        if reader.prefixes:
+            shape += ", with or without " + "/".join(reader.prefixes)
+        log.info("Bib numbers: %s", shape)
         note("info", "bib_digits",
-             f"Reading bib numbers of {reader.min_digits} to {MAX_DIGITS} digits. "
-             "Numbers shorter than that are ignored — change this on the event if "
-             "this race prints shorter bibs.")
+             f"Reading bib numbers of {shape}. Anything else is ignored — change "
+             "this on the event if the bibs at this race look different."
+             + ("" if reader.prefixes else
+                " A bib with a letter in it, like F-0092, needs that letter listed"
+                " as a category prefix on the event."))
 
     embeddings: list[np.ndarray] = []
     face_rows: list[dict] = []

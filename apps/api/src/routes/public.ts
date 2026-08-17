@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { Env, EventRow } from '../types';
 import { clampLimit, clampThreshold, HttpError, publicEvent, publicPhoto } from '../lib';
 import { searchFaces } from '../search';
+import { PREFIX_SEP, bibDigits, bibPrefix, normalizeBib } from '../bib';
 
 export const publicRoutes = new Hono<{ Bindings: Env }>();
 
@@ -85,11 +86,12 @@ publicRoutes.get('/events/:slug/bib/:bib', async (c) => {
   if (event.bibs_enabled === 0) {
     throw new HttpError(404, 'This event does not use bib numbers', 'no_bibs');
   }
-  // Strip non-digits, then leading zeros — the indexer stores bibs normalized
-  // the same way, so "0123" and "123" resolve to the same row.
-  const digits = c.req.param('bib').replace(/\D/g, '');
-  const bib = digits.replace(/^0+(?=\d)/, '');
+  // normalizeBib, not a bare digit strip: at a race that numbers by category the
+  // letter is part of WHICH RUNNER this is, so "F-0001" must resolve to 'F-1' and
+  // not to '1', which belongs to somebody else. Mirrors indexer/bibs.py.
+  const bib = normalizeBib(c.req.param('bib'));
   if (!bib) return c.json({ photos: [], matched: null });
+  const digits = bibDigits(bib);
 
   const select = `SELECT p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.taken_at,
                          b.conf, b.bib, b.bib_raw
@@ -109,11 +111,24 @@ publicRoutes.get('/events/:slug/bib/:bib', async (c) => {
   // number was shown strangers' photos and had no way to tell. Returning the
   // wrong person's race photos is worse than returning none: the runner cannot
   // verify it, and the whole product is "find MY photos".
+  //
+  // Scoped to the same category, which matters now that a stored bib may carry a
+  // prefix: a bare LIKE '%1' matches '21' and 'F-1' and 'M-1' alike, so widening
+  // the search for a marathon runner would hand them two 10k runners' photos —
+  // the exact cross-runner leak the paragraph above is about, reintroduced by the
+  // prefix rather than by a missing digit.
   const fuzzy = c.req.query('fuzzy') === '1';
   if (results.length === 0 && fuzzy) {
     matched = 'suffix';
-    const r = await c.env.DB.prepare(`${select} AND b.bib LIKE ? ORDER BY b.conf DESC LIMIT 200`)
-      .bind(event.id, `%${bib}`).all<any>();
+    const prefix = bibPrefix(bib);
+    const r = prefix
+      ? await c.env.DB.prepare(
+          `${select} AND b.bib LIKE ? ORDER BY b.conf DESC LIMIT 200`)
+          .bind(event.id, `${prefix}${PREFIX_SEP}%${digits}`).all<any>()
+        // A bare number stays bare: NOT LIKE '%-%' keeps prefixed bibs out.
+      : await c.env.DB.prepare(
+          `${select} AND b.bib LIKE ? AND b.bib NOT LIKE ? ORDER BY b.conf DESC LIMIT 200`)
+          .bind(event.id, `%${digits}`, `%${PREFIX_SEP}%`).all<any>();
     results = r.results;
   }
 
@@ -122,8 +137,30 @@ publicRoutes.get('/events/:slug/bib/:bib', async (c) => {
   const seen = new Set<string>();
   const photos = results.filter((r: any) => !seen.has(r.id) && seen.add(r.id));
 
+  // Other categories carrying the SAME digits — offered, never merged.
+  //
+  // At a mixed race a 10k runner may well type "0001" without their letter and
+  // land on the marathon runner's photos, or on nothing. Folding all three
+  // together instead would show every runner two strangers, with no way to tell
+  // which photos are theirs. So the alternatives are returned as labels for the
+  // UI to offer as a next step, and the results stay exactly one runner's.
+  //
+  // Stored labels are either 'D' or 'P-D', so same-digits means bib = digits or
+  // bib LIKE '%-digits'. Cheap: one indexed lookup on (event_id, bib).
+  const { results: sameDigits } = await c.env.DB.prepare(
+    `SELECT DISTINCT bib FROM bibs
+      WHERE event_id = ? AND (bib = ? OR bib LIKE ?) AND bib <> ? LIMIT 10`,
+  ).bind(event.id, digits, `%${PREFIX_SEP}${digits}`, bib).all<{ bib: string }>();
+
   return c.json({
     matched: photos.length ? matched : null,
+    /** The bib actually searched, canonicalized — 'F-1' for a typed "f 0001". */
+    bib: bib,
+    /**
+     * Same number, different category. Labels only; the UI offers them rather
+     * than mixing their photos in.
+     */
+    alternatives: sameDigits.map((r) => r.bib),
     // What was actually printed on the bib we matched, so the UI can show the
     // runner why a photo came back.
     bib_read: photos[0]?.bib_raw ?? null,

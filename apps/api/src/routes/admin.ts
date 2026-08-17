@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { Env, EventRow, JobRow } from '../types';
 import { chunk, clampLimit, HttpError, newId, nowIso, publicEvent, publicPhoto, r2Url, slugify } from '../lib';
+import { normalizeBib, parsePrefixes } from '../bib';
 import { bannerKey, bannerType } from '../banner';
 import { faceBox } from '../bbox';
 import { parseFolderId, sampleThumbUrl, walkFolder } from '../drive';
@@ -444,7 +445,7 @@ adminRoutes.patch('/events/:id', async (c) => {
   await ownEvent(c, id);
   const body = await c.req.json<{
     name?: string; event_date?: string; status?: string; bibs_enabled?: boolean;
-    bib_min_digits?: number;
+    bib_min_digits?: number; bib_max_digits?: number; bib_prefixes?: string;
   }>();
   const allowed = ['draft', 'indexing', 'ready', 'partial'];
   if (body.status && !allowed.includes(body.status)) {
@@ -461,25 +462,75 @@ adminRoutes.patch('/events/:id', async (c) => {
     throw new HttpError(
       400, 'Shortest bib must be a whole number from 2 to 5', 'bad_bib_min_digits');
   }
+  // Stored canonically — 'f, m' becomes 'F,M' — so the indexer and this route
+  // never disagree about what a prefix list says. An empty string clears it back
+  // to digits only; a value with nothing usable in it is a typo worth reporting
+  // rather than silently storing as "no prefixes".
+  if (body.bib_max_digits !== undefined
+      && !(Number.isInteger(body.bib_max_digits)
+           && body.bib_max_digits >= 2 && body.bib_max_digits <= 5)) {
+    throw new HttpError(
+      400, 'Longest bib must be a whole number from 2 to 5', 'bad_bib_max_digits');
+  }
+  // Checked against the OTHER bound as it will be after this write, not as it is
+  // now: sending only one of the pair must not be able to leave the event with a
+  // floor above its ceiling, which compiles to a pattern matching no bib at all.
+  const existing = await c.env.DB
+    .prepare('SELECT bib_min_digits, bib_max_digits FROM events WHERE id = ?')
+    .bind(id).first<{ bib_min_digits: number; bib_max_digits: number }>();
+  const nextMin = body.bib_min_digits ?? existing?.bib_min_digits ?? 3;
+  const nextMax = body.bib_max_digits ?? existing?.bib_max_digits ?? 5;
+  if (nextMin > nextMax) {
+    throw new HttpError(
+      400,
+      `Shortest bib (${nextMin}) cannot be longer than the longest (${nextMax})`,
+      'bad_bib_range');
+  }
+
+  let prefixes: string | null = null;
+  if (body.bib_prefixes !== undefined) {
+    const parsed = parsePrefixes(body.bib_prefixes);
+    if (!parsed.length && body.bib_prefixes.trim() !== '') {
+      throw new HttpError(
+        400, 'Bib prefixes must be single letters or pairs, like F, M', 'bad_bib_prefixes');
+    }
+    prefixes = parsed.join(',');
+  }
   // Turning bibs off leaves any bibs already read in place rather than deleting
   // them: the flag hides them and stops future passes reading more, so flipping
   // it back on restores what was there instead of forcing a re-index.
   await c.env.DB.prepare(
-    `UPDATE events SET name = COALESCE(?, name),
-                       event_date = COALESCE(?, event_date),
-                       status = COALESCE(?, status),
-                       bibs_enabled = COALESCE(?, bibs_enabled),
-                       bib_min_digits = COALESCE(?, bib_min_digits)
-      WHERE id = ?`,
+    // Numbered throughout, not anonymous: bib_prefixes needs its value TWICE
+    // (once as the "was it sent" flag, once as the value), and mixing ?N with a
+    // bare ? renumbers the lot.
+    `UPDATE events SET name = COALESCE(?1, name),
+                       event_date = COALESCE(?2, event_date),
+                       status = COALESCE(?3, status),
+                       bibs_enabled = COALESCE(?4, bibs_enabled),
+                       bib_min_digits = COALESCE(?5, bib_min_digits),
+                       bib_max_digits = COALESCE(?9, bib_max_digits),
+                       -- Not COALESCE: '' must be able to CLEAR the list back to
+                       -- digits only, and COALESCE reads only NULL as "leave it".
+                       -- Same presence-not-value trick as jobs.error in
+                       -- internal.ts.
+                       bib_prefixes = CASE WHEN ?6 = 1 THEN ?7 ELSE bib_prefixes END
+      WHERE id = ?8`,
   ).bind(body.name ?? null, body.event_date ?? null, body.status ?? null,
          body.bibs_enabled === undefined ? null : (body.bibs_enabled ? 1 : 0),
-         body.bib_min_digits ?? null, id).run();
+         body.bib_min_digits ?? null,
+         body.bib_prefixes === undefined ? 0 : 1, prefixes, id,
+         body.bib_max_digits ?? null).run();
   const row = await c.env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(id).first<EventRow>();
   if (!row) throw new HttpError(404, 'Event not found', 'no_event');
-  // bib_min_digits is not in publicEvent — runners have no use for it — so the
-  // admin shapes carry it explicitly. Returned here as well as from GET so the
+  // Neither bib setting is in publicEvent — runners have no use for them — so the
+  // admin shapes carry them explicitly. Returned here as well as from GET so the
   // page reflects a save without re-fetching.
-  return c.json({ event: { ...publicEvent(c.env, row), bib_min_digits: row.bib_min_digits } });
+  return c.json({ event: {
+    ...publicEvent(c.env, row),
+    bib_min_digits: row.bib_min_digits,
+    bib_max_digits: row.bib_max_digits,
+    bib_prefixes: row.bib_prefixes ?? '',
+  } });
 });
 
 const BANNER_MAX_BYTES = 8 * 1024 * 1024;
@@ -1003,6 +1054,8 @@ adminRoutes.get('/events/:id', async (c) => {
     ...publicEvent(c.env, row),
     created_at: row.created_at,
     bib_min_digits: row.bib_min_digits,
+    bib_max_digits: row.bib_max_digits,
+    bib_prefixes: row.bib_prefixes ?? '',
   } });
 });
 
@@ -1089,13 +1142,17 @@ adminRoutes.post('/photos/:id/bibs', async (c) => {
   const photoId = c.req.param('id');
   const { bib } = await c.req.json<{ bib?: string }>();
 
-  const raw = String(bib ?? '').trim().replace(/\D/g, '');
-  if (!raw || raw.length > 5) {
-    throw new HttpError(400, 'Enter a bib number of 1-5 digits', 'bad_bib');
+  // normalizeBib, so an operator correcting a bib can type the category letter
+  // the OCR missed — the whole point of this control at a mixed race. A bare
+  // digit strip turned "F-0001" into "1", silently filing a 10k woman's photo
+  // under the marathon runner who owns that number.
+  const raw = String(bib ?? '').trim();
+  const norm = normalizeBib(raw);
+  if (!norm) {
+    throw new HttpError(
+      400, 'Enter a bib like 0056, or F-0056 if this race uses category letters',
+      'bad_bib');
   }
-  // Same normalisation as search and the indexer: leading zeros stripped for
-  // matching, printed form kept for display.
-  const norm = raw.replace(/^0+(?=\d)/, '');
 
   const photo = await c.env.DB.prepare('SELECT event_id FROM photos WHERE id = ?')
     .bind(photoId).first<{ event_id: string }>();
@@ -1166,7 +1223,8 @@ adminRoutes.post('/faces/:id/bib', async (c) => {
   await ownVia(c, 'SELECT event_id FROM faces WHERE id = ?', c.req.param('id'), 'Face');
   const faceId = c.req.param('id');
   const { bib } = await c.req.json<{ bib?: string }>();
-  const raw = String(bib ?? '').trim().replace(/\D/g, '');
+  // Same as the photo-level route: the letter is part of which runner this is.
+  const raw = String(bib ?? '').trim();
 
   const face = await c.env.DB.prepare(
     'SELECT event_id, photo_id, bib FROM faces WHERE id = ?',
@@ -1179,9 +1237,12 @@ adminRoutes.post('/faces/:id/bib', async (c) => {
     await c.env.DB.prepare('UPDATE faces SET bib = NULL WHERE id = ?').bind(faceId).run();
     return c.json({ ok: true, bib: null });
   }
-  if (raw.length > 5) throw new HttpError(400, 'A bib is at most 5 digits', 'bad_bib');
-
-  const norm = raw.replace(/^0+(?=\d)/, '');
+  const norm = normalizeBib(raw);
+  if (!norm) {
+    throw new HttpError(
+      400, 'Enter a bib like 0056, or F-0056 if this race uses category letters',
+      'bad_bib');
+  }
   await c.env.DB.batch([
     c.env.DB.prepare('UPDATE faces SET bib = ? WHERE id = ?').bind(norm, faceId),
     // Photo-level row too, since that is what bib search actually queries.
@@ -1203,8 +1264,11 @@ adminRoutes.post('/faces/:id/bib', async (c) => {
 adminRoutes.delete('/photos/:id/bibs/:bib', async (c) => {
   const photoId = c.req.param('id');
   await ownPhoto(c, photoId);
-  const digits = c.req.param('bib').replace(/\D/g, '');
-  const norm = digits.replace(/^0+(?=\d)/, '');
+  // Must normalize the same way the row was written, prefix included: stripping
+  // the letter here would delete 'F-1' by tombstoning '1' — leaving the wrong bib
+  // in place and rejecting a bib nobody asked to remove.
+  const norm = normalizeBib(c.req.param('bib'));
+  if (!norm) throw new HttpError(400, 'Not a bib number', 'bad_bib');
   const photo = await c.env.DB.prepare('SELECT event_id FROM photos WHERE id = ?')
     .bind(photoId).first<{ event_id: string }>();
   if (!photo) throw new HttpError(404, 'Photo not found', 'no_photo');

@@ -15,7 +15,19 @@ from __future__ import annotations
 
 import pytest
 
-from indexer.bibs import DEFAULT_MIN_DIGITS, MAX_DIGITS, bib_pattern
+# Imported at module scope, NOT inside a test. test_run_continuation.py replaces
+# sys.modules["indexer.bibs"] with a stub when pytest COLLECTS it, so an import
+# inside a test body here resolves to that stub and fails on names it lacks. Bound
+# at import time, these stay the real thing. See conftest.py on collection order.
+from indexer.bibs import (
+    DEFAULT_MIN_DIGITS,
+    MAX_DIGITS,
+    BibHit,
+    _prefer_prefixed,
+    bib_pattern,
+    normalize_bib,
+    parse_prefixes,
+)
 
 
 def test_the_default_is_what_was_hard_coded():
@@ -77,3 +89,139 @@ def test_the_floor_can_never_exceed_the_ceiling():
     which is the failure mode this whole change exists to remove."""
     pat = bib_pattern(MAX_DIGITS + 3)
     assert pat.match("12345")
+
+
+# --- letter prefixes ----------------------------------------------------------
+
+
+def test_a_letter_bib_is_rejected_when_the_event_declares_no_prefixes():
+    """The default, and every event that predates the setting.
+
+    "F-0092" is read by RapidOCR as ONE token at confidence 1.00 — verified
+    against the engine, not assumed — and dropped here, because a bib must be
+    digits all the way through unless the race says otherwise. This is why the
+    admin control's digit options cannot answer "what about F-0092": the answer is
+    the prefix list, not a digit count.
+    """
+    for min_digits in (2, 3, 4, 5):
+        pat = bib_pattern(min_digits)          # no prefixes
+        for printed in ("F-0092", "F0092", "A12", "M-0092"):
+            assert not pat.match(printed), f"{printed} at min {min_digits}"
+
+
+def test_a_declared_prefix_is_accepted_in_every_printed_form():
+    """Tight, hyphenated or spaced — the same bib either way."""
+    pat = bib_pattern(3, ("F", "M"))
+    for printed in ("F-0092", "F0092", "F 0092", "M-0092", "0092"):
+        assert pat.match(printed), printed
+
+
+def test_an_undeclared_prefix_stays_rejected():
+    """The whitelist is the whole defence against kit text and signage.
+
+    Without it, "XL-500" (a shirt size) and any sponsor's letter-number pairing
+    become candidate bibs.
+    """
+    pat = bib_pattern(3, ("F", "M"))
+    for printed in ("K-0092", "XL-500", "0092F", "42Km", "FM-0092"):
+        assert not pat.match(printed), printed
+
+
+def test_prefixes_do_not_relax_the_digit_rules():
+    """A prefix buys a letter, not a different number shape."""
+    pat = bib_pattern(3, ("F",))
+    assert not pat.match("F-92"), "two digits, below this event's floor"
+    assert not pat.match("F-123456"), "past the five-digit ceiling"
+    assert pat.match("F-0092")
+
+
+def test_the_bare_and_prefixed_forms_are_different_bibs():
+    """The reason the prefix is stored rather than stripped: at a mixed race 0001
+    is a marathon runner and F-0001 is a 10k woman."""
+    assert normalize_bib("0001") != normalize_bib("F-0001")
+    assert normalize_bib("F-0001") != normalize_bib("M-0001")
+
+
+def test_rejoining_a_split_bib_does_not_leave_the_bare_number_behind():
+    """_prefer_prefixed, and why it is not merely tidying.
+
+    A bib that prints its category letter in a separate box yields two OCR
+    tokens, so rejoining produces BOTH 'F-0092' and the bare '0092' it was built
+    from, at identical confidence. Keeping both files a 10k woman's photo under
+    the marathon runner who owns 0092 — and read_torso's max-by-confidence would
+    pick between them arbitrarily. The prefixed reading wins because the letter
+    was printed right beside those digits.
+    """
+    kept = _prefer_prefixed([
+        BibHit(bib="F-92", conf=1.0, raw="F-0092"),
+        BibHit(bib="92", conf=1.0, raw="0092"),
+    ])
+    assert [h.bib for h in kept] == ["F-92"]
+
+    # A DIFFERENT number elsewhere in the frame is untouched: it is another
+    # runner, not the same bib read twice.
+    kept2 = _prefer_prefixed([
+        BibHit(bib="F-92", conf=1.0, raw="F-0092"),
+        BibHit(bib="7", conf=0.9, raw="0007"),
+    ])
+    assert sorted(h.bib for h in kept2) == ["7", "F-92"]
+
+    # Nothing prefixed in the crop: bare numbers pass through as they always did.
+    kept3 = _prefer_prefixed([BibHit(bib="92", conf=1.0, raw="0092")])
+    assert [h.bib for h in kept3] == ["92"]
+
+
+# --- the two-runtime contract -------------------------------------------------
+#
+# normalize_bib decides what goes INTO bibs.bib; normalizeBib in
+# apps/api/src/bib.ts decides what a runner's typing resolves to. If the two ever
+# disagree, nothing throws — bib search just returns nothing for an album whose
+# bibs are sitting in the table. These cases are duplicated verbatim in
+# apps/api/test/bib.test.ts, which is what makes them a contract rather than two
+# independent opinions.
+
+
+@pytest.mark.parametrize("printed,stored", [
+    ("56", "56"),
+    ("0056", "56"),
+    ("0000", "0"),
+    (" 56 ", "56"),
+    ("12345", "12345"),
+    ("123456", ""),
+    ("", ""),
+    ("PAC", ""),
+    # The prefix is identity — if any of these yield a bare number, one runner's
+    # photos land under another's bib.
+    ("F-0001", "F-1"),
+    ("f-0001", "F-1"),
+    ("F 0001", "F-1"),
+    ("F0001", "F-1"),
+    ("F-1", "F-1"),
+    ("MW-0001", "MW-1"),
+    ("M-0001", "M-1"),
+    # Must never become bibs.
+    ("0092F", ""),
+    ("42Km", ""),
+    ("XLL-500", ""),
+    ("F92F", ""),
+])
+def test_canonical_form_matches_the_worker(printed, stored):
+    assert normalize_bib(printed) == stored
+
+
+def test_a_bare_number_is_never_the_prefixed_one():
+    """The whole point, stated as its own case so it cannot be refactored away."""
+    assert normalize_bib("0001") != normalize_bib("F-0001")
+    assert normalize_bib("F-0001") != normalize_bib("M-0001")
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("F, m , f", ("F", "M")),
+    ("F,42,M,", ("F", "M")),
+    ("F,XLL", ("F",)),
+    ("F;M", ("F", "M")),
+    ("", ()),
+    (None, ()),
+])
+def test_prefix_parsing_matches_the_worker(raw, expected):
+    assert parse_prefixes(raw) == expected

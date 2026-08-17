@@ -62,14 +62,23 @@ def _install_cv_stubs() -> None:
     faces.quantize = lambda v: np.zeros(512, dtype=np.int8)
     sys.modules["indexer.faces"] = faces
 
+    # The REAL parse_prefixes, captured before indexer.bibs is replaced below.
+    # bibs.py imports only numpy, re and cv2 — which conftest has already stubbed
+    # — so the real module loads here without the heavy CV stack. Reimplementing
+    # it in this file instead would drift from the shipped one and hide a wiring
+    # mistake behind a passing suite.
+    from indexer.bibs import parse_prefixes as real_parse_prefixes
+
     bibs = types.ModuleType("indexer.bibs")
 
     class BibReader:
-        # min_digits mirrors the real signature: main.py passes the event's
-        # setting, and a stub that refused it would fail every test for a reason
-        # unrelated to what they cover.
-        def __init__(self, min_digits=3):
+        # Mirrors the real signature: main.py passes the event's settings, and a
+        # stub that refused them would fail every test for a reason unrelated to
+        # what they cover.
+        def __init__(self, min_digits=3, prefixes=(), max_digits=5):
             self.min_digits = min_digits
+            self.max_digits = max_digits
+            self.prefixes = tuple(prefixes or ())
 
         def read_torso(self, _bgr, _bbox):
             return None
@@ -80,6 +89,7 @@ def _install_cv_stubs() -> None:
     bibs.BibReader = BibReader
     bibs.DEFAULT_MIN_DIGITS = 3
     bibs.MAX_DIGITS = 5
+    bibs.parse_prefixes = real_parse_prefixes
     sys.modules["indexer.bibs"] = bibs
 
 

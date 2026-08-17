@@ -57,6 +57,17 @@ export interface EventRow {
    */
   bib_min_digits: number;
   /**
+   * Longest number that counts as a bib. 5 by default. A floor cannot exclude
+   * numbers longer than the bibs — years off banners, distance markers — which is
+   * every bib SheRuns stored before this existed.
+   */
+  bib_max_digits: number;
+  /**
+   * Category letters this race prints on bibs, 'F,M'. NULL/'' means digits only.
+   * A whitelist, because any-letter would turn kit sizes into bibs.
+   */
+  bib_prefixes: string | null;
+  /**
    * The Access identity that created it. NULL on every event that predates
    * ownership, which means the operator's — see migrations/005.
    */
