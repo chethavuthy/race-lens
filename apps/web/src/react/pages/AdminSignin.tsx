@@ -18,21 +18,32 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import { api } from '@/lib/api';
+import { useDeferredLoading } from '../useDeferredLoading';
 import { Button } from '@/components/ui/button';
 
 export default function AdminSignin() {
   const navigate = useNavigate();
   const [failed, setFailed] = useState(false);
+  const [checking, setChecking] = useState(true);
+  // A turnstile deliberately keeps a spinner rather than a content skeleton: this
+  // is an action in progress, not a page filling in, and a grey rectangle standing
+  // in for "signing you in" would be describing content that never arrives — the
+  // page either redirects or explains itself. What it does share with the rest of
+  // the app is the rule from the trace: nothing at all for a fast check, so the
+  // usual instant redirect flashes no message on its way through.
+  const showWaiting = useDeferredLoading(checking);
 
   useEffect(() => {
     let live = true;
     api.admin.me()
       .then(() => { if (live) navigate('/admin', { replace: true }); })
-      .catch(() => { if (live) setFailed(true); });
+      .catch(() => { if (live) setFailed(true); })
+      .finally(() => { if (live) setChecking(false); });
     return () => { live = false; };
   }, [navigate]);
 
   if (!failed) {
+    if (!showWaiting) return <div className="min-h-screen" />;
     return (
       <p className="mt-7 flex items-center gap-2 text-muted-foreground">
         <Loader2 className="size-4 animate-spin" /> Signing you in…

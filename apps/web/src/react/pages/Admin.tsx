@@ -16,6 +16,8 @@ import { FolderSearch, Loader2, Plus } from 'lucide-react';
 import { ApiError, api, type EventSummary } from '@/lib/api';
 import { plural } from '@/lib/format';
 import { Invitation, type Gate } from '../components/Invitation';
+import { AdminSkeleton, EventRowsSkeleton } from '../components/AdminSkeleton';
+import { useDeferredLoading } from '../useDeferredLoading';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -34,6 +36,9 @@ export default function Admin() {
    */
   const [checking, setChecking] = useState(true);
   const [gate, setGate] = useState<Gate | null>(null);
+  // The events list settles after the access check, so it waits separately —
+  // otherwise an empty list renders "Nothing published yet", which is a claim.
+  const [eventsLoading, setEventsLoading] = useState(true);
   const [events, setEvents] = useState<EventSummary[]>([]);
   const [url, setUrl] = useState('');
   const [inspecting, setInspecting] = useState(false);
@@ -58,7 +63,10 @@ export default function Admin() {
   const [maxDigits, setMaxDigits] = useState(5);
   const [prefixes, setPrefixes] = useState('');
 
-  const refresh = () => api.admin.listEvents().then((r) => setEvents(r.events)).catch(() => {});
+  const refresh = () => api.admin.listEvents()
+    .then((r) => setEvents(r.events))
+    .catch(() => {})
+    .finally(() => setEventsLoading(false));
 
   /**
    * Several different failures all mean "not through the door", and none of them
@@ -102,6 +110,8 @@ export default function Admin() {
     })();
   }, []);
 
+  const showSkeleton = useDeferredLoading(checking);
+
   async function check() {
     setInspecting(true); setError(null); setFolder(null);
     try { setFolder(await api.admin.inspect(url.trim())); }
@@ -138,10 +148,9 @@ export default function Admin() {
     && (mode === 'new' ? name.trim().length > 0 : target.length > 0)
     && (!owner || size !== null);
 
-  // One honest line rather than the wrong page for a round trip.
-  if (checking) {
-    return <p className="py-10 text-sm text-muted-foreground">Checking your access…</p>;
-  }
+  // Nothing at all for a fast check, a placeholder only when it is genuinely
+  // slow — the same rule the album follows, for the same measured reason.
+  if (checking) return showSkeleton ? <AdminSkeleton /> : <div className="min-h-screen" />;
   if (gate) return <Invitation gate={gate} />;
 
   return (
@@ -315,7 +324,9 @@ export default function Admin() {
             </Link>
           )}
         </div>
-        {!events.length ? (
+        {eventsLoading ? (
+          <EventRowsSkeleton />
+        ) : !events.length ? (
           <p className="rounded-xl border border-border p-8 text-center text-sm text-muted-foreground">
             Nothing published yet. Check a folder above to make your first album.
           </p>
