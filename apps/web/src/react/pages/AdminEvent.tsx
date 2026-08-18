@@ -16,6 +16,7 @@ import { ArrowLeft, Loader2, Square } from 'lucide-react';
 import { api, type EventSummary } from '@/lib/api';
 import { plural } from '@/lib/format';
 import { Stat } from '../components/Stat';
+import { BibRules } from '../components/BibRules';
 import { Button } from '@/components/ui/button';
 
 type Report = Awaited<ReturnType<typeof api.admin.report>>;
@@ -155,6 +156,13 @@ export default function AdminEvent() {
           Inspect photos
         </Button>
       </section>
+
+      <BibRules
+        event={event}
+        indexed={t.indexed}
+        busyExternally={!!active}
+        onDone={async (m) => { setNotice(m); setError(null); await load(); }}
+      />
 
       <section className="rounded-xl border border-border">
         <h2 className="border-b border-border px-5 py-4 text-sm font-semibold text-muted-foreground">

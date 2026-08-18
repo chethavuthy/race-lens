@@ -252,7 +252,14 @@ export default function Admin() {
       )}
 
       <section>
-        <h2 className="mb-3 text-sm font-semibold text-muted-foreground">Your events</h2>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-muted-foreground">Your events</h2>
+          {owner && (
+            <Link to="/admin/organizers" className="text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">
+              Who can publish
+            </Link>
+          )}
+        </div>
         {!events.length ? (
           <p className="rounded-xl border border-border p-8 text-center text-sm text-muted-foreground">
             Nothing published yet. Check a folder above to make your first album.

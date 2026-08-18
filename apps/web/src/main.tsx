@@ -18,6 +18,7 @@ const EventDetail = lazy(() => import('./react/pages/EventDetail'));
 const AdminEvent = lazy(() => import('./react/pages/AdminEvent'));
 const Admin = lazy(() => import('./react/pages/Admin'));
 const AdminPhotos = lazy(() => import('./react/pages/AdminPhotos'));
+const Organizers = lazy(() => import('./react/pages/Organizers'));
 // Dev only. The parity gate has no business on a production origin, and the
 // vite config strips its fixtures from dist.
 const Golden = lazy(() => import('./react/pages/Golden'));
@@ -32,6 +33,7 @@ createRoot(document.getElementById('app')!).render(
             <Route path="/e/:slug" element={<EventDetail />} />
             <Route path="/admin" element={<Admin />} />
             <Route path="/admin/signin" element={<AdminSignin />} />
+            <Route path="/admin/organizers" element={<Organizers />} />
             <Route path="/admin/e/:id" element={<AdminEvent />} />
             <Route path="/admin/e/:id/photos" element={<AdminPhotos />} />
             {import.meta.env.DEV && <Route path="/golden" element={<Golden />} />}
