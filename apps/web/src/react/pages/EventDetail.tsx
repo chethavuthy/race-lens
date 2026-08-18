@@ -21,6 +21,7 @@ import { FaceSearch } from '../components/FaceSearch';
 import { BackLink } from '../components/BackLink';
 import { Button } from '@/components/ui/button';
 import { AlbumSkeleton } from '../components/AlbumSkeleton';
+import { useDeferredLoading } from '../useDeferredLoading';
 
 export default function EventDetail() {
   const { slug = '' } = useParams();
@@ -48,8 +49,18 @@ export default function EventDetail() {
   const [faceResults, setFaceResults] = useState<WallItem[] | null>(null);
   const [faceNote, setFaceNote] = useState<string | null>(null);
 
+  const showSkeleton = useDeferredLoading(loading);
+
   useEffect(() => {
     let live = true;
+    // Reset on a slug change. React Router keeps this component mounted when only
+    // the parameter changes, so without this the previous album's photos stay on
+    // screen under the new album's title until the request lands — which is worse
+    // than a placeholder, because it looks like real content for the wrong race.
+    setLoading(true);
+    setPhotos([]);
+    setCursor(null);
+    setEvent(null);
     api.getEvent(slug)
       .then((r) => { if (!live) return; setEvent(r.event); setPhotos(r.photos); setCursor(r.cursor); })
       .catch((e: Error) => { if (live) setError(e.message); })
@@ -109,7 +120,10 @@ export default function EventDetail() {
       : null);
   };
 
-  if (loading) return <AlbumSkeleton />;
+  // Nothing at all for a fast load — see useDeferredLoading. The album answers in
+  // ~120ms on a warm connection, and a placeholder drawn for that long is a blink.
+  if (showSkeleton) return <AlbumSkeleton />;
+  if (loading) return <div className="min-h-screen" />;
   if (error) {
     return <p className="rounded-md border border-destructive/45 px-4 py-3 text-destructive">{error}</p>;
   }

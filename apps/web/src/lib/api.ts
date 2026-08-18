@@ -137,7 +137,35 @@ function resolveApiBase(): string {
 
 const BASE = resolveApiBase();
 
+/**
+ * In-flight GETs, shared.
+ *
+ * StrictMode mounts every effect twice in development, so each page fired two
+ * identical requests — visible in a Chrome trace as the same album fetched at
+ * 2394.8ms and 2395.5ms. The effect's own guard discards the FIRST response, so
+ * the page waited on the slower duplicate: 823ms instead of 274ms, which made the
+ * loading state longer in development than it will ever be in production and hid
+ * how fast this actually is.
+ *
+ * Keyed by path and cleared the moment it settles, so this is request coalescing
+ * and not a cache — two callers that genuinely want fresh data at different times
+ * still each get a request.
+ */
+const inflight = new Map<string, Promise<unknown>>();
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const isGet = !init?.method || init.method === 'GET';
+  if (isGet) {
+    const existing = inflight.get(path) as Promise<T> | undefined;
+    if (existing) return existing;
+    const p = request<T>(path, init).finally(() => inflight.delete(path));
+    inflight.set(path, p);
+    return p;
+  }
+  return request<T>(path, init);
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, init);
   const text = await res.text();
   let body: any = null;
