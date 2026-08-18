@@ -118,8 +118,12 @@ export function PhotoWall({
                     alt=""
                     loading="lazy"
                     decoding="async"
-                    className="size-full object-cover transition-transform duration-500
-                               [@media(hover:hover)and(pointer:fine)]:group-hover:scale-[1.02]"
+                    /* Plain group-hover: Tailwind v4 already compiles hover: behind
+                       @media (hover: hover), so a touch device never applies it and a
+                       tap cannot leave a tile stuck enlarged. Writing the media query
+                       by hand as an arbitrary variant silently lost the
+                       `and (pointer: fine)` half in the build. */
+                    className="size-full object-cover transition-transform duration-500 group-hover:scale-[1.02]"
                   />
                 )}
                 {/* The minute the shutter fired. The album is a morning, and this
