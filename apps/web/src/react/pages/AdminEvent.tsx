@@ -17,6 +17,7 @@ import { api, type EventSummary } from '@/lib/api';
 import { plural } from '@/lib/format';
 import { Stat } from '../components/Stat';
 import { AdminEventSkeleton } from '../components/AdminEventSkeleton';
+import { Banner } from '../components/Banner';
 import { useDeferredLoading } from '../useDeferredLoading';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -50,6 +51,9 @@ export default function AdminEvent() {
    * full-size originals at ~25 photos a round.
    */
   const [newSize, setNewSize] = useState<'original' | 'thumb' | null>(null);
+  const [creditDraft, setCreditDraft] = useState<Record<string, string>>({});
+  const [removing, setRemoving] = useState<{ id: string; purged: number } | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -76,6 +80,37 @@ export default function AdminEvent() {
     }, 15000) as unknown as number;
     return () => clearInterval(poll.current);
   }, [active, load]);
+
+  /**
+   * Take a photographer's album down, all of it.
+   *
+   * DELETE purges one round and reports what is left, because a 32,000-photo album
+   * cannot come down in a single request. Calling it once looked like it had
+   * worked and left most of the photos live — so this keeps going until the
+   * server says nothing remains, and shows the count while it does. This is the
+   * one promise made to photographers ("one message and it comes off the site"),
+   * so it has to finish.
+   */
+  async function removeSourceFully(sourceId: string) {
+    setConfirmRemove(null);
+    setBusy(`rm-${sourceId}`);
+    setError(null);
+    try {
+      let purged = 0;
+      for (;;) {
+        const r = await api.admin.removeSource(sourceId);
+        purged += r.purged;
+        setRemoving({ id: sourceId, purged });
+        if (r.remaining === 0) break;
+      }
+      setRemoving(null);
+      setNotice(`Album removed — ${purged.toLocaleString()} photos and everything indexed from them are gone.`);
+      await load();
+    } catch (e) {
+      setRemoving(null);
+      setError((e as Error).message);
+    } finally { setBusy(null); }
+  }
 
   async function run(key: string, fn: () => Promise<unknown>, ok: string) {
     setBusy(key);
@@ -172,6 +207,53 @@ export default function AdminEvent() {
         </Button>
       </section>
 
+      <section className="mb-8 rounded-xl border border-border p-5">
+        <h2 className="mb-4 text-sm font-semibold text-muted-foreground">This event</h2>
+        <div className="flex flex-wrap items-center gap-3">
+          <Button
+            variant="outline"
+            disabled={busy === 'status'}
+            onClick={() => run('status',
+              () => api.admin.setStatus(id, event.status === 'draft' ? 'ready' : 'draft'),
+              event.status === 'draft'
+                ? 'Published — runners can find this album now.'
+                : 'Unpublished — hidden from runners. Photos and search data are kept.')}
+          >
+            {busy === 'status' ? <Loader2 className="animate-spin" /> : null}
+            {event.status === 'draft' ? 'Publish' : 'Unpublish'}
+          </Button>
+
+          {/* A file input styled as a button: the native control cannot be
+              restyled, so the label is the affordance and the input is hidden
+              but still focusable. */}
+          <Button variant="outline" render={<label htmlFor="ev-banner" />}
+                  className="cursor-pointer">
+            {busy === 'banner' ? <Loader2 className="animate-spin" /> : null}
+            {event.banner_url ? 'Replace banner' : 'Add banner'}
+          </Button>
+          <input
+            id="ev-banner" type="file" accept="image/*" className="sr-only"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              e.target.value = '';
+              if (file) run('banner', () => api.admin.uploadBanner(id, file), 'Banner updated.');
+            }}
+          />
+        </div>
+        <p className="mt-3 max-w-2xl text-sm text-muted-foreground">
+          {event.status === 'draft'
+            ? 'This album is not listed for runners yet.'
+            : 'Unpublishing hides the event from runners. Photos and search data are kept, so publishing again is instant.'}
+        </p>
+        {event.banner_url && (
+          <div className="mt-4 w-64">
+            {/* The same treatment the listing uses, so this preview answers
+                "how will runners see it" rather than showing a cropped variant. */}
+            <Banner url={event.banner_url} className="rounded-md" />
+          </div>
+        )}
+      </section>
+
       <BibRules
         event={event}
         indexed={t.indexed}
@@ -202,6 +284,29 @@ export default function AdminEvent() {
                     {' · '}{s.image_source === 'thumb' ? 'resized' : 'full originals'}
                   </p>
                 </div>
+                {/* How this photographer is credited on the public page. Empty
+                    until an organizer fills it in, and the album link is shown on
+                    its own until then rather than inventing a byline. */}
+                <div className="flex w-full items-center gap-2 sm:w-auto">
+                  <Input
+                    value={creditDraft[s.id] ?? s.credit_name ?? ''}
+                    placeholder="Credit as… e.g. Sok Dara"
+                    disabled={busy === `credit-${s.id}`}
+                    onChange={(e) => setCreditDraft({ ...creditDraft, [s.id]: e.target.value })}
+                    className="h-8 w-full min-w-[12rem] text-sm sm:w-56"
+                  />
+                  <Button
+                    variant="outline" size="sm"
+                    disabled={busy === `credit-${s.id}` || creditDraft[s.id] === undefined}
+                    onClick={() => run(`credit-${s.id}`, async () => {
+                      await api.admin.setCredit(s.id, (creditDraft[s.id] ?? '').trim());
+                      setCreditDraft((d) => { const { [s.id]: _drop, ...rest } = d; return rest; });
+                    }, 'Credit saved — it shows on the event page.')}
+                  >
+                    Save
+                  </Button>
+                </div>
+
                 {/* Which size the NEXT round downloads. Operator only — the API
                     refuses 'original' from anyone else, so the control is hidden
                     because the choice is already made, not to keep it out of
@@ -240,10 +345,71 @@ export default function AdminEvent() {
                   {busy === s.id ? <Loader2 className="animate-spin" /> : null}
                   {complete ? 'Recheck' : 'Continue'}
                 </Button>
+
+                {/* The photographer's own request, and the only destructive
+                    control here — so it is styled as one and confirms first. */}
+                {owner && (
+                  confirmRemove === s.id ? (
+                    <div className="flex items-center gap-2">
+                      <Button variant="destructive" size="sm"
+                              disabled={busy === `rm-${s.id}`}
+                              onClick={() => removeSourceFully(s.id)}>
+                        {busy === `rm-${s.id}` ? <Loader2 className="animate-spin" /> : null}
+                        {removing?.id === s.id
+                          ? `Removing… ${removing.purged.toLocaleString()} deleted`
+                          : 'Yes — take it down'}
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => setConfirmRemove(null)}>Cancel</Button>
+                    </div>
+                  ) : (
+                    <Button variant="destructive" size="sm"
+                            disabled={!!busy || !!active}
+                            title="The photographer asked for this album to be taken down"
+                            onClick={() => setConfirmRemove(s.id)}>
+                      Remove
+                    </Button>
+                  )
+                )}
               </li>
             );
           })}
         </ul>
+
+        {/* Removed links stay listed. The row outlives the takedown deliberately —
+            it is the only thing that stops the next paste of the same URL, or a
+            queued continuation, re-indexing an album that was withdrawn. Hiding it
+            would make a restore impossible and a re-add look fine. */}
+        {report.sources.some((x) => x.removed_at) && (
+          <ul className="divide-y divide-border border-t border-border">
+            {report.sources.filter((x) => x.removed_at).map((s) => (
+              <li key={s.id} className="flex flex-wrap items-center gap-4 px-5 py-4 opacity-70">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm line-through">{s.drive_folder_id}</p>
+                  <p className="tabular mt-0.5 text-xs text-muted-foreground">
+                    removed · {s.indexed > 0
+                      ? `${s.indexed.toLocaleString()} photos still to purge`
+                      : 'nothing left on the site'}
+                  </p>
+                </div>
+                {s.indexed > 0 && (
+                  <Button variant="destructive" size="sm" disabled={!!busy}
+                          title="Finish a purge that was interrupted"
+                          onClick={() => removeSourceFully(s.id)}>
+                    {busy === `rm-${s.id}` ? <Loader2 className="animate-spin" /> : null}
+                    {removing?.id === s.id
+                      ? `Finishing… ${removing.purged.toLocaleString()} deleted`
+                      : 'Finish deleting'}
+                  </Button>
+                )}
+                <Button variant="outline" size="sm" disabled={!!busy}
+                        onClick={() => run(`restore-${s.id}`, () => api.admin.restoreSource(s.id),
+                          'Link restored — press Continue to index it again.')}>
+                  Restore link
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
 
         {/* Adding a folder to an album that already has one. Built from the same
             row as the links above it, so adding a link and re-running one read as

@@ -5,6 +5,7 @@
 | Date | 2026-08-10 |
 | Scope | `apps/api` (Worker), `apps/web` (SPA + Pages Function), `indexer/` (Python), `schema.sql`, `migrations/`, `tools/`, `.github/workflows/` — ~11k lines |
 | Baseline | `8fb2f96` (main) |
+| Note | The frontend was rebuilt in React + Tailwind + shadcn/ui after this audit. Findings below cite `.vue` files that no longer exist; they are kept as written because an audit trail that is edited after the fact stops being one. Where a finding described behaviour rather than a line — the coordinate-space contract, the search-sequence guard, the poll gating — that behaviour was carried across deliberately and the reasoning travels in the new components' comments. |
 | Method | Six specialist reviewers over disjoint slices, then adversarial re-verification of the eight most severe findings. 38 findings raised, 8 adversarially verified, 8 confirmed, 0 refuted. Severities below are the **post-verification** values. |
 
 ---

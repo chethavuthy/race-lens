@@ -12,7 +12,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { Loader2 } from 'lucide-react';
+import { Loader2, RefreshCw, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { plural } from '@/lib/format';
 import { BackLink } from '../components/BackLink';
@@ -32,6 +32,7 @@ export default function AdminPhotos() {
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
 
@@ -46,6 +47,20 @@ export default function AdminPhotos() {
   }, [id, filter]);
 
   useEffect(() => { load(); }, [load]);
+
+  /**
+   * One small mutation, then reload. Deliberately not patching the row in place:
+   * the previous implementation refetched page 1 with filter 'all' and grepped it,
+   * so a correction past the first page never appeared, and the failure was
+   * swallowed.
+   */
+  async function act(key: string, fn: () => Promise<unknown>) {
+    setBusy(key);
+    setError(null);
+    try { await fn(); await load(); }
+    catch (e) { setError((e as Error).message); }
+    finally { setBusy(null); }
+  }
 
   async function saveBib(faceId: string) {
     const value = draft.trim();
@@ -130,11 +145,51 @@ export default function AdminPhotos() {
                     </div>
                   ))}
                 </div>
-                <figcaption className="flex items-center justify-between px-3 py-2 text-xs text-muted-foreground">
-                  <span>{p.faces.length ? plural(p.faces.length, 'face') : 'no face found'}</span>
-                  <a href={p.original_url} target="_blank" rel="noreferrer" className="underline-offset-4 hover:underline">
-                    original
-                  </a>
+                <figcaption className="space-y-2 px-3 py-2 text-xs text-muted-foreground">
+                  <div className="flex items-center justify-between gap-2">
+                    <span>{p.faces.length ? plural(p.faces.length, 'face') : 'no face found'}</span>
+                    <a href={p.original_url} target="_blank" rel="noreferrer" className="underline-offset-4 hover:underline">
+                      original
+                    </a>
+                  </div>
+
+                  {/* Every bib on this photo, each removable. A wrong number is
+                      worse than a missing one — it puts a stranger in someone's
+                      results — and deleting it also tombstones it, so the next
+                      pass does not read it straight back. */}
+                  {p.bibs.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {p.bibs.map((b) => (
+                        <span key={b.bib}
+                              className="tabular inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5">
+                          {b.bib}
+                          {b.source === 'manual' && <span className="text-primary" title="typed by hand">·</span>}
+                          <button
+                            aria-label={`Remove bib ${b.bib}`}
+                            title="Wrong number — remove it and stop it coming back"
+                            disabled={busy === `bib-${p.id}-${b.bib}`}
+                            onClick={() => act(`bib-${p.id}-${b.bib}`,
+                              () => api.admin.deletePhotoBib(p.id, b.bib))}
+                            className="text-muted-foreground hover:text-destructive"
+                          >
+                            <X className="size-3" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  <button
+                    disabled={busy === `re-${p.id}`}
+                    onClick={() => act(`re-${p.id}`, () => api.admin.reindexPhoto(p.id))}
+                    className="inline-flex items-center gap-1 underline-offset-4 hover:underline disabled:opacity-50"
+                    title="Read this one photo again — seconds, rather than the whole folder"
+                  >
+                    {busy === `re-${p.id}`
+                      ? <Loader2 className="size-3 animate-spin" />
+                      : <RefreshCw className="size-3" />}
+                    re-read this photo
+                  </button>
                 </figcaption>
               </figure>
             ))}

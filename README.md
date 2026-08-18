@@ -15,7 +15,7 @@ loop. Originals stay on Drive — we store thumbnails and vectors.
 ## Layout
 
 ```
-apps/web/     Vite + Vue 3 → Cloudflare Pages
+apps/web/     Vite + React 19 + Tailwind v4 + shadcn/ui → Cloudflare Pages
 apps/api/     Hono Worker → wrangler (D1 + R2)
 indexer/      Python pipeline, runs on a GitHub Actions runner
 tools/golden/ Embedding parity harness (the Phase 5 gate)

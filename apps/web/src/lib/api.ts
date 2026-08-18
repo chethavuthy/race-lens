@@ -406,6 +406,18 @@ export const api = {
         cursor: string | null;
       }>(`/api/admin/events/${eventId}/photos?filter=${filter}&cursor=${encodeURIComponent(cursor ?? '')}`),
 
+    /**
+     * Remove one wrong bib from one photo.
+     *
+     * The route tombstones it as well as deleting it — a deleted OCR read comes
+     * straight back on the next pass otherwise, and the correction looks undone.
+     * Send the bib as it is stored, prefix included: 'F-1', not '1'.
+     */
+    deletePhotoBib: (photoId: string, bib: string) =>
+      req<{ ok: true; removed: string }>(
+        `/api/admin/photos/${photoId}/bibs/${encodeURIComponent(bib)}`,
+        { method: 'DELETE' }),
+
     reindexPhoto: (photoId: string) =>
       req<{ job_id: string }>(`/api/admin/photos/${photoId}/reindex`, { method: 'POST' }),
 
