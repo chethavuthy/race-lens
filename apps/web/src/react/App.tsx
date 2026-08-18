@@ -7,8 +7,13 @@
  */
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
+import { useScrollRestoration } from './scroll';
 
 export default function App({ children }: { children: ReactNode }) {
+  // Back returns the reader to where they were. A client-side router owns its own
+  // navigation, so what it does not do here, nobody does.
+  useScrollRestoration();
+
   return (
     <div className="mx-auto w-full max-w-[1120px] px-5 pb-14">
       <header className="flex items-center justify-between py-5 pb-7">

@@ -11,15 +11,16 @@
  */
 import { useEffect, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, ScanFace } from 'lucide-react';
+import { ScanFace } from 'lucide-react';
 import { api, type EventSummary, type FaceMatch, type Photo } from '@/lib/api';
 import { plural } from '@/lib/format';
 import { Bib } from '../components/Bib';
 import { BibInput } from '../components/BibInput';
 import { PhotoWall, type WallItem } from '../components/PhotoWall';
 import { FaceSearch } from '../components/FaceSearch';
+import { BackLink } from '../components/BackLink';
 import { Button } from '@/components/ui/button';
-import { Skeleton } from '@/components/ui/skeleton';
+import { AlbumSkeleton } from '../components/AlbumSkeleton';
 
 export default function EventDetail() {
   const { slug = '' } = useParams();
@@ -108,14 +109,7 @@ export default function EventDetail() {
       : null);
   };
 
-  if (loading) {
-    return (
-      <div className="space-y-6 py-10">
-        <Skeleton className="mx-auto h-40 w-56" />
-        <Skeleton className="h-4 w-40" />
-      </div>
-    );
-  }
+  if (loading) return <AlbumSkeleton />;
   if (error) {
     return <p className="rounded-md border border-destructive/45 px-4 py-3 text-destructive">{error}</p>;
   }
@@ -124,9 +118,7 @@ export default function EventDetail() {
 
   return (
     <div className="pb-16">
-      <Link to="/" className="mb-6 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
-        <ArrowLeft className="size-4" /> All events
-      </Link>
+      <BackLink to="/">All events</BackLink>
 
       <header className="mb-8">
         <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">{event?.name}</h1>
@@ -140,8 +132,11 @@ export default function EventDetail() {
           with no bibs is precisely the one where a face is the only way in, so
           hiding both together (as this did) removed the search from the albums
           that depend on it most. */}
-      <div className="mb-10 flex flex-col items-center gap-6 rounded-xl border border-border
-                      bg-card/40 px-4 py-10">
+      {/* One reserved height for both variants. Whether this race used bibs is
+          not known until the event loads, so a panel that sizes to its contents
+          moves the whole wall down the page the moment the answer arrives. */}
+      <div className="mb-10 flex min-h-[22.5rem] flex-col items-center justify-center gap-6
+                      rounded-xl border border-border bg-card/40 px-4 py-10">
         {bibsOn && (
           <>
             <BibInput value={draft} onChange={setDraft} onSubmit={() => search(draft)} band={event?.name} />

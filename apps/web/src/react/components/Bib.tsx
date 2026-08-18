@@ -25,7 +25,11 @@ export function Bib({
       data-band={band}
       className={cn(
         'bib inline-block select-none text-center',
-        size === 'lg' ? 'min-w-[13rem] px-6 pt-7 pb-4' : 'min-w-[9rem] max-w-[13rem] px-3 pt-5 pb-2',
+        // A FIXED width, not shrink-to-fit. A bib is a printed rectangle: it does
+        // not get wider as the number gets longer, and one that resized while you
+        // typed would be the opposite of the object it is standing in for. It also
+        // means the placeholder reserves exactly the loaded size.
+        size === 'lg' ? 'w-[20rem] max-w-full px-6 pt-7 pb-4' : 'w-[11rem] px-3 pt-5 pb-2',
         className,
       )}
     >

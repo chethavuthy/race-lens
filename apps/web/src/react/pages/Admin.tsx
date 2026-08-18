@@ -13,8 +13,9 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { FolderSearch, Loader2, Plus } from 'lucide-react';
-import { api, type EventSummary } from '@/lib/api';
+import { ApiError, api, type EventSummary } from '@/lib/api';
 import { plural } from '@/lib/format';
+import { Invitation, type Gate } from '../components/Invitation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -23,9 +24,19 @@ type Inspected = Awaited<ReturnType<typeof api.admin.inspect>>;
 
 export default function Admin() {
   const [owner, setOwner] = useState(false);
+  /**
+   * Nothing renders until we know whether this person is through the door.
+   *
+   * `gate` cannot be read from the URL — only the API knows — so assuming either
+   * answer while asking shows the wrong one first. Assuming "not gated" put the
+   * indexing tool in front of every stranger for a round trip; assuming the
+   * opposite flashes the invitation at the operator. One honest line beats both.
+   */
+  const [checking, setChecking] = useState(true);
+  const [gate, setGate] = useState<Gate | null>(null);
   const [events, setEvents] = useState<EventSummary[]>([]);
   const [url, setUrl] = useState('');
-  const [checking, setChecking] = useState(false);
+  const [inspecting, setInspecting] = useState(false);
   const [folder, setFolder] = useState<Inspected | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -48,16 +59,54 @@ export default function Admin() {
   const [prefixes, setPrefixes] = useState('');
 
   const refresh = () => api.admin.listEvents().then((r) => setEvents(r.events)).catch(() => {});
+
+  /**
+   * Several different failures all mean "not through the door", and none of them
+   * deserves a red banner — but they are told apart, because the way out differs.
+   *
+   * The Worker's `code` decides it, NOT the 403 alone. It answers 403 for four
+   * distinct reasons, and reading only the status once told the operator "this
+   * account isn't on the list" while they were on the workers.dev origin, where
+   * admin is refused by hostname and no list was ever consulted. A wrong
+   * diagnosis sends someone hunting for the wrong fix.
+   *
+   * Someone with no Access cookie at all never reaches the Worker: Access 302s
+   * the request to a cross-origin login page and fetch() reports only "Failed to
+   * fetch", with no status to read. The public API separates that from a dead
+   * connection — same origin, no gate, so if it answers, the gate was the problem.
+   */
+  async function accessDenial(e: unknown): Promise<Gate | null> {
+    if (e instanceof ApiError) {
+      if (e.status !== 403) return null;
+      if (e.code === 'not_invited') return 'unlisted';
+      if (e.code === 'banned') return 'removed';
+      return 'anonymous';
+    }
+    try { await api.listEvents(); return 'anonymous'; } catch { return null; }
+  }
+
   useEffect(() => {
-    api.admin.me().then((m) => setOwner(m.owner)).catch(() => {});
-    refresh();
+    (async () => {
+      try {
+        const me = await api.admin.me();
+        setOwner(me.owner);
+        setGate(null);
+        await refresh();
+      } catch (e) {
+        const denial = await accessDenial(e);
+        if (denial) setGate(denial);
+        else setError((e as Error).message);
+      } finally {
+        setChecking(false);
+      }
+    })();
   }, []);
 
   async function check() {
-    setChecking(true); setError(null); setFolder(null);
+    setInspecting(true); setError(null); setFolder(null);
     try { setFolder(await api.admin.inspect(url.trim())); }
     catch (e) { setError((e as Error).message); }
-    finally { setChecking(false); }
+    finally { setInspecting(false); }
   }
 
   async function start() {
@@ -89,6 +138,12 @@ export default function Admin() {
     && (mode === 'new' ? name.trim().length > 0 : target.length > 0)
     && (!owner || size !== null);
 
+  // One honest line rather than the wrong page for a round trip.
+  if (checking) {
+    return <p className="py-10 text-sm text-muted-foreground">Checking your access…</p>;
+  }
+  if (gate) return <Invitation gate={gate} />;
+
   return (
     <div className="pb-16">
       <header className="mb-8">
@@ -115,8 +170,8 @@ export default function Admin() {
             placeholder="https://drive.google.com/drive/folders/…"
             className="min-w-[16rem] flex-1"
           />
-          <Button onClick={check} disabled={checking || !url.trim()}>
-            {checking ? <Loader2 className="animate-spin" /> : <FolderSearch />} Check
+          <Button onClick={check} disabled={inspecting || !url.trim()}>
+            {inspecting ? <Loader2 className="animate-spin" /> : <FolderSearch />} Check
           </Button>
         </div>
         {folder && (

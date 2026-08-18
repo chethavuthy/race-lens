@@ -14,9 +14,10 @@
  */
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowLeft, Loader2, UserPlus } from 'lucide-react';
+import { Loader2, UserPlus } from 'lucide-react';
 import { api, type Organizer } from '@/lib/api';
 import { plural } from '@/lib/format';
+import { BackLink } from '../components/BackLink';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
@@ -46,9 +47,7 @@ export default function Organizers() {
 
   return (
     <div className="pb-16">
-      <Link to="/admin" className="mb-6 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
-        <ArrowLeft className="size-4" /> Back to albums
-      </Link>
+      <BackLink to="/admin">Back to albums</BackLink>
 
       <header className="mb-8">
         <h1 className="text-2xl font-bold tracking-tight">Who can publish</h1>

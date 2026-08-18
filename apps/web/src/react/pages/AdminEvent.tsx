@@ -12,11 +12,12 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ArrowLeft, Loader2, Square } from 'lucide-react';
+import { Loader2, Square } from 'lucide-react';
 import { api, type EventSummary } from '@/lib/api';
 import { plural } from '@/lib/format';
 import { Stat } from '../components/Stat';
 import { BibRules } from '../components/BibRules';
+import { BackLink } from '../components/BackLink';
 import { Button } from '@/components/ui/button';
 
 type Report = Awaited<ReturnType<typeof api.admin.report>>;
@@ -78,9 +79,7 @@ export default function AdminEvent() {
 
   return (
     <div className="pb-16">
-      <Link to="/admin" className="mb-6 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
-        <ArrowLeft className="size-4" /> All events
-      </Link>
+      <BackLink to="/admin">All events</BackLink>
 
       <header className="mb-8">
         <h1 className="text-2xl font-bold tracking-tight">{event.name}</h1>

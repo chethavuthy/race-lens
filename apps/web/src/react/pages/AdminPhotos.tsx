@@ -12,9 +12,10 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ArrowLeft, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { plural } from '@/lib/format';
+import { BackLink } from '../components/BackLink';
 import { Button } from '@/components/ui/button';
 
 type Filter = 'all' | 'no-face' | 'no-bib';
@@ -52,9 +53,7 @@ export default function AdminPhotos() {
 
   return (
     <div className="pb-16">
-      <Link to={`/admin/e/${id}`} className="mb-6 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
-        <ArrowLeft className="size-4" /> Back to the album
-      </Link>
+      <BackLink to={`/admin/e/${id}`}>Back to the album</BackLink>
 
       <header className="mb-6">
         <h1 className="text-2xl font-bold tracking-tight">Inspect photos</h1>
