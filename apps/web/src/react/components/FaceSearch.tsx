@@ -38,10 +38,22 @@ export function FaceSearch({
   const video = useRef<HTMLVideoElement>(null);
   const stream = useRef<MediaStream | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  // `open` as a ref, because getUserMedia resolves after an await and the closure
+  // that started it cannot see a later prop.
+  const openRef = useRef(open);
+  openRef.current = open;
 
+  /**
+   * Release the camera, and mean it.
+   *
+   * Also clears the element's srcObject: a <video> holding a stopped stream keeps
+   * a reference to it, and leaving one attached is how a "stopped" camera comes
+   * back to life the next time the element plays.
+   */
   const stopCamera = useCallback(() => {
     stream.current?.getTracks().forEach((t) => t.stop());
     stream.current = null;
+    if (video.current) video.current.srcObject = null;
   }, []);
 
   // The camera must stop when the dialog closes, whichever way it closed —
@@ -100,6 +112,10 @@ export function FaceSearch({
       onResults(r.matches, faceCount);
       onClose();
     } catch (e) {
+      // Releasing here as well. A failed read is the most likely outcome of all —
+      // "no face found" on a bad frame — and it left the dialog sitting open on an
+      // error message with the camera still running behind it.
+      stopCamera();
       setStage('error');
       setMessage(
         e instanceof NoFaceError
@@ -112,11 +128,22 @@ export function FaceSearch({
   }
 
   async function startCamera() {
+    // Anything already running is released first. Two presses of "Use the camera"
+    // otherwise overwrite the ref and orphan the first stream, which then has
+    // nothing holding it and never stops — a camera light with no way back.
+    stopCamera();
     try {
-      stream.current = await navigator.mediaDevices.getUserMedia({
+      const media = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 960 } },
         audio: false,
       });
+      // The dialog can close while the permission prompt is up. Whoever closed it
+      // has already run the teardown, so this stream would leak past it.
+      if (!openRef.current) {
+        media.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      stream.current = media;
       setStage('camera');
       // The <video> only exists once the camera stage renders.
       requestAnimationFrame(async () => {

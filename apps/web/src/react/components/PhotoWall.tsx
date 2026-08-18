@@ -22,7 +22,7 @@ import { clockTime } from '@/lib/format';
 import type { Photo } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 
-export type WallItem = { photo: Photo; note?: string };
+export type WallItem = { photo: Photo };
 
 const BREAKPOINTS = [
   { min: 1101, columns: 4 },
@@ -90,7 +90,7 @@ export function PhotoWall({
       <div className="flex gap-1.5 sm:gap-2">
         {columns.map((col, i) => (
           <div key={i} className="flex min-w-0 flex-1 flex-col gap-1.5 sm:gap-2">
-            {col.map(({ photo, note }) => (
+            {col.map(({ photo }) => (
               <a
                 key={photo.id}
                 href={photo.original_url}
@@ -120,12 +120,6 @@ export function PhotoWall({
                                    bg-black/55 px-1.5 py-0.5 text-[0.7rem] text-white/90
                                    opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100">
                     {clockTime(photo.taken_at)}
-                  </span>
-                )}
-                {note && (
-                  <span className="tabular absolute top-1 right-1 rounded bg-primary px-1.5 py-0.5
-                                   text-[0.7rem] font-bold text-primary-foreground">
-                    {note}
                   </span>
                 )}
               </a>

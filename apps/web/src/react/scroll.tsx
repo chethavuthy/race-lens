@@ -1,32 +1,35 @@
 /**
- * Put the reader back where they were, and keep putting them there while the
- * page grows under them.
+ * Put the reader back where they were.
  *
- * The browser does this natively on a full page load, but a client-side router
- * owns its own navigation, so what it does not do, nobody does. Every page here
- * mounts empty and fills in from the API, which is what makes it hard: at the
- * moment a POP lands, the document is a header and a spinner.
+ * Keyed by PATH, not by history entry. Two earlier attempts keyed on
+ * location.key and both failed for the same reason: they made "return to the
+ * list" a piece of history arithmetic, and history is not a reliable place to
+ * count. Ten bib searches pushed ten entries, so a Back-shaped control stepped
+ * through them one at a time — ten clicks to reach the list. Replacing the search
+ * fixed the count, but the key test used to decide "is there something behind me"
+ * (`key === 'default'`) is React Router v6 behaviour that v7 does not have: v7
+ * assigns a real key to the first entry too, so the test silently misfired.
  *
- * Correcting repeatedly rather than waiting for the right moment and scrolling
- * once. Two obvious approaches both fail:
+ * By path, none of that matters. Leaving a page records where it was; arriving at
+ * a page we have a record for puts the reader back there, whether they got there
+ * by Back, by a link, or by the wordmark. That is also what a reader means: "take
+ * me back to the list" is about the list, not about the shape of their history.
  *
- *   - Scroll immediately, and the browser clamps 3,000px to the bottom of a
- *     200px document. The position is gone before the data arrives.
- *   - Wait until the document is tall enough, then scroll — but "tall enough"
- *     can be measured against the OUTGOING page, which is about to be replaced
- *     by a short one.
+ * The correction repeats, because every page here mounts empty and fills in from
+ * the API — scrolling once on arrival lands in a document that is still a header
+ * and a spinner, and the browser clamps the offset to the bottom of it.
  *
- * There is no single instant that is right for every page, so this stops looking
- * for one and re-applies the target every 50ms until it sticks.
- *
- * setInterval, not requestAnimationFrame: rAF does not fire at all in a tab that
- * is not being painted, so a rAF-driven restore never runs there.
+ * setInterval, not requestAnimationFrame: rAF does not fire in a tab that is not
+ * being painted, so a rAF-driven restore never runs there.
  */
-import { useEffect, useRef } from 'react';
-import { useLocation, useNavigate, useNavigationType } from 'react-router-dom';
+import { useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 
 const RESTORE_MS = 1500;
 const positions = new Map<string, number>();
+// Dev-only handle. Scroll restoration is invisible when it works and hard to
+// reason about when it does not, so the state is reachable from the console.
+if (import.meta.env.DEV) (window as any).__racelensScroll = positions;
 let restoring = 0;
 
 function restoreScroll(top: number) {
@@ -52,72 +55,53 @@ function restoreScroll(top: number) {
     window.scrollTo(0, Math.min(top, max));
   };
 
-  // Once before the first tick: a page restored from cache is already its full
-  // height here, and waiting 50ms shows the top of the album for a frame first.
   apply();
-
   const deadline = performance.now() + RESTORE_MS;
   restoring = window.setInterval(() => {
     apply();
-    if (window.scrollY >= top - 1 || performance.now() > deadline) stop();
+    // Stops on the target OR on the page's own ceiling: a list that is shorter
+    // than the offset it remembers can never reach it, and spinning for the full
+    // 1.5s over that would keep fighting a reader who is already scrolling.
+    const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    if (window.scrollY >= Math.min(top, max) - 1 || performance.now() > deadline) stop();
   }, 50);
 }
 
 /**
- * Remembers where each history entry was, and restores on Back or Forward.
+ * One listener, for the life of the page, installed outside React.
  *
- * Keyed by location.key, which is the browser history entry — not the path. Two
- * visits to the same album are two entries and two positions, which is what a
- * reader expects from Back.
+ * It began inside an effect and never fired. The effect ran — twice, as StrictMode
+ * does — and a listener attached by hand in the console fired fine, so the
+ * subscription was being torn down by a lifecycle this hook does not control.
+ * Recording where the reader is has nothing to do with a component's lifetime, so
+ * it stops pretending it does: installed once, idempotent, and it reads the path
+ * from window.location so there is no captured value to go stale.
  */
+let installed = false;
+
+function installRecorder() {
+  if (installed) return;
+  installed = true;
+  window.addEventListener('scroll', () => {
+    positions.set(window.location.pathname, window.scrollY);
+  }, { passive: true });
+}
+
 export function useScrollRestoration() {
-  const location = useLocation();
-  const navType = useNavigationType();
-  const key = useRef(location.key);
+  const { pathname } = useLocation();
 
   useEffect(() => {
-    // Ours to do, so tell the browser to stop trying as well — otherwise both
-    // fire on a reload and the page visibly jumps twice.
+    installRecorder();
+    // Ours to do, so stop the browser doing it too — otherwise both fire on a
+    // reload and the page visibly jumps twice.
     if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
   }, []);
 
-  // Record continuously rather than on unmount: a navigation can unmount the
-  // page before an effect cleanup reads the final position.
   useEffect(() => {
-    key.current = location.key;
-    const onScroll = () => positions.set(key.current, window.scrollY);
-    window.addEventListener('scroll', onScroll, { passive: true });
-    return () => window.removeEventListener('scroll', onScroll);
-  }, [location.key]);
-
-  useEffect(() => {
-    const saved = positions.get(location.key);
-    if (navType === 'POP' && saved) restoreScroll(saved);
-    else if (navType === 'PUSH') window.scrollTo(0, 0);
-    // REPLACE leaves the scroll alone: it is how a search updates the URL in
-    // place, and yanking the reader to the top on every keystroke would be its
-    // own bug.
-  }, [location.key, navType]);
-}
-
-/**
- * Back, meaning back.
- *
- * A <Link to="/"> PUSHES a new entry, so the reader arrives at a fresh copy of
- * the list at the top, with their place gone and the Back button now pointing
- * at the page they just left. When there is a previous entry in this session,
- * this goes back to it — which is a POP, so the restoration above applies and
- * the reader lands exactly where they were.
- *
- * `key === 'default'` marks the entry the app booted on: someone who opened an
- * album link directly has nothing behind them, so for them this is a normal
- * navigation to `to`.
- */
-export function useBack(to: string) {
-  const navigate = useNavigate();
-  const { key } = useLocation();
-  return () => {
-    if (key !== 'default') navigate(-1);
-    else navigate(to);
-  };
+    const saved = positions.get(pathname);
+    if (saved) restoreScroll(saved);
+    else window.scrollTo(0, 0);
+    // pathname only: a bib search changes the query, not the page, and must not
+    // scroll the reader anywhere.
+  }, [pathname]);
 }

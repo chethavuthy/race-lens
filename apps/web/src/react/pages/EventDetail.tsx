@@ -71,7 +71,11 @@ export default function EventDetail() {
   // The URL is the source of truth: this runs for a typed search, for Back and
   // Forward, and for someone opening a shared link.
   useEffect(() => {
-    if (!searched) { setResults(null); setAlternatives([]); return; }
+    // Clearing the search clears the bib with it. Handled here rather than in the
+    // button, so Back out of a search and a shared link with no bib both leave an
+    // empty bib too — a number still sitting in it after "Show the whole album"
+    // reads as a filter that is still on.
+    if (!searched) { setResults(null); setAlternatives([]); setDraft(''); return; }
     let live = true;
     setSearching(true);
     setDraft(searched);
@@ -104,17 +108,21 @@ export default function EventDetail() {
     const value = v.trim();
     setFaceResults(null);
     setFaceNote(null);
-    if (value) setParams({ bib: value }); else setParams({});
+    // REPLACE, not push. A search refines the view you are already on; it is not
+    // a new page. Pushing meant ten searches left ten history entries, so "All
+    // events" — which goes back — stepped through all of them one at a time
+    // instead of returning to the list. Replacing keeps the album as a single
+    // entry, so one step back is the list, with its scroll position intact.
+    // "Show the whole album" is how you undo a search.
+    setParams(value ? { bib: value } : {}, { replace: true });
   };
 
   const onFaceResults = (matches: FaceMatch[], faceCount: number) => {
-    setParams({});
-    setFaceResults(matches.map((m) => ({
-      photo: m.photo,
-      // The score is the reason this photo is here. Showing it lets a runner
-      // judge a weak match instead of trusting the ranking blindly.
-      note: `${Math.round(m.score * 100)}%`,
-    })));
+    setParams({}, { replace: true });
+    // The score decides the ORDER and the cut-off, and that is where it belongs.
+    // Printed on every tile it asked the runner to audit the matcher — a number
+    // they cannot act on, over a photo they can see for themselves.
+    setFaceResults(matches.map((m) => ({ photo: m.photo })));
     setFaceNote(faceCount > 1
       ? `Matched the largest of ${faceCount} faces in your photo.`
       : null);
@@ -183,9 +191,7 @@ export default function EventDetail() {
             <p className="tabular font-[family-name:var(--font-display)] text-xl font-bold">
               {plural(faceResults.length, 'photo')} of you
             </p>
-            <p className="text-sm text-muted-foreground">
-              {faceNote ? `${faceNote} ` : ''}Percentages are how sure the match is.
-            </p>
+            {faceNote && <p className="text-sm text-muted-foreground">{faceNote}</p>}
             <button
               onClick={() => { setFaceResults(null); setFaceNote(null); }}
               className="text-sm text-muted-foreground underline-offset-4 hover:underline"
