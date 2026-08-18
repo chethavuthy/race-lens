@@ -329,7 +329,7 @@ export const api = {
 
     /**
      * One round of a link removal. Returns what is left to purge, because a large
-     * album takes several calls — see removeSourceFully in AdminEvent.vue.
+     * album takes several calls — see removeSourceFully on the admin event page.
      */
     removeSource: (sourceId: string) =>
       req<{ ok: true; purged: number; remaining: number }>(

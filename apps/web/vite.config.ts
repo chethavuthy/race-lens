@@ -1,13 +1,15 @@
 import { rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
-import vue from '@vitejs/plugin-vue';
+import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 
 const here = (p: string) => fileURLToPath(new URL(p, import.meta.url));
 
 export default defineConfig({
   plugins: [
-    vue(),
+    react(),
+    tailwindcss(),
     {
       // public/golden holds the Phase 5 fixtures (a test face photo and its
       // reference embedding). Vite copies all of public/ into dist, and those
@@ -64,6 +66,10 @@ export default defineConfig({
       '/r2': { target: 'http://127.0.0.1:8787', changeOrigin: true },
     },
   },
+  // shadcn generates components that import from '@/components/ui/*' and
+  // '@/lib/utils', so the alias is part of the contract with the registry rather
+  // than a convenience. Mirrored in tsconfig paths.
+  resolve: { alias: { '@': here('./src') } },
   build: { target: 'es2022' },
   // onnxruntime-web ships prebuilt wasm; excluding it from optimizeDeps keeps
   // Vite from trying to rewrite the worker/wasm loader paths.
