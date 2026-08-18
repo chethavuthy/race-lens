@@ -1,10 +1,9 @@
 /**
  * App shell.
  *
- * MIGRATION IN PROGRESS — the Vue app under src/pages is being replaced page by
- * page. Only ported routes are wired in main.tsx; the rest still live as .vue
- * files and are not reachable until they are ported. main branch remains the
- * deployable Vue app.
+ * Deliberately thin: a wordmark, one link out to the organizer side, and the
+ * page. The product is photographs, so the frame around them stays quiet — see
+ * docs/design-direction.md.
  */
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';

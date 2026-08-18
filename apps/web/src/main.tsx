@@ -1,8 +1,9 @@
 /**
- * React entry. Replaces main.ts (Vue) — see the migration note in App.tsx.
+ * Entry point.
  *
- * Routes are the same paths the Vue router served, so every existing link,
- * bookmark and the Pages Function in functions/e/[slug].ts keep working.
+ * The paths are unchanged from the app this replaced, so every existing link, every
+ * bookmark a runner saved, and the Pages Function in functions/e/[slug].ts that
+ * serves OG tags for a shared album all keep working.
  */
 import { StrictMode, lazy, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -16,6 +17,10 @@ const AdminSignin = lazy(() => import('./react/pages/AdminSignin'));
 const EventDetail = lazy(() => import('./react/pages/EventDetail'));
 const AdminEvent = lazy(() => import('./react/pages/AdminEvent'));
 const Admin = lazy(() => import('./react/pages/Admin'));
+const AdminPhotos = lazy(() => import('./react/pages/AdminPhotos'));
+// Dev only. The parity gate has no business on a production origin, and the
+// vite config strips its fixtures from dist.
+const Golden = lazy(() => import('./react/pages/Golden'));
 
 createRoot(document.getElementById('app')!).render(
   <StrictMode>
@@ -28,6 +33,8 @@ createRoot(document.getElementById('app')!).render(
             <Route path="/admin" element={<Admin />} />
             <Route path="/admin/signin" element={<AdminSignin />} />
             <Route path="/admin/e/:id" element={<AdminEvent />} />
+            <Route path="/admin/e/:id/photos" element={<AdminPhotos />} />
+            {import.meta.env.DEV && <Route path="/golden" element={<Golden />} />}
             <Route path="*" element={<NotFound />} />
           </Routes>
         </Suspense>

@@ -28,6 +28,10 @@ export default function EventDetail() {
 
   const [event, setEvent] = useState<EventSummary | null>(null);
   const [photos, setPhotos] = useState<Photo[]>([]);
+  // Cursor pagination for the browse feed. The album is 1,070 photos at SheRuns
+  // and 32,796 at Angkor, so it arrives a page at a time.
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -46,7 +50,7 @@ export default function EventDetail() {
   useEffect(() => {
     let live = true;
     api.getEvent(slug)
-      .then((r) => { if (!live) return; setEvent(r.event); setPhotos(r.photos); })
+      .then((r) => { if (!live) return; setEvent(r.event); setPhotos(r.photos); setCursor(r.cursor); })
       .catch((e: Error) => { if (live) setError(e.message); })
       .finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
@@ -69,6 +73,20 @@ export default function EventDetail() {
       .finally(() => { if (live) setSearching(false); });
     return () => { live = false; };
   }, [slug, searched]);
+
+  // Guarded by the cursor itself rather than a ref: onLoadMore fires from an
+  // observer that can trigger twice before state settles, and appending the same
+  // page twice would duplicate keys.
+  const loadMore = async () => {
+    if (!cursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const r = await api.getPhotos(slug, cursor);
+      setPhotos((prev) => [...prev, ...r.photos]);
+      setCursor(r.cursor);
+    } catch (e) { setError((e as Error).message); }
+    finally { setLoadingMore(false); }
+  };
 
   const search = (v: string) => {
     const value = v.trim();
@@ -206,7 +224,12 @@ export default function EventDetail() {
           )}
         </section>
       ) : (
-        <PhotoWall items={photos.map((photo) => ({ photo }))} />
+        <PhotoWall
+          items={photos.map((photo) => ({ photo }))}
+          onLoadMore={loadMore}
+          hasMore={!!cursor}
+          loadingMore={loadingMore}
+        />
       )}
 
       <FaceSearch
