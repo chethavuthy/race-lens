@@ -7,9 +7,15 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "jsx": "preserve",
+    "jsx": "react-jsx",
     "isolatedModules": true,
-    "types": ["vite/client"]
+    "types": ["vite/client"],
+    "baseUrl": ".",
+    "paths": { "@/*": ["./src/*"] }
   },
-  "include": ["src/**/*.ts", "src/**/*.vue", "vite.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"],
+  // The .vue pages are still here as the reference for the port, but they are no
+  // longer compiled: nothing imports them and vue-tsc is gone from the scripts.
+  // They come out as each one is ported.
+  "exclude": ["src/pages/**/*.vue", "src/components/**/*.vue", "src/App.vue", "src/main.ts"]
 }
