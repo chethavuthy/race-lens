@@ -12,11 +12,12 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, ScanFace } from 'lucide-react';
-import { api, type EventSummary, type Photo } from '@/lib/api';
+import { api, type EventSummary, type FaceMatch, type Photo } from '@/lib/api';
 import { plural } from '@/lib/format';
 import { Bib } from '../components/Bib';
 import { BibInput } from '../components/BibInput';
 import { PhotoWall, type WallItem } from '../components/PhotoWall';
+import { FaceSearch } from '../components/FaceSearch';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 
@@ -34,6 +35,13 @@ export default function EventDetail() {
   const [results, setResults] = useState<WallItem[] | null>(null);
   const [alternatives, setAlternatives] = useState<string[]>([]);
   const [searching, setSearching] = useState(false);
+
+  // Face results live outside the URL, unlike a bib search: the query is a
+  // selfie, so there is nothing shareable to put in a link and a reload could
+  // not reproduce it. Clearing them is what returning to the album means.
+  const [faceOpen, setFaceOpen] = useState(false);
+  const [faceResults, setFaceResults] = useState<WallItem[] | null>(null);
+  const [faceNote, setFaceNote] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -64,7 +72,22 @@ export default function EventDetail() {
 
   const search = (v: string) => {
     const value = v.trim();
+    setFaceResults(null);
+    setFaceNote(null);
     if (value) setParams({ bib: value }); else setParams({});
+  };
+
+  const onFaceResults = (matches: FaceMatch[], faceCount: number) => {
+    setParams({});
+    setFaceResults(matches.map((m) => ({
+      photo: m.photo,
+      // The score is the reason this photo is here. Showing it lets a runner
+      // judge a weak match instead of trusting the ranking blindly.
+      note: `${Math.round(m.score * 100)}%`,
+    })));
+    setFaceNote(faceCount > 1
+      ? `Matched the largest of ${faceCount} faces in your photo.`
+      : null);
   };
 
   if (loading) {
@@ -101,7 +124,7 @@ export default function EventDetail() {
           <BibInput value={draft} onChange={setDraft} onSubmit={() => search(draft)} band={event?.name} />
           <div className="flex items-center gap-3 text-sm">
             <span className="text-muted-foreground">or</span>
-            <Button variant="outline" size="lg">
+            <Button variant="outline" size="lg" onClick={() => setFaceOpen(true)}>
               <ScanFace /> Find me by face
             </Button>
           </div>
@@ -111,7 +134,37 @@ export default function EventDetail() {
         </div>
       )}
 
-      {searched ? (
+      {faceResults ? (
+        <section>
+          <div className="mb-6">
+            <p className="tabular font-[family-name:var(--font-display)] text-xl font-bold">
+              {plural(faceResults.length, 'photo')} of you
+            </p>
+            <p className="text-sm text-muted-foreground">
+              {faceNote ? `${faceNote} ` : ''}Percentages are how sure the match is.
+            </p>
+            <button
+              onClick={() => { setFaceResults(null); setFaceNote(null); }}
+              className="text-sm text-muted-foreground underline-offset-4 hover:underline"
+            >
+              Show the whole album
+            </button>
+          </div>
+          {faceResults.length === 0 ? (
+            <div className="rounded-xl border border-border p-8 text-center">
+              <p className="mb-1 font-[family-name:var(--font-display)] text-lg font-bold">
+                Nobody matching that face
+              </p>
+              <p className="mx-auto max-w-md text-sm text-muted-foreground">
+                Race photos are often taken side-on. Try a second picture, or search
+                by your number.
+              </p>
+            </div>
+          ) : (
+            <PhotoWall items={faceResults} />
+          )}
+        </section>
+      ) : searched ? (
         <section>
           <div className="mb-6 flex flex-wrap items-center gap-4">
             <Bib value={searched} size="sm" band={event?.name} />
@@ -146,7 +199,7 @@ export default function EventDetail() {
                 Numbers get folded, covered by a hand, or turned away from the camera.
                 Your face does not.
               </p>
-              <Button size="lg"><ScanFace /> Find me by face</Button>
+              <Button size="lg" onClick={() => setFaceOpen(true)}><ScanFace /> Find me by face</Button>
             </div>
           ) : (
             <PhotoWall items={results ?? []} />
@@ -155,6 +208,13 @@ export default function EventDetail() {
       ) : (
         <PhotoWall items={photos.map((photo) => ({ photo }))} />
       )}
+
+      <FaceSearch
+        slug={slug}
+        open={faceOpen}
+        onClose={() => setFaceOpen(false)}
+        onResults={onFaceResults}
+      />
     </div>
   );
 }
