@@ -1,7 +1,7 @@
 """make_thumbnail must report the DECODED FRAME's size, not the thumbnail's.
 
 photos.width/height are the denominator the browser divides faces.bbox by to crop
-a result tile to the runner who matched (PhotoGrid.vue cropStyle). So the two must
+a result tile to the runner who matched (the result tile's crop). So the two must
 share one coordinate space, and that space is whatever array the detector saw —
 i.e. the file on disk, decoded, after EXIF rotation.
 
