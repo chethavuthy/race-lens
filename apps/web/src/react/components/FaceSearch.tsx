@@ -52,6 +52,43 @@ export function FaceSearch({
     return stopCamera;
   }, [open, stopCamera]);
 
+  /**
+   * Lock the page behind the dialog.
+   *
+   * Padding compensates for the scrollbar the lock removes — without it the
+   * whole page shifts sideways as the dialog opens, which reads as a glitch on
+   * exactly the interaction that has to feel trustworthy. Restored to whatever
+   * was there before rather than to '': the value is not necessarily ours.
+   */
+  useEffect(() => {
+    if (!open) return;
+    const html = document.documentElement;
+    const prev = {
+      htmlOverflow: html.style.overflow,
+      bodyOverflow: document.body.style.overflow,
+      paddingRight: document.body.style.paddingRight,
+    };
+    // BOTH elements. Which one scrolls depends on the page's own height rules,
+    // and locking only <body> left the page scrolling behind the dialog here.
+    const gap = window.innerWidth - html.clientWidth;
+    html.style.overflow = 'hidden';
+    document.body.style.overflow = 'hidden';
+    if (gap > 0) document.body.style.paddingRight = `${gap}px`;
+    return () => {
+      html.style.overflow = prev.htmlOverflow;
+      document.body.style.overflow = prev.bodyOverflow;
+      document.body.style.paddingRight = prev.paddingRight;
+    };
+  }, [open]);
+
+  // Escape closes it, like every other dialog on the web.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+
   async function run(source: Blob | HTMLVideoElement) {
     setStage('working');
     setMessage(null);

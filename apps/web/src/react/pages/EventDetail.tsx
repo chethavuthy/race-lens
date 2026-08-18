@@ -136,21 +136,37 @@ export default function EventDetail() {
         </p>
       </header>
 
-      {bibsOn && (
-        <div className="mb-10 flex flex-col items-center gap-6 rounded-xl border border-border
-                        bg-card/40 px-4 py-10">
-          <BibInput value={draft} onChange={setDraft} onSubmit={() => search(draft)} band={event?.name} />
-          <div className="flex items-center gap-3 text-sm">
-            <span className="text-muted-foreground">or</span>
-            <Button variant="outline" size="lg" onClick={() => setFaceOpen(true)}>
+      {/* Face search is ALWAYS offered. Only the bib is conditional — and an event
+          with no bibs is precisely the one where a face is the only way in, so
+          hiding both together (as this did) removed the search from the albums
+          that depend on it most. */}
+      <div className="mb-10 flex flex-col items-center gap-6 rounded-xl border border-border
+                      bg-card/40 px-4 py-10">
+        {bibsOn && (
+          <>
+            <BibInput value={draft} onChange={setDraft} onSubmit={() => search(draft)} band={event?.name} />
+            <div className="flex items-center gap-3 text-sm">
+              <span className="text-muted-foreground">or</span>
+              <Button variant="outline" size="lg" onClick={() => setFaceOpen(true)}>
+                <ScanFace /> Find me by face
+              </Button>
+            </div>
+          </>
+        )}
+        {!bibsOn && (
+          <>
+            <p className="max-w-sm text-center text-muted-foreground">
+              This race had no bib numbers, so your face is the way in.
+            </p>
+            <Button size="lg" onClick={() => setFaceOpen(true)}>
               <ScanFace /> Find me by face
             </Button>
-          </div>
-          <p className="max-w-sm text-center text-xs text-muted-foreground">
-            Face matching runs on your phone. Your selfie is never uploaded.
-          </p>
-        </div>
-      )}
+          </>
+        )}
+        <p className="max-w-sm text-center text-xs text-muted-foreground">
+          Face matching runs on your phone. Your selfie is never uploaded.
+        </p>
+      </div>
 
       {faceResults ? (
         <section>
