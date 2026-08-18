@@ -164,6 +164,24 @@
   --destructive: oklch(0.70 0.17 20);
 }
 
+/* Motion tokens. The built-in CSS easings are too weak to read as intentional;
+   these are the stronger variants. Enter uses ease-out because the user is
+   watching most closely at the start — ease-in delays exactly that moment and
+   feels sluggish at the same duration. */
+:root {
+  --ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1);
+  --dur-enter: 200ms;
+  /* Exit is faster than enter: the user has already decided. */
+  --dur-exit: 140ms;
+}
+
+/* Every pressable thing acknowledges the press. Subtle — 0.97, not 0.9 — and on
+   transform only, so it stays off the layout and paint path. */
+button:active:not(:disabled), .btn:active {
+  transform: scale(0.97);
+}
+button, .btn { transition: transform 160ms var(--ease-out-strong); }
+
 /* A number that changes width while you read it is a number you stop trusting.
    Every figure in this product is tabular. */
 .tabular { font-variant-numeric: tabular-nums; }
@@ -213,5 +231,11 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  /* Fewer and gentler, not zero: opacity still carries the change, movement goes.
+     Duration alone is not enough — a scale that snaps is still a scale. */
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+  button:active:not(:disabled), .btn:active { transform: none; }
 }

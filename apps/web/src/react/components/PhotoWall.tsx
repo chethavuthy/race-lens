@@ -21,6 +21,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { clockTime } from '@/lib/format';
 import type { Photo } from '@/lib/api';
 import { Button } from '@/components/ui/button';
+import { Lightbox } from './Lightbox';
 
 export type WallItem = { photo: Photo };
 
@@ -54,6 +55,7 @@ export function PhotoWall({
 }) {
   const columnCount = useColumnCount();
   const sentinel = useRef<HTMLDivElement>(null);
+  const [viewing, setViewing] = useState<number | null>(null);
 
   const columns = useMemo(() => {
     const cols: WallItem[][] = Array.from({ length: columnCount }, () => []);
@@ -96,6 +98,12 @@ export function PhotoWall({
                 href={photo.original_url}
                 target="_blank"
                 rel="noreferrer"
+                onClick={(e) => {
+                  // Let the browser keep the ways a reader asks for a new tab.
+                  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+                  e.preventDefault();
+                  setViewing(items.findIndex((it) => it.photo.id === photo.id));
+                }}
                 className="group relative block overflow-hidden rounded-md bg-muted
                            focus-visible:ring-3 focus-visible:ring-ring focus-visible:outline-none"
                 style={{
@@ -110,7 +118,8 @@ export function PhotoWall({
                     alt=""
                     loading="lazy"
                     decoding="async"
-                    className="size-full object-cover transition-transform duration-500 group-hover:scale-[1.02]"
+                    className="size-full object-cover transition-transform duration-500
+                               [@media(hover:hover)and(pointer:fine)]:group-hover:scale-[1.02]"
                   />
                 )}
                 {/* The minute the shutter fired. The album is a morning, and this
@@ -127,6 +136,13 @@ export function PhotoWall({
           </div>
         ))}
       </div>
+
+      <Lightbox
+        photos={items.map((it) => it.photo)}
+        index={viewing}
+        onClose={() => setViewing(null)}
+        onIndex={setViewing}
+      />
 
       {hasMore && (
         <div ref={sentinel} className="flex justify-center py-8">

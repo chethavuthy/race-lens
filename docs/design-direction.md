@@ -74,8 +74,33 @@ The bib. A runner types their number and it sets itself in a real bib —
 header band, pinned corners, tabular numerals — then that bib becomes the
 result header. It is the one loud element; everything else stays quiet.
 
+## The viewer
+
+Tapping a photo opens it in place. It used to open the original in a new tab,
+which on a phone means leaving the album and losing your place in a 1,070-photo
+wall — for the action a runner performs most once they have found themselves. The
+arrangement is the one every photo viewer has had since Lightroom (close left,
+counter centred, original right), because nobody should have to learn it. The
+caption is the minute the shutter fired, so the timeline reaches the viewer too.
+
+Reference: Airbnb's viewer for the frame, Air's for the top bar.
+https://mobbin.com/screens/c8e7fcb1-907f-4b06-b49a-c6c337c59cd9
+https://mobbin.com/screens/acf23fac-6846-4486-870b-37908a41746b
+
 ## Motion
 
-One orchestrated moment: the bib fills as you type and settles once. Time
-groups fade in on scroll. Nothing else animates. `prefers-reduced-motion`
-removes all of it.
+Sparse, and decided by frequency rather than taste.
+
+- **Opening the viewer** is occasional, so it animates: 200ms, ease-out on a real
+  curve, scaling from 0.96 — nothing in the world appears from nothing. Closing is
+  faster, because the reader has already decided.
+- **Stepping between photos does not animate.** The arrows are pressed
+  repeatedly, and animating a repeated action puts a delay between the hand and
+  the picture.
+- **Pressing anything** scales to 0.97 for 160ms. It is the cheapest way to make
+  an interface feel like it is listening.
+- **Hover growth on tiles** is gated behind `(hover: hover) and (pointer: fine)`,
+  or a tap on a phone leaves a tile stuck slightly enlarged.
+- Only `transform` and `opacity` are animated, so none of it touches layout.
+- `prefers-reduced-motion` keeps the fades and drops every movement — fewer and
+  gentler, not zero.
