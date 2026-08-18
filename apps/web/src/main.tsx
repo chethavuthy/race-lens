@@ -13,6 +13,7 @@ import './index.css';
 const EventList = lazy(() => import('./react/pages/EventList'));
 const NotFound = lazy(() => import('./react/pages/NotFound'));
 const AdminSignin = lazy(() => import('./react/pages/AdminSignin'));
+const EventDetail = lazy(() => import('./react/pages/EventDetail'));
 
 createRoot(document.getElementById('app')!).render(
   <StrictMode>
@@ -21,6 +22,7 @@ createRoot(document.getElementById('app')!).render(
         <Suspense fallback={null}>
           <Routes>
             <Route path="/" element={<EventList />} />
+            <Route path="/e/:slug" element={<EventDetail />} />
             <Route path="/admin/signin" element={<AdminSignin />} />
             <Route path="*" element={<NotFound />} />
           </Routes>

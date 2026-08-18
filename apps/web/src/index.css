@@ -128,3 +128,90 @@
     @apply font-sans;
     }
 }
+/* ─────────────────────────────────────────────────────────────────────────────
+   Race Lens — see docs/design-direction.md
+   Layered after the preset so these win without editing generated tokens.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+@import "@fontsource-variable/archivo";
+
+@theme inline {
+  /* Numerals and headings. Race bibs are printed in bold squared grotesques;
+     this is that voice without wearing the costume. */
+  --font-display: 'Archivo Variable', ui-sans-serif, system-ui, sans-serif;
+}
+
+.dark {
+  /* Photos supply every colour in this product. The frame supplies none. */
+  --background: oklch(0.16 0.008 250);
+  --card: oklch(0.20 0.009 250);
+  --popover: oklch(0.20 0.009 250);
+  --foreground: oklch(0.95 0.004 250);
+  --muted: oklch(0.26 0.008 250);
+  --muted-foreground: oklch(0.70 0.010 250);
+  --border: oklch(1 0 0 / 9%);
+  --input: oklch(1 0 0 / 14%);
+
+  /* THE accent, and the only one: a finish-line timing display.
+     Cambodian race kit runs hot orange and pink and the dawn light is warm, so
+     amber — the obvious "timing" colour — would vanish into the frames. This
+     green-cyan is the hue the photographs do not contain. */
+  --primary: oklch(0.82 0.14 182);
+  --primary-foreground: oklch(0.18 0.03 200);
+  --ring: oklch(0.82 0.14 182 / 60%);
+  --accent: oklch(0.26 0.008 250);
+  --accent-foreground: oklch(0.95 0.004 250);
+  --destructive: oklch(0.70 0.17 20);
+}
+
+/* A number that changes width while you read it is a number you stop trusting.
+   Every figure in this product is tabular. */
+.tabular { font-variant-numeric: tabular-nums; }
+
+@layer base {
+  h1, h2, h3 { font-family: var(--font-display); letter-spacing: -0.02em; }
+}
+
+/* The signature: a real bib. Header band, printed number, pinned corners.
+   Used for the search control and again as the result header, so the thing you
+   typed becomes the thing you are looking at. */
+.bib {
+  --bib-band: oklch(0.82 0.14 182);
+  position: relative;
+  background: var(--paper, #eef1f4);
+  color: #0b0e12;
+  border-radius: 6px;
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 18px 40px -22px rgb(0 0 0 / 0.9);
+}
+.bib::before {
+  content: attr(data-band);
+  display: block;
+  background: var(--bib-band);
+  color: oklch(0.18 0.03 200);
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px 6px 0 0;
+  /* Ellipsis in CSS rather than slicing the string in JS: a hard slice cuts
+     mid-word ("SHERUNS 5K WOMEN'S ROA") and reads as a bug. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Safety pins. Two dots, not four — a bib pinned at the top corners is what a
+   runner actually looks like at 7am. */
+.bib::after {
+  content: '';
+  position: absolute; inset-inline: 0.5rem; top: 1.55rem; height: 4px;
+  background:
+    radial-gradient(circle at 3px 2px, rgb(0 0 0 / 0.35) 1.6px, transparent 1.8px) left / 12px 4px no-repeat,
+    radial-gradient(circle at 9px 2px, rgb(0 0 0 / 0.35) 1.6px, transparent 1.8px) right / 12px 4px no-repeat;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
