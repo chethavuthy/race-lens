@@ -97,7 +97,13 @@ fi
 if [ "$DO_WEB" = 1 ]; then
   ( cd "$TREE" && npm run build >/dev/null ) || die "frontend build failed"
   # --branch=main is required, not cosmetic: see the note at the top.
-  OUT=$( cd "$TREE" && npx wrangler pages deploy apps/web/dist \
+  # Deployed FROM apps/web, not from the repo root. `wrangler pages deploy` looks
+  # for a `functions/` directory relative to its working directory, and this
+  # project's lives at apps/web/functions — so deploying from the root uploaded
+  # dist without the Pages Function, silently. Every shared album link went out
+  # with the shell's generic title and no preview image, on both the custom domain
+  # and pages.dev, for as long as this script has existed.
+  OUT=$( cd "$TREE/apps/web" && npx wrangler pages deploy dist \
            --project-name=race-lens --branch=main 2>&1 ) || { echo "$OUT"; die "Pages deploy failed"; }
   echo "$OUT" | grep -q 'Deployment alias URL' \
     && warn "Pages reported an alias URL — check this landed on production, not a preview"
