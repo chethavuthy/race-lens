@@ -1,25 +1,68 @@
 /**
  * The door, for people who already have a key.
  *
- * /admin is public so photographers can read the invitation, which means opening
- * it no longer triggers a Cloudflare Access login — and a signed-out organizer
- * would otherwise land on the invitation with no way past it. This path IS
- * covered by the Access application, so simply arriving here forces the login; by
- * the time this renders, the cookie is set and /admin can load its own data.
+ * The sign-in mechanism IS Cloudflare Access. /admin is public so a photographer
+ * can read the invitation, which means opening it does not trigger a login — but
+ * this path is covered by the Access application, so a real page load to it forces
+ * one. By the time this renders, the cookie should be set.
  *
- * replace, not a push: this page is a turnstile, and leaving it in the history
- * would send Back straight through it again.
+ * "Should", so it is checked rather than assumed. Bouncing straight back to /admin
+ * meant that when the login had NOT taken, the reader was returned to the same
+ * invitation with no explanation, having clicked Sign in and watched nothing
+ * happen. A turnstile that silently returns you to where you started is
+ * indistinguishable from a broken link.
+ *
+ * replace, not push: leaving this in the history would send Back through it again.
  */
-import { useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
+import { api } from '@/lib/api';
+import { Button } from '@/components/ui/button';
 
 export default function AdminSignin() {
   const navigate = useNavigate();
-  useEffect(() => { navigate('/admin', { replace: true }); }, [navigate]);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    api.admin.me()
+      .then(() => { if (live) navigate('/admin', { replace: true }); })
+      .catch(() => { if (live) setFailed(true); });
+    return () => { live = false; };
+  }, [navigate]);
+
+  if (!failed) {
+    return (
+      <p className="mt-7 flex items-center gap-2 text-muted-foreground">
+        <Loader2 className="size-4 animate-spin" /> Signing you in…
+      </p>
+    );
+  }
+
   return (
-    <p className="mt-7 flex items-center gap-2 text-muted-foreground">
-      <Loader2 className="size-4 animate-spin" /> Signing you in…
-    </p>
+    <div className="max-w-lg py-10">
+      <h1 className="text-2xl font-bold tracking-tight">That did not sign you in</h1>
+      <p className="mt-2 text-sm text-muted-foreground">
+        The login did not leave a session this site can use. Two things cause it:
+      </p>
+      <ul className="mt-3 list-disc space-y-2 pl-5 text-sm text-muted-foreground">
+        <li>
+          You are on a hostname the sign-in does not cover. It works on{' '}
+          <strong className="text-foreground">race-lens.runlytics.fit</strong> and{' '}
+          <strong className="text-foreground">racelens.runlytics.fit</strong> — not on a
+          preview domain, and not on a local dev server, which has no sign-in in front
+          of it at all.
+        </li>
+        <li>
+          Your browser signed you in as a different Google account than the one that
+          was added.
+        </li>
+      </ul>
+      <div className="mt-6 flex flex-wrap gap-3">
+        <Button render={<a href="/admin/signin" />}>Try again</Button>
+        <Button variant="outline" render={<Link to="/admin" />}>Back to the invitation</Button>
+      </div>
+    </div>
   );
 }
