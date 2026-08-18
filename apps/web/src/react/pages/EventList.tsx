@@ -14,6 +14,7 @@ import { eventListCache } from '@/lib/cache';
 import { formatDate, plural } from '@/lib/format';
 import { Card } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Banner } from '../components/Banner';
 
 const ASSURANCES = [
   ['Free, and no account',
@@ -23,25 +24,6 @@ const ASSURANCES = [
   ["Works when your bib doesn't",
    "Numbers get folded, covered, or turned away from the camera. Face search doesn't mind."],
 ] as const;
-
-/**
- * Banners are POSTERS — dates, times, sponsors — so cropping them is the one
- * thing we cannot do. The real image is contained and the letterbox is filled
- * with a blurred, overscanned copy of itself, so the gap reads as an extension
- * of the artwork rather than a hole.
- */
-function Banner({ url }: { url: string | null }) {
-  return (
-    <div className="relative block aspect-video w-full overflow-hidden bg-muted">
-      {url && (
-        <>
-          <img src={url} alt="" aria-hidden className="absolute inset-0 size-full scale-120 object-cover blur-2xl brightness-50 saturate-150" />
-          <img src={url} alt="" loading="lazy" className="absolute inset-0 size-full object-contain" />
-        </>
-      )}
-    </div>
-  );
-}
 
 export default function EventList() {
   // Read during the first render, so coming back from an album re-renders the

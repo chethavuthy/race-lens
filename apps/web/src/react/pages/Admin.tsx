@@ -12,17 +12,32 @@
  */
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { FolderSearch, Loader2, Plus } from 'lucide-react';
+import { CalendarIcon, FolderSearch, Loader2, Plus } from 'lucide-react';
 import { ApiError, api, type EventSummary } from '@/lib/api';
-import { plural } from '@/lib/format';
+import { formatDate, plural } from '@/lib/format';
 import { Invitation, type Gate } from '../components/Invitation';
 import { AdminSkeleton, EventRowsSkeleton } from '../components/AdminSkeleton';
+import { Banner } from '../components/Banner';
 import { useDeferredLoading } from '../useDeferredLoading';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Calendar } from '@/components/ui/calendar';
 
 type Inspected = Awaited<ReturnType<typeof api.admin.inspect>>;
+
+/**
+ * A Date to the ISO day the API stores, in LOCAL terms.
+ *
+ * toISOString() would convert to UTC first, so a date picked in Phnom Penh
+ * (UTC+7) becomes the previous day for any race before 07:00 — which is most of
+ * them.
+ */
+function toISODate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 
 export default function Admin() {
   const [owner, setOwner] = useState(false);
@@ -221,8 +236,30 @@ export default function Admin() {
               </div>
               <div>
                 <Label htmlFor="ev-date">Date</Label>
-                <Input id="ev-date" type="date" value={date} onChange={(e) => setDate(e.target.value)}
-                       className="mt-1.5 max-w-[14rem]" />
+                {/* A picker rather than <input type="date">, whose rendering and
+                    field order are the browser's and the OS locale's — dd/mm/yyyy
+                    for some readers, mm/dd/yyyy for others, with no way to tell
+                    which you are looking at. The value still travels as ISO. */}
+                <Popover>
+                  <PopoverTrigger
+                    render={
+                      <Button id="ev-date" variant="outline"
+                              className="mt-1.5 w-[14rem] justify-start font-normal">
+                        <CalendarIcon />
+                        {date ? formatDate(date) : <span className="text-muted-foreground">Pick the race day</span>}
+                      </Button>
+                    }
+                  />
+                  <PopoverContent className="w-auto p-0" align="start">
+                    <Calendar
+                      mode="single"
+                      captionLayout="dropdown"
+                      selected={date ? new Date(`${date}T00:00:00`) : undefined}
+                      onSelect={(d) => setDate(d ? toISODate(d) : '')}
+                      autoFocus
+                    />
+                  </PopoverContent>
+                </Popover>
               </div>
 
               <div>
@@ -252,17 +289,32 @@ export default function Admin() {
                     <div className="flex flex-wrap items-end gap-3">
                       <div>
                         <Label htmlFor="mn">Shortest</Label>
-                        <select id="mn" value={minDigits} onChange={(e) => setMinDigits(+e.target.value)}
-                                className="mt-1.5 h-9 rounded-md border border-input bg-transparent px-2 text-sm">
-                          {[2, 3, 4, 5].map((n) => <option key={n} value={n}>{n} digits</option>)}
-                        </select>
+                        <Select value={String(minDigits)}
+                                onValueChange={(v) => { const n = Number(v); setMinDigits(n); if (maxDigits < n) setMaxDigits(n); }}>
+                          <SelectTrigger id="mn" className="mt-1.5 w-[9rem]">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {[2, 3, 4, 5].map((n) => (
+                              <SelectItem key={n} value={String(n)}>{n} digits</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
                       </div>
                       <div>
                         <Label htmlFor="mx">Longest</Label>
-                        <select id="mx" value={maxDigits} onChange={(e) => setMaxDigits(+e.target.value)}
-                                className="mt-1.5 h-9 rounded-md border border-input bg-transparent px-2 text-sm">
-                          {[2, 3, 4, 5].filter((n) => n >= minDigits).map((n) => <option key={n} value={n}>{n} digits</option>)}
-                        </select>
+                        <Select value={String(maxDigits)} onValueChange={(v) => setMaxDigits(Number(v))}>
+                          <SelectTrigger id="mx" className="mt-1.5 w-[9rem]">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {/* Only lengths at or above the floor: an inverted pair
+                                matches no bib at all, and the API refuses it. */}
+                            {[2, 3, 4, 5].filter((n) => n >= minDigits).map((n) => (
+                              <SelectItem key={n} value={String(n)}>{n} digits</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
                       </div>
                     </div>
                     <div>
@@ -282,11 +334,14 @@ export default function Admin() {
           ) : (
             <div>
               <Label htmlFor="ev-target">Event</Label>
-              <select id="ev-target" value={target} onChange={(e) => setTarget(e.target.value)}
-                      className="mt-1.5 h-9 w-full max-w-md rounded-md border border-input bg-transparent px-2 text-sm">
-                <option value="">Choose an event…</option>
-                {events.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
-              </select>
+              <Select value={target} onValueChange={(v) => setTarget(v ?? '')}>
+                <SelectTrigger id="ev-target" className="mt-1.5 w-full max-w-md">
+                  <SelectValue placeholder="Choose an event…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {events.map((e) => <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
             </div>
           )}
 
@@ -334,6 +389,11 @@ export default function Admin() {
           <ul className="divide-y divide-border rounded-xl border border-border">
             {events.map((e) => (
               <li key={e.id} className="flex flex-wrap items-center gap-4 px-5 py-4">
+                {/* Same treatment as the public list — an operator checking a
+                    banner should see what a runner sees, not a cropped variant. */}
+                <Link to={`/admin/e/${e.id}`} className="w-28 shrink-0">
+                  <Banner url={e.banner_url} className="rounded-md" />
+                </Link>
                 <div className="min-w-0 flex-1">
                   <Link to={`/admin/e/${e.id}`} className="font-medium underline-offset-4 hover:underline">
                     {e.name}
@@ -342,6 +402,15 @@ export default function Admin() {
                     /e/{e.slug} · {e.status} · {plural(e.photo_count, 'photo')}
                     {e.face_count ? ` · ${plural(e.face_count, 'face')}` : ''}
                   </p>
+                  {/* Who published it. Only the operator is sent owner_email at
+                      all, and it is null on every event that predates ownership —
+                      which are the operator's own, so those read as "you" rather
+                      than as a blank the reader has to interpret. */}
+                  {owner && (
+                    <p className="mt-0.5 text-xs text-muted-foreground/70">
+                      published by {e.owner_email ?? 'you'}
+                    </p>
+                  )}
                 </div>
                 <Button variant="outline" size="sm" render={<Link to={`/admin/e/${e.id}`} />}>Open</Button>
               </li>

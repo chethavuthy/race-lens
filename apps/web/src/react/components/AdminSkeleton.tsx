@@ -52,10 +52,12 @@ export function EventRowsSkeleton({ rows = 3 }: { rows?: number }) {
     <ul className="divide-y divide-border rounded-xl border border-border" aria-hidden>
       {Array.from({ length: rows }, (_, i) => (
         <li key={i} className="flex flex-wrap items-center gap-4 px-5 py-4">
+          <Skeleton className="aspect-video w-28 shrink-0 rounded-md" />
           <div className="min-w-0 flex-1">
             {/* font-medium line, then the text-xs line beneath it. */}
             <Skeleton className="h-5 w-[min(18rem,70%)]" />
             <Skeleton className="mt-1.5 h-3.5 w-52" />
+            <Skeleton className="mt-1.5 h-3 w-40" />
           </div>
           <Skeleton className="h-7 w-16" />
         </li>

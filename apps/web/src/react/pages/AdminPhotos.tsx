@@ -18,10 +18,13 @@ import { plural } from '@/lib/format';
 import { BackLink } from '../components/BackLink';
 import { Button } from '@/components/ui/button';
 
-type Filter = 'all' | 'no-face' | 'no-bib';
+// The API's own vocabulary — all | no_face | no_bib | has_bib. Hyphens were
+// silently unrecognised there, so the filter fell through to "everything" and
+// "No face" listed 24 photos that all had faces.
+type Filter = 'all' | 'no_face' | 'no_bib';
 type Row = Awaited<ReturnType<typeof api.admin.photos>>['photos'][number];
 
-const FILTERS: [Filter, string][] = [['all', 'All'], ['no-face', 'No face'], ['no-bib', 'No bib']];
+const FILTERS: [Filter, string][] = [['all', 'All'], ['no_face', 'No face'], ['no_bib', 'No bib']];
 
 export default function AdminPhotos() {
   const { id = '' } = useParams();
@@ -84,9 +87,16 @@ export default function AdminPhotos() {
       ) : (
         <>
           <p className="tabular mb-4 text-sm text-muted-foreground">{plural(rows.length, 'photo')}</p>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {/* items-start, or every card stretches to the tallest in its row and a
+              landscape frame sits above a slab of empty background.
+
+              The frame keeps its natural aspect ratio deliberately: the face boxes
+              are fractions OF THAT FRAME, so cropping to a uniform tile would slide
+              every box away from the face it belongs to — which is the one thing
+              this screen exists to show. */}
+          <div className="grid items-start gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {rows.map((p) => (
-              <figure key={p.id} className="overflow-hidden rounded-lg border border-border">
+              <figure key={p.id} className="h-fit overflow-hidden rounded-lg border border-border">
                 <div className="relative bg-muted">
                   {p.thumb_url && <img src={p.thumb_url} alt="" loading="lazy" className="block w-full" />}
                   {p.faces.map((f) => (

@@ -16,6 +16,10 @@ import { Loader2, Square } from 'lucide-react';
 import { api, type EventSummary } from '@/lib/api';
 import { plural } from '@/lib/format';
 import { Stat } from '../components/Stat';
+import { AdminEventSkeleton } from '../components/AdminEventSkeleton';
+import { useDeferredLoading } from '../useDeferredLoading';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { BibRules } from '../components/BibRules';
 import { BackLink } from '../components/BackLink';
 import { Button } from '@/components/ui/button';
@@ -35,6 +39,17 @@ export default function AdminEvent() {
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const poll = useRef<number | undefined>(undefined);
+  const [owner, setOwner] = useState(false);
+  const [newLink, setNewLink] = useState('');
+  /**
+   * Size for the link about to be added. Deliberately unset: adding a link
+   * dispatches the run in the same request, and the row's own toggle is disabled
+   * while a job is active — which it then is. A default here would not be a
+   * starting point the operator could correct, it would be the decision, and the
+   * only way back is a full re-index. That is how every new folder ended up on
+   * full-size originals at ~25 photos a round.
+   */
+  const [newSize, setNewSize] = useState<'original' | 'thumb' | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -44,6 +59,9 @@ export default function AdminEvent() {
   }, [id]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { api.admin.me().then((m) => setOwner(m.owner)).catch(() => {}); }, []);
+
+  const showSkeleton = useDeferredLoading(!report || !event);
 
   const active = report?.jobs.find((j) => ['running', 'queued'].includes(j.status) && !j.stale) ?? null;
 
@@ -69,9 +87,7 @@ export default function AdminEvent() {
   if (error && !report) {
     return <p className="rounded-md border border-destructive/45 px-4 py-3 text-destructive">{error}</p>;
   }
-  if (!report || !event) {
-    return <p className="flex items-center gap-2 py-10 text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading</p>;
-  }
+  if (!report || !event) return showSkeleton ? <AdminEventSkeleton /> : <div className="min-h-screen" />;
 
   const t = report.totals;
   const q = report.quality;
@@ -159,8 +175,8 @@ export default function AdminEvent() {
       <BibRules
         event={event}
         indexed={t.indexed}
-        busyExternally={!!active}
-        onDone={async (m) => { setNotice(m); setError(null); await load(); }}
+        busyPass={!!active}
+        onChanged={async (m: string) => { setNotice(m); setError(null); await load(); }}
       />
 
       <section className="rounded-xl border border-border">
@@ -186,6 +202,35 @@ export default function AdminEvent() {
                     {' · '}{s.image_source === 'thumb' ? 'resized' : 'full originals'}
                   </p>
                 </div>
+                {/* Which size the NEXT round downloads. Operator only — the API
+                    refuses 'original' from anyone else, so the control is hidden
+                    because the choice is already made, not to keep it out of
+                    reach. Disabled while a pass runs: it would change under a
+                    round already in flight. */}
+                {owner && (
+                  <div className="inline-flex rounded-lg border border-border p-1" role="radiogroup"
+                       aria-label="Image size to download">
+                    {([['original', 'Original'], ['thumb', 'Resized']] as const).map(([v, label]) => (
+                      <button
+                        key={v} type="button" role="radio"
+                        aria-checked={(s.image_source === 'thumb' ? 'thumb' : 'original') === v}
+                        disabled={busy === `src-${s.id}` || !!active}
+                        title={v === 'thumb'
+                          ? "Drive's resized copy — same faces and bibs, about 600 photos a round"
+                          : 'Full-size originals — about 25 photos a round'}
+                        onClick={() => run(`src-${s.id}`, () => api.admin.setImageSource(s.id, v),
+                          v === 'thumb'
+                            ? 'Switched to resized copies — run the album again to carry on at the faster rate.'
+                            : 'Switched to full originals — run the album again to carry on.')}
+                        className={`rounded-md px-2.5 py-1 text-xs disabled:opacity-50 ${
+                          (s.image_source === 'thumb' ? 'thumb' : 'original') === v
+                            ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <Button
                   variant="outline" size="sm"
                   disabled={busy === s.id || !!active}
@@ -199,6 +244,55 @@ export default function AdminEvent() {
             );
           })}
         </ul>
+
+        {/* Adding a folder to an album that already has one. Built from the same
+            row as the links above it, so adding a link and re-running one read as
+            the same kind of act. */}
+        <div className="row-add border-t border-border px-5 py-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <Input
+              value={newLink}
+              onChange={(e) => setNewLink(e.target.value)}
+              placeholder="Add another Drive folder URL…"
+              className="min-w-[16rem] flex-1"
+            />
+            {owner && (
+              <div className="inline-flex rounded-lg border border-border p-1" role="radiogroup"
+                   aria-label="Image size to download for this link">
+                {([['original', 'Original'], ['thumb', 'Resized']] as const).map(([v, label]) => (
+                  <button
+                    key={v} type="button" role="radio" aria-checked={newSize === v}
+                    disabled={busy === 'add'}
+                    onClick={() => setNewSize(v)}
+                    className={`rounded-md px-3 py-1.5 text-sm ${
+                      newSize === v ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+            <Button
+              disabled={busy === 'add' || !newLink.trim() || (owner && !newSize) || !!active}
+              title={owner && !newSize ? 'Pick Original or Resized first' : undefined}
+              onClick={() => run('add', async () => {
+                await api.admin.ingest(id, newLink.trim(), newSize ?? undefined);
+                setNewLink(''); setNewSize(null);
+              }, newSize === 'thumb'
+                ? 'Link added — indexing started on Drive’s resized copies.'
+                : 'Link added — indexing started on full originals.')}
+            >
+              {busy === 'add' ? <Loader2 className="animate-spin" /> : null} Add link
+            </Button>
+          </div>
+          {owner && newLink.trim() && !newSize && (
+            <p className="mt-2 text-sm text-[oklch(0.80_0.16_75)]">
+              Pick a size first — it cannot be changed once indexing starts. Resized
+              moves about 600 photos a round against roughly 25 for originals, for the
+              same faces and bibs.
+            </p>
+          )}
+        </div>
       </section>
     </div>
   );
