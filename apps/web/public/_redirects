@@ -8,6 +8,17 @@
 # The related hazard is in _headers: a missing hashed asset falls through to
 # this rule and is answered with index.html and a 200, and /assets/* is stamped
 # immutable — so a browser can cache an HTML document under a .js URL for a
-# year. That is guarded in main.ts instead, which reloads once when a dynamic
-# import fails.
+# year. Cloudflare's _redirects supports 200 and the 30x codes, not 404, so this
+# rule cannot be narrowed to spare /assets/*; excluding them via the Pages
+# Function would bill every asset request as a Worker invocation (see
+# _routes.json). It is handled in the client instead — lazyPage() in
+# src/main.tsx reloads the document once when a page chunk fails to import,
+# which fetches a fresh index.html and with it chunk names that exist, and
+# PageBoundary shows a Reload button if that did not help.
+#
+# THIS COMMENT ONCE DESCRIBED A GUARD THAT DID NOT EXIST. It was written as
+# though main.ts already reloaded, and nothing did: on 2026-08-19 a deploy
+# window served HTML for two chunks and the app rendered a blank frame with an
+# uncaught TypeError. If the guard is ever removed, remove this paragraph with
+# it rather than leaving the claim behind.
 /*  /index.html  200
