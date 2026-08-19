@@ -1249,6 +1249,11 @@ adminRoutes.get('/events/:id/photos', async (c) => {
   const limit = clampLimit(c.req.query('limit'), 24, 60);
   const cursor = c.req.query('cursor') ?? '';
   const filter = c.req.query('filter') ?? 'all'; // all | no_face | no_bib | has_bib
+  // One Drive link at a time. A 32,796-photo album is five folders shot by five
+  // photographers, and unread bibs are not spread evenly across them — one folder
+  // of backlit finish-line frames holds most of them. Correcting by hand, or
+  // deciding what to re-read, means working a folder at a time.
+  const source = c.req.query('source') ?? '';
 
   const where =
     filter === 'no_face' ? 'AND NOT EXISTS (SELECT 1 FROM faces f WHERE f.photo_id = p.id)'
@@ -1258,9 +1263,10 @@ adminRoutes.get('/events/:id/photos', async (c) => {
 
   const { results: photos } = await c.env.DB.prepare(
     `SELECT p.id, p.drive_file_id, p.thumb_key, p.width, p.height
-       FROM photos p WHERE p.event_id = ? AND p.id > ? ${where}
+       FROM photos p WHERE p.event_id = ? AND p.id > ?
+        ${source ? 'AND p.source_id = ?' : ''} ${where}
       ORDER BY p.id LIMIT ?`,
-  ).bind(eventId, cursor, limit).all<any>();
+  ).bind(...(source ? [eventId, cursor, source, limit] : [eventId, cursor, limit])).all<any>();
 
   if (!photos.length) return c.json({ photos: [], cursor: null });
 
@@ -1303,6 +1309,78 @@ adminRoutes.get('/events/:id/photos', async (c) => {
       };
     }),
     cursor: photos.length === limit ? photos[photos.length - 1].id : null,
+  });
+});
+
+/**
+ * How much of each Drive link the pipeline actually read.
+ *
+ * The event page could say "1,847 photos with no bib" for the whole album, which
+ * is a number with nowhere to go. Unread bibs are not spread evenly: five folders
+ * shot by five photographers at different points on the course produce very
+ * different results, and one backlit stretch can hold most of the failures. Per
+ * link, the operator can re-read the folder that is actually bad, and hand-correct
+ * the folder that is nearly right.
+ *
+ * ITS OWN ENDPOINT, NOT PART OF THE EVENT RESPONSE, and this is not tidiness.
+ * Measured against the Angkor album (32,796 photos, 216,109 faces): the three
+ * queries below read ~916,000 rows and take ~760ms. The event page POLLS its main
+ * response every few seconds while a pass runs, so folding this into it would
+ * multiply that cost by every poll of every indexing run. The first shape I tried
+ * — one query with correlated NOT EXISTS per photo — did not merely cost more, it
+ * exceeded D1's CPU limit outright and was reset.
+ *
+ * Three separate GROUP BYs rather than joins over everything, because each one
+ * then rides an index that exists: idx_photos_source, idx_faces_event_photo,
+ * idx_bibs_lookup.
+ */
+adminRoutes.get('/events/:id/coverage', async (c) => {
+  const eventId = c.req.param('id');
+  await ownEvent(c, eventId);
+
+  const [{ results: sources }, { results: total }, { results: withFace }, { results: withBib }] =
+    await Promise.all([
+      c.env.DB.prepare(
+        // added_at, not created_at: sources has no created_at column, and this
+        // ordering must match the report's (line ~915) or "Folder 2" in one place
+        // would be "Folder 3" in the other.
+        `SELECT id, drive_folder_id, credit_name, image_source, removed_at
+           FROM sources WHERE event_id = ? ORDER BY added_at`,
+      ).bind(eventId).all<any>(),
+      c.env.DB.prepare(
+        'SELECT source_id, COUNT(*) AS n FROM photos WHERE event_id = ? GROUP BY source_id',
+      ).bind(eventId).all<any>(),
+      c.env.DB.prepare(
+        `SELECT p.source_id AS source_id, COUNT(DISTINCT f.photo_id) AS n
+           FROM faces f JOIN photos p ON p.id = f.photo_id
+          WHERE f.event_id = ? GROUP BY p.source_id`,
+      ).bind(eventId).all<any>(),
+      c.env.DB.prepare(
+        `SELECT p.source_id AS source_id, COUNT(DISTINCT b.photo_id) AS n
+           FROM bibs b JOIN photos p ON p.id = b.photo_id
+          WHERE b.event_id = ? GROUP BY p.source_id`,
+      ).bind(eventId).all<any>(),
+    ]);
+
+  const num = (rows: any[], id: string) => Number(rows.find((r) => r.source_id === id)?.n ?? 0);
+
+  return c.json({
+    sources: sources.map((s: any) => {
+      const photos = num(total, s.id);
+      return {
+        source_id: s.id,
+        drive_folder_id: s.drive_folder_id,
+        credit_name: s.credit_name,
+        image_source: s.image_source,
+        removed_at: s.removed_at,
+        photos,
+        // Derived rather than counted directly: "no face" is every photo the
+        // detector left empty, and the complement is one subtraction instead of a
+        // fourth pass over the same rows.
+        no_face: Math.max(0, photos - num(withFace, s.id)),
+        no_bib: Math.max(0, photos - num(withBib, s.id)),
+      };
+    }),
   });
 });
 

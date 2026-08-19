@@ -17,7 +17,7 @@
  * the one with the fewest places to fix it.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { Loader2, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { plural } from '@/lib/format';
@@ -33,12 +33,48 @@ import { useDeferredLoading } from '../useDeferredLoading';
 // "No face" listed 24 photos that all had faces.
 type Filter = 'all' | 'no_face' | 'no_bib';
 type Row = Awaited<ReturnType<typeof api.admin.photos>>['photos'][number];
+type Source = Awaited<ReturnType<typeof api.admin.coverage>>['sources'][number];
 
 const FILTERS: [Filter, string][] = [['all', 'All'], ['no_face', 'No face'], ['no_bib', 'No bib']];
 
+/** Which count belongs beside a folder, for the filter in force. */
+const countFor = (s: Source, filter: Filter) =>
+  filter === 'no_face' ? s.no_face : filter === 'no_bib' ? s.no_bib : s.photos;
+
 export default function AdminPhotos() {
   const { id = '' } = useParams();
-  const [filter, setFilter] = useState<Filter>('all');
+  /**
+   * The filter and the folder live in the URL.
+   *
+   * So that "1,412 no bib" on a Drive link can be a link — landing here already
+   * narrowed to that folder and that failure, which is the whole point of counting
+   * per folder. It also makes the view shareable and survives a reload, and Back
+   * out of a narrowed view returns to the wider one.
+   */
+  const [params, setParams] = useSearchParams();
+  const filter = (FILTERS.some(([f]) => f === params.get('filter'))
+    ? params.get('filter') : 'all') as Filter;
+  const source = params.get('source') ?? '';
+
+  const setFilter = (f: Filter) => setParams((p) => {
+    const next = new URLSearchParams(p);
+    if (f === 'all') next.delete('filter'); else next.set('filter', f);
+    return next;
+  }, { replace: true });
+
+  const setSource = (sourceId: string) => setParams((p) => {
+    const next = new URLSearchParams(p);
+    if (!sourceId) next.delete('source'); else next.set('source', sourceId);
+    return next;
+  }, { replace: true });
+
+  /**
+   * The folders themselves, for the row of buttons. One Drive link at a time is
+   * what makes hand-correction finite: an album is five folders by five
+   * photographers and the unread bibs are not spread evenly — one backlit stretch
+   * of the course holds most of them.
+   */
+  const [sources, setSources] = useState<Source[] | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
   // The API answers 24 at a time and hands back a cursor. Ignoring it is why this
   // screen showed 24 photos of an album with 32,796 and gave no hint there were
@@ -71,15 +107,27 @@ export default function AdminPhotos() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await api.admin.photos(id, null, filter);
+      const r = await api.admin.photos(id, null, filter, source);
       setRows(r.photos);
       setCursor(r.cursor);
       setError(null);
     } catch (e) { setError((e as Error).message); }
     finally { setLoading(false); }
-  }, [id, filter]);
+  }, [id, filter, source]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Once, on its own request. Coverage reads ~916,000 rows on a 32k album, so it
+  // is not something to refetch on every filter change — and the counts it carries
+  // (how many photos per folder have no face, no bib) do not move unless a pass or
+  // a correction runs. A failure here costs the selector, not the page.
+  useEffect(() => {
+    let live = true;
+    api.admin.coverage(id)
+      .then((r) => { if (live) setSources(r.sources.filter((s) => !s.removed_at)); })
+      .catch(() => { if (live) setSources([]); });
+    return () => { live = false; };
+  }, [id]);
 
   /**
    * The next page. Guarded by the cursor itself rather than a ref, because the
@@ -90,12 +138,12 @@ export default function AdminPhotos() {
     if (!cursor || loadingMore) return;
     setLoadingMore(true);
     try {
-      const r = await api.admin.photos(id, cursor, filter);
+      const r = await api.admin.photos(id, cursor, filter, source);
       setRows((prev) => [...prev, ...r.photos]);
       setCursor(r.cursor);
     } catch (e) { setError((e as Error).message); }
     finally { setLoadingMore(false); }
-  }, [id, cursor, filter, loadingMore]);
+  }, [id, cursor, filter, source, loadingMore]);
 
   // Load the next page as the end comes into view. The button below it is not
   // decoration: it is what keeps this reachable by keyboard, and what works where
@@ -126,13 +174,13 @@ export default function AdminPhotos() {
     const fresh: Row[] = [];
     let next: string | null = null;
     do {
-      const r = await api.admin.photos(id, next, filter);
+      const r = await api.admin.photos(id, next, filter, source);
       fresh.push(...r.photos);
       next = r.cursor;
     } while (next && fresh.length < want);
     setRows(fresh);
     setCursor(next);
-  }, [id, filter, rows.length]);
+  }, [id, filter, source, rows.length]);
 
   async function act(key: string, fn: () => Promise<unknown>) {
     setBusy(key);
@@ -142,8 +190,9 @@ export default function AdminPhotos() {
     finally { setBusy(null); }
   }
 
-  // A filter change reshuffles the set, so anything open belongs to the old one.
-  useEffect(() => { setViewing(null); }, [filter]);
+  // A filter or folder change reshuffles the set, so anything open belongs to the
+  // old one.
+  useEffect(() => { setViewing(null); }, [filter, source]);
 
   const columns = useMemo(
     () => dealIntoColumns(
@@ -170,7 +219,7 @@ export default function AdminPhotos() {
         </p>
       </header>
 
-      <div className="mb-6 inline-flex rounded-lg border border-border p-1">
+      <div className="mb-4 inline-flex rounded-lg border border-border p-1">
         {FILTERS.map(([f, label]) => (
           <button key={f} onClick={() => setFilter(f)} aria-pressed={filter === f}
                   className={`rounded-md px-4 py-1.5 text-sm ${filter === f ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`}>
@@ -178,6 +227,39 @@ export default function AdminPhotos() {
           </button>
         ))}
       </div>
+
+      {/* One row per Drive link, carrying the count that matters under the filter
+          in force — so "No bib · 1,412" on one folder and "No bib · 8" on another
+          says where the work is before a single photo is opened. Only drawn when
+          there is more than one folder: a single-folder album has nothing to
+          choose between. */}
+      {sources && sources.length > 1 && (
+        <div className="mb-6 flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => setSource('')}
+            aria-pressed={source === ''}
+            className={`tabular rounded-lg border px-3 py-1.5 text-xs ${
+              source === '' ? 'border-primary text-foreground' : 'border-border text-muted-foreground'}`}
+          >
+            All folders
+          </button>
+          {sources.map((s, i) => (
+            <button
+              key={s.source_id}
+              onClick={() => setSource(s.source_id)}
+              aria-pressed={source === s.source_id}
+              title={s.drive_folder_id}
+              className={`tabular rounded-lg border px-3 py-1.5 text-xs ${
+                source === s.source_id ? 'border-primary text-foreground' : 'border-border text-muted-foreground'}`}
+            >
+              {/* The credit if the photographer set one, otherwise a position —
+                  a Drive folder id is 33 characters of nothing to a reader. */}
+              {s.credit_name || `Folder ${i + 1}`}
+              <span className="ml-1.5 opacity-60">{countFor(s, filter).toLocaleString()}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {error && <p className="mb-6 rounded-md border border-destructive/45 px-4 py-3 text-sm text-destructive">{error}</p>}
 

@@ -54,6 +54,13 @@ export default function AdminEvent() {
   const [creditDraft, setCreditDraft] = useState<Record<string, string>>({});
   const [removing, setRemoving] = useState<{ id: string; purged: number } | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  /**
+   * Per-folder coverage: how many of each link's photos came back with no face and
+   * no bib. Fetched ONCE, on its own request — it reads ~916,000 rows on the
+   * 32k-photo album, and the main event response is polled every few seconds
+   * while a pass runs, which is why it does not live there.
+   */
+  const [coverage, setCoverage] = useState<Record<string, { no_face: number; no_bib: number }>>({});
 
   const load = useCallback(async () => {
     try {
@@ -63,11 +70,30 @@ export default function AdminEvent() {
   }, [id]);
 
   useEffect(() => { load(); }, [load]);
+
   useEffect(() => { api.admin.me().then((m) => setOwner(m.owner)).catch(() => {}); }, []);
 
   const showSkeleton = useDeferredLoading(!report || !event);
 
   const active = report?.jobs.find((j) => ['running', 'queued'].includes(j.status) && !j.stale) ?? null;
+  // Coverage is a snapshot of what the pipeline read, so it is refetched when a
+  // pass finishes rather than on a timer: `active` going from set to null is
+  // exactly the moment the numbers can have changed.
+  useEffect(() => {
+    if (active) return;
+    let live = true;
+    api.admin.coverage(id)
+      .then((r) => {
+        if (!live) return;
+        setCoverage(Object.fromEntries(
+          r.sources.map((s) => [s.source_id, { no_face: s.no_face, no_bib: s.no_bib }]),
+        ));
+      })
+      // Silent: a missing count is a missing count. The page's own numbers — what
+      // is indexed, what is missing — do not come from here.
+      .catch(() => {});
+    return () => { live = false; };
+  }, [id, active]);
 
   // Poll only while something is moving, and only while the tab is visible: the
   // report is eight aggregate queries and a rate-limited album can sit here for
@@ -283,6 +309,27 @@ export default function AdminEvent() {
                     </span>
                     {' · '}{s.image_source === 'thumb' ? 'resized' : 'full originals'}
                   </p>
+                  {/* Where the work is. An album-wide "1,847 with no bib" is a
+                      number with nowhere to go; per folder it says which link to
+                      re-read and which to leave alone. Only shown when there is
+                      something to report — zeros on a good folder are noise. */}
+                  {coverage[s.id] && (coverage[s.id].no_face > 0 || coverage[s.id].no_bib > 0) && (
+                    <p className="tabular mt-0.5 text-xs text-muted-foreground/70">
+                      {coverage[s.id].no_face > 0 && (
+                        <Link to={`/admin/e/${id}/photos?filter=no_face&source=${s.id}`}
+                              className="underline-offset-4 hover:text-foreground hover:underline">
+                          {coverage[s.id].no_face.toLocaleString()} no face
+                        </Link>
+                      )}
+                      {coverage[s.id].no_face > 0 && coverage[s.id].no_bib > 0 && ' · '}
+                      {coverage[s.id].no_bib > 0 && (
+                        <Link to={`/admin/e/${id}/photos?filter=no_bib&source=${s.id}`}
+                              className="underline-offset-4 hover:text-foreground hover:underline">
+                          {coverage[s.id].no_bib.toLocaleString()} no bib
+                        </Link>
+                      )}
+                    </p>
+                  )}
                 </div>
                 {/* How this photographer is credited on the public page. Empty
                     until an organizer fills it in, and the album link is shown on

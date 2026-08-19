@@ -397,14 +397,38 @@ export const api = {
       req<{ stopped: boolean; status: string; reason?: string }>(
         `/api/admin/jobs/${jobId}/stop`, { method: 'POST' }),
 
-    photos: (eventId: string, cursor: string | null, filter = 'all') =>
+    photos: (eventId: string, cursor: string | null, filter = 'all', source = '') =>
       req<{
         photos: (Photo & {
           faces: { id: string; bib: string | null; x: number; y: number; w: number; h: number }[];
           bibs: { bib: string; bib_key: string; conf: number | null; source: string }[];
         })[];
         cursor: string | null;
-      }>(`/api/admin/events/${eventId}/photos?filter=${filter}&cursor=${encodeURIComponent(cursor ?? '')}`),
+      }>(`/api/admin/events/${eventId}/photos?filter=${filter}`
+         + `&cursor=${encodeURIComponent(cursor ?? '')}`
+         + (source ? `&source=${encodeURIComponent(source)}` : '')),
+
+    /**
+     * Per-Drive-link coverage: how many photos each folder holds, and how many of
+     * them the detector and the OCR came back empty on.
+     *
+     * Deliberately NOT part of getEvent: it reads ~916,000 rows on a 32k album,
+     * and getEvent is polled every few seconds while a pass runs. Call it once,
+     * on demand.
+     */
+    coverage: (eventId: string) =>
+      req<{
+        sources: {
+          source_id: string;
+          drive_folder_id: string;
+          credit_name: string | null;
+          image_source: string;
+          removed_at: string | null;
+          photos: number;
+          no_face: number;
+          no_bib: number;
+        }[];
+      }>(`/api/admin/events/${eventId}/coverage`),
 
     /**
      * ONE photo with its faces and bibs — the same shape as a row of photos().
