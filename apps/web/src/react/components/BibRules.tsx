@@ -91,8 +91,13 @@ export function BibRules({
     finally { setBusy(null); }
   }
 
+  // mb-8 matches every other section on the page that hosts this. Without it the
+  // card sat flush against "Drive links" — the one seam on that page with no gap,
+  // which read as the two cards being a single block. The spacing lives here
+  // rather than on a wrapper at the usage site, so the card cannot be placed
+  // somewhere else and lose it.
   return (
-    <section className="rounded-xl border border-border p-5">
+    <section className="mb-8 rounded-xl border border-border p-5">
       <h2 className="mb-4 text-sm font-semibold text-muted-foreground">Bib numbers</h2>
       {error && (
         <p className="mb-4 rounded-md border border-destructive/45 px-3 py-2 text-sm text-destructive">{error}</p>

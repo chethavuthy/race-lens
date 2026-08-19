@@ -15,6 +15,14 @@
  *   per PHOTO — says the number appears here at all. The only option when the
  *               detector found nobody, and the reason this dialog opens on a
  *               no-face photo instead of refusing to.
+ *
+ * It reads its own photo from the API and does not depend on the list behind it.
+ * That is not tidiness: the list is a QUERY, and correcting a bib under the
+ * "No bib" filter removes the photo from it — so an editor fed by the list lost
+ * its subject the moment the first number was typed. The dialog closed after one
+ * entry and the photo could not be found again, which made a group shot with five
+ * unread numbers impossible to fix. The list is still refreshed, in the
+ * background, because the grid behind should not go stale.
  */
 import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Loader2, Plus, RefreshCw, X } from 'lucide-react';
@@ -25,15 +33,28 @@ import { Button } from '@/components/ui/button';
 type Row = Awaited<ReturnType<typeof api.admin.photos>>['photos'][number];
 
 export function PhotoEditor({
-  row, onClose, onChanged, onStep, position,
+  seed, onClose, onChanged, onStep, position, inList = true,
 }: {
-  row: Row;
+  /**
+   * The row as the list had it — rendered immediately, so opening a photo shows
+   * it at once instead of a spinner, and then replaced by this component's own
+   * read of it.
+   */
+  seed: Row;
   onClose: () => void;
-  /** Reload the list after a write, so the grid and this dialog cannot disagree. */
+  /** Refresh the grid behind. Fire-and-forget: this dialog no longer depends on it. */
   onChanged: () => Promise<void> | void;
   onStep: (delta: number) => void;
   position: { index: number; total: number; hasMore?: boolean };
+  /** False once the photo no longer matches the active filter. */
+  inList?: boolean;
 }) {
+  const [row, setRow] = useState<Row>(seed);
+  // A different photo, not new data for the same one: re-seed only on identity.
+  // Re-seeding on every prop change would overwrite this component's fresher read
+  // with the list's stale copy every time the grid refreshed.
+  useEffect(() => { setRow(seed); }, [seed.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [adding, setAdding] = useState(false);
@@ -67,12 +88,24 @@ export function PhotoEditor({
     return () => { html.style.overflow = prev.h; document.body.style.overflow = prev.b; };
   }, []);
 
-  /** Every write goes through here: one busy key, one error line, one reload. */
+  /**
+   * Every write goes through here: one busy key, one error line, one re-read.
+   *
+   * The photo is re-read from the API rather than patched from the response.
+   * Both write paths touch several tables — the per-face route writes faces.bib,
+   * a photo-level bibs row AND clears a tombstone — so anything reconstructed
+   * here would be a second, quietly diverging model of what the server did.
+   */
   async function run(key: string, fn: () => Promise<unknown>) {
     setBusy(key);
     setError(null);
-    try { await fn(); await onChanged(); }
-    catch (e) { setError((e as Error).message); }
+    try {
+      await fn();
+      const r = await api.admin.photo(row.id);
+      setRow(r.photo);
+      // The grid behind, without blocking this dialog on it.
+      void onChanged();
+    } catch (e) { setError((e as Error).message); }
     finally { setBusy(null); }
   }
 
@@ -108,6 +141,13 @@ export function PhotoEditor({
         <span className="hidden sm:inline">
           {row.faces.length ? plural(row.faces.length, 'face') : 'no face found'}
         </span>
+        {/* Why the grid behind no longer shows it. Without this the photo simply
+            vanishing looks like the correction went wrong. */}
+        {!inList && (
+          <span className="hidden text-white/45 sm:inline">
+            · corrected, so it has left the current filter
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-1">
           <Button variant="ghost" size="icon-sm" aria-label="Previous photo"
                   onClick={() => onStep(-1)} disabled={position.index === 0}>

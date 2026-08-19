@@ -407,6 +407,21 @@ export const api = {
       }>(`/api/admin/events/${eventId}/photos?filter=${filter}&cursor=${encodeURIComponent(cursor ?? '')}`),
 
     /**
+     * ONE photo with its faces and bibs — the same shape as a row of photos().
+     *
+     * The editor reads its subject through this, not through the filtered list:
+     * correcting a bib under "No bib" removes the photo from that list, and an
+     * editor fed by the list would lose the photo mid-correction.
+     */
+    photo: (photoId: string) =>
+      req<{
+        photo: Photo & {
+          faces: { id: string; bib: string | null; x: number; y: number; w: number; h: number }[];
+          bibs: { bib: string; bib_key: string; conf: number | null; source: string }[];
+        };
+      }>(`/api/admin/photos/${photoId}`),
+
+    /**
      * Remove one wrong bib from one photo.
      *
      * The route tombstones it as well as deleting it — a deleted OCR read comes

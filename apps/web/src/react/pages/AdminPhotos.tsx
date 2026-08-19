@@ -49,15 +49,17 @@ export default function AdminPhotos() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   /**
-   * Which photo is open for correction, by ID rather than by index.
+   * The photo open for correction, held as the ROW plus the index it was opened
+   * at — not as an index into the list, and not as an id looked up in the list.
    *
-   * An index is not stable across a reload: correcting a bib under the "No bib"
-   * filter removes that photo from the set, and every photo after it shifts up
-   * one — so an index would quietly point at a DIFFERENT photo than the one just
-   * being edited. Keyed by id, the dialog closes when its photo leaves the set,
-   * which is the truth.
+   * Both of those tie the dialog's life to a query it should outlive. Correcting a
+   * bib under "No bib" removes that photo from the list, so an index silently
+   * pointed at a different photo and an id lookup closed the dialog outright —
+   * which is what happened after typing ONE number into a group shot with five
+   * unread ones. Holding the row means the dialog stays on the photo; the editor
+   * re-reads it from the API by id, so nothing it shows depends on the list.
    */
-  const [viewingId, setViewingId] = useState<string | null>(null);
+  const [viewing, setViewing] = useState<{ row: Row; index: number } | null>(null);
   const columnCount = useColumnCount(INSPECT_COLUMNS);
   const sentinel = useRef<HTMLDivElement>(null);
   // Nothing at all for a fast load, then the placeholder if it is genuinely slow —
@@ -141,14 +143,7 @@ export default function AdminPhotos() {
   }
 
   // A filter change reshuffles the set, so anything open belongs to the old one.
-  useEffect(() => { setViewingId(null); }, [filter]);
-
-  const viewingIndex = viewingId === null ? -1 : rows.findIndex((r) => r.id === viewingId);
-  // Its photo left the set — corrected under a filter that was selecting for the
-  // very thing just fixed. Closing beats showing whichever photo took its place.
-  useEffect(() => {
-    if (viewingId !== null && !loading && viewingIndex === -1) setViewingId(null);
-  }, [viewingId, viewingIndex, loading]);
+  useEffect(() => { setViewing(null); }, [filter]);
 
   const columns = useMemo(
     () => dealIntoColumns(
@@ -216,7 +211,7 @@ export default function AdminPhotos() {
                         and are deliberately NOT interactive at this size. */}
                     <button
                       type="button"
-                      onClick={() => setViewingId(p.id)}
+                      onClick={() => setViewing({ row: p, index: rows.indexOf(p) })}
                       title="Open to correct the bibs"
                       className="relative block w-full cursor-zoom-in bg-muted
                                  focus-visible:ring-3 focus-visible:ring-ring focus-visible:outline-none"
@@ -237,7 +232,7 @@ export default function AdminPhotos() {
                     <figcaption className="space-y-2 px-3 py-2 text-xs text-muted-foreground">
                       <div className="flex items-center justify-between gap-2">
                         <span>{p.faces.length ? plural(p.faces.length, 'face') : 'no face found'}</span>
-                        <button onClick={() => setViewingId(p.id)}
+                        <button onClick={() => setViewing({ row: p, index: rows.indexOf(p) })}
                                 className="underline-offset-4 hover:underline">
                           correct bibs
                         </button>
@@ -300,15 +295,21 @@ export default function AdminPhotos() {
         </>
       )}
 
-      {viewingIndex >= 0 && (
+      {viewing && (
         <PhotoEditor
-          row={rows[viewingIndex]}
-          position={{ index: viewingIndex, total: rows.length, hasMore: !!cursor }}
-          onClose={() => setViewingId(null)}
+          seed={viewing.row}
+          position={{ index: viewing.index, total: rows.length, hasMore: !!cursor }}
+          inList={rows.some((r) => r.id === viewing.row.id)}
+          onClose={() => setViewing(null)}
           onChanged={refresh}
           onStep={(d) => {
-            const next = viewingIndex + d;
-            if (next >= 0 && next < rows.length) setViewingId(rows[next].id);
+            // Where the open photo sits NOW. If it has left the list — corrected
+            // under a filter that was selecting for exactly that — everything
+            // after it shifted up one, so the slot it used to occupy already holds
+            // the next photo. Stepping from the stale index would skip one.
+            const at = rows.findIndex((r) => r.id === viewing.row.id);
+            const next = at >= 0 ? at + d : viewing.index + (d > 0 ? 0 : -1);
+            if (next >= 0 && next < rows.length) setViewing({ row: rows[next], index: next });
             // Stepping off the end of what is loaded fetches the next page rather
             // than stopping dead: correcting bibs is a walk through the album, and
             // the page boundary is not something the operator should have to know

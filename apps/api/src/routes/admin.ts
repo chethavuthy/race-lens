@@ -1307,6 +1307,50 @@ adminRoutes.get('/events/:id/photos', async (c) => {
 });
 
 /**
+ * ONE photo, in the same shape as a row of the list above.
+ *
+ * The editor on /admin/e/:id/photos reads its own photo through this rather than
+ * through whatever the filtered list happens to hold, and that is the point. The
+ * list is a QUERY: correcting a bib under "No bib" removes that photo from it, so
+ * an editor fed by the list lost its subject the instant the first number was
+ * typed — the dialog closed and the photo was nowhere to be found. Adding several
+ * numbers to one group shot is the ordinary case, not an edge case.
+ *
+ * Reads the same way the list does, so the two cannot disagree about a box.
+ */
+adminRoutes.get('/photos/:id', async (c) => {
+  const photoId = c.req.param('id');
+  await ownPhoto(c, photoId);
+
+  const p = await c.env.DB.prepare(
+    'SELECT id, drive_file_id, thumb_key, width, height FROM photos WHERE id = ?',
+  ).bind(photoId).first<any>();
+  if (!p) throw new HttpError(404, 'Photo not found', 'no_photo');
+
+  const [{ results: faces }, { results: bibs }] = await Promise.all([
+    c.env.DB.prepare('SELECT id, bbox, bib FROM faces WHERE photo_id = ?')
+      .bind(photoId).all<any>(),
+    c.env.DB.prepare(
+      `SELECT COALESCE(bib_raw, bib) AS bib, bib AS bib_key, conf, source
+         FROM bibs WHERE photo_id = ?`,
+    ).bind(photoId).all<any>(),
+  ]);
+
+  return c.json({
+    photo: {
+      ...publicPhoto(c.env, p),
+      faces: faces.flatMap((f: any) => {
+        const box = faceBox(JSON.parse(f.bbox), p.width, p.height);
+        return box ? [{ id: f.id, bib: f.bib, ...box }] : [];
+      }),
+      bibs: bibs.map((b: any) => ({
+        bib: b.bib, bib_key: b.bib_key, conf: b.conf, source: b.source ?? 'ocr',
+      })),
+    },
+  });
+});
+
+/**
  * Manual bib entry and correction.
  *
  * OCR has a measured ceiling on mid-distance and partly-occluded bibs, and a
