@@ -9,8 +9,16 @@
  * quantity, and type=number brings spinners and lets a phone offer a decimal
  * point. Letters are allowed through because some races number by category
  * (F-0001), and the API canonicalises what it receives.
+ *
+ * The submit button is not decoration. iOS shows a bare 0-9 pad for a numeric
+ * input — there is no return key on it at all — so "press enter" was an
+ * instruction a phone could not follow, and the phone is where nearly every
+ * runner opens this. enterKeyHint labels the key on the keyboards that do have
+ * one; the button is what everyone else presses.
  */
 import { useId } from 'react';
+import { Search } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { Bib } from './Bib';
 
 export function BibInput({
@@ -37,6 +45,7 @@ export function BibInput({
           onChange={(e) => onChange(e.target.value.slice(0, 8))}
           disabled={disabled}
           inputMode="numeric"
+          enterKeyHint="search"
           autoComplete="off"
           spellCheck={false}
           placeholder="0000"
@@ -48,8 +57,16 @@ export function BibInput({
                      sm:text-7xl"
         />
       </div>
+      <Button
+        type="submit"
+        size="lg"
+        disabled={disabled || !value.trim()}
+        className="h-11 px-6 text-base"
+      >
+        <Search /> Find my photos
+      </Button>
       <p id={`${id}-hint`} className="text-sm text-muted-foreground">
-        Type the number you wore, then press enter.
+        Type the number you wore.
       </p>
     </form>
   );

@@ -20,30 +20,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { clockTime } from '@/lib/format';
 import type { Photo } from '@/lib/api';
+// The column count and the dealing live in lib/grid, because the operator's
+// inspect screen has to lay out the same way and two copies of that would drift.
+import { WALL_COLUMNS, dealIntoColumns, useColumnCount } from '@/lib/grid';
 import { Button } from '@/components/ui/button';
 import { Lightbox } from './Lightbox';
 
 export type WallItem = { photo: Photo };
-
-const BREAKPOINTS = [
-  { min: 1101, columns: 4 },
-  { min: 561, columns: 3 },
-  { min: 0, columns: 2 },
-];
-
-function useColumnCount() {
-  const [n, setN] = useState(() =>
-    typeof window === 'undefined' ? 4
-      : (BREAKPOINTS.find((b) => window.innerWidth >= b.min) ?? BREAKPOINTS[2]).columns);
-  useEffect(() => {
-    const onResize = () => {
-      setN((BREAKPOINTS.find((b) => window.innerWidth >= b.min) ?? BREAKPOINTS[2]).columns);
-    };
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
-  return n;
-}
 
 export function PhotoWall({
   items, onLoadMore, hasMore, loadingMore,
@@ -53,24 +36,17 @@ export function PhotoWall({
   hasMore?: boolean;
   loadingMore?: boolean;
 }) {
-  const columnCount = useColumnCount();
+  const columnCount = useColumnCount(WALL_COLUMNS);
   const sentinel = useRef<HTMLDivElement>(null);
   const [viewing, setViewing] = useState<number | null>(null);
 
-  const columns = useMemo(() => {
-    const cols: WallItem[][] = Array.from({ length: columnCount }, () => []);
-    const heights = new Array(columnCount).fill(0);
-    for (const item of items) {
-      const { width, height } = item.photo;
+  const columns = useMemo(
+    () => dealIntoColumns(items, columnCount, ({ photo }) => (
       // Height relative to column width, so it is unit-free and needs no measuring.
-      const ratio = width && height ? height / width : 2 / 3;
-      let shortest = 0;
-      for (let i = 1; i < columnCount; i++) if (heights[i] < heights[shortest]) shortest = i;
-      cols[shortest].push(item);
-      heights[shortest] += ratio;
-    }
-    return cols;
-  }, [items, columnCount]);
+      photo.width && photo.height ? photo.height / photo.width : 2 / 3
+    )),
+    [items, columnCount],
+  );
 
   // Load the next page as the end comes into view. The button below is not a
   // fallback for looks: it is what keeps this reachable by keyboard, and what

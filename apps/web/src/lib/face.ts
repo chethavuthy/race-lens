@@ -103,6 +103,57 @@ export function loadModels(onPhase?: (p: LoadPhase) => void): Promise<void> {
   return loading;
 }
 
+let prewarmed = false;
+
+/**
+ * Pull the model bytes into the HTTP cache before anyone asks for them.
+ *
+ * Fetch only — no InferenceSession, so no wasm compile and no CPU spent while
+ * the album is still painting. That is the whole trick: the expensive part of
+ * "Find me by face" on a phone is the 16 MB, and /models/* is served immutable,
+ * so warming it once means the first real search starts with the bytes already
+ * on disk. Compiling here instead would fight the photo wall for the main
+ * thread on exactly the devices this is meant to help.
+ *
+ * The body is DRAINED rather than kept. An unread response is not reliably
+ * stored, and arrayBuffer() would hold 16 MB live for no reason; reading and
+ * dropping the chunks completes the response so the cache keeps it, at a few
+ * hundred KB of transient memory.
+ *
+ * Declined on a metered or slow connection. This is a speculative download of
+ * 16 MB for a feature most visitors never touch — Save-Data is a person asking
+ * not to be charged for exactly this, and on 2g it would starve the thumbnails
+ * that are the page's actual content. Sequential for the same reason.
+ */
+export function prewarmModels(): void {
+  if (prewarmed || loading || (detSession && recSession)) return;
+  prewarmed = true;
+
+  const conn = (navigator as Navigator & {
+    connection?: { saveData?: boolean; effectiveType?: string };
+  }).connection;
+  if (conn?.saveData) return;
+  if (conn?.effectiveType && /2g$/.test(conn.effectiveType)) return;
+
+  void (async () => {
+    for (const url of [DET_MODEL, REC_MODEL]) {
+      try {
+        const r = await fetch(url, { cache: 'force-cache', priority: 'low' } as RequestInit);
+        if (!r.ok || !r.body) return;
+        const reader = r.body.getReader();
+        for (;;) {
+          const { done } = await reader.read();
+          if (done) break;
+        }
+      } catch {
+        // A failed prewarm is not a failure. loadModels will fetch for real,
+        // report its own phases, and surface its own error.
+        return;
+      }
+    }
+  })();
+}
+
 /** Decode any user-supplied image, honouring EXIF rotation (matters on phones). */
 export async function toBitmap(src: Blob | HTMLVideoElement | HTMLCanvasElement): Promise<ImageBitmap> {
   if (src instanceof Blob) return createImageBitmap(src, { imageOrientation: 'from-image' });

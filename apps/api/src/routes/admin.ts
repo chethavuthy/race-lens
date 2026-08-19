@@ -131,6 +131,13 @@ const operatorEmail = (c: AdminCtx) => (c.env.OWNER_EMAIL ?? '').trim().toLowerC
  * row — so both are read and joined here rather than one being inferred from
  * the other. Anyone in either is listed; a person the operator cannot see is a
  * person they cannot remove.
+ *
+ * With ONE exclusion: the operator themselves. Their access does not come from
+ * this table (the middleware exempts them from the lookup), and both controls on
+ * this screen refuse their address outright — so the row was a self-listing with
+ * a "Withdraw access" button that could only ever return 400. It appeared purely
+ * because they own an event, via the stats half of this join. Their own albums
+ * are on /admin, where they can be acted on.
  */
 adminRoutes.get('/organizers', async (c) => {
   requireOwner(c);
@@ -150,14 +157,17 @@ adminRoutes.get('/organizers', async (c) => {
     ).all<{ email: string; events: number; photos: number; published: number; last_event: string }>(),
   ]);
 
+  const self = operatorEmail(c);
   const byEmail = new Map<string, any>();
   for (const r of roster) {
+    if (r.email === self) continue;
     byEmail.set(r.email, {
       email: r.email, added_at: r.added_at, banned_at: r.banned_at,
       events: 0, photos: 0, published: 0, last_event: null,
     });
   }
   for (const s of stats) {
+    if (s.email === self) continue;
     const row = byEmail.get(s.email) ?? {
       email: s.email, added_at: null, banned_at: null,
     };

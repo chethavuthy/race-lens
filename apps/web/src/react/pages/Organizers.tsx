@@ -16,7 +16,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Loader2, UserPlus } from 'lucide-react';
 import { api, type Organizer } from '@/lib/api';
-import { plural } from '@/lib/format';
+import { formatDate, plural } from '@/lib/format';
 import { BackLink } from '../components/BackLink';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -94,8 +94,11 @@ export default function Organizers() {
                     {o.banned_at && <span className="ml-2 text-sm text-destructive">no longer has access</span>}
                   </p>
                   <p className="tabular mt-0.5 text-xs text-muted-foreground">
-                    {plural(o.events, 'event')} · {plural(o.published, 'published')} · {plural(o.photos, 'photo')}
-                    {o.last_event && ` · last ${o.last_event}`}
+                    {/* "published" is already a past participle — plural() made
+                        it "0 publisheds". It is a count of live albums, so it
+                        says so. */}
+                    {plural(o.events, 'event')} · {o.published} live · {plural(o.photos, 'photo')}
+                    {o.last_event && ` · last ${formatDate(o.last_event)}`}
                   </p>
                 </div>
 

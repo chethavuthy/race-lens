@@ -101,6 +101,40 @@ export function FaceSearch({
     return () => window.removeEventListener('keydown', onKey);
   }, [open, onClose]);
 
+  /**
+   * Attach the stream once the <video> actually exists.
+   *
+   * This used to run inside a requestAnimationFrame straight after setStage, on
+   * the assumption that React had committed by then. When it had not, video.current
+   * was still null, the guard swallowed it, and nothing ever retried: permission
+   * granted, camera light on, and a permanently grey rectangle with a "Take the
+   * photo" button under it. An effect keyed on the stage cannot lose that race —
+   * it only runs after the element is in the DOM.
+   *
+   * muted is set on the NODE, not left to the JSX. React does not reflect the
+   * muted prop to the attribute, and an unmuted video is not allowed to autoplay:
+   * play() rejects on iOS, which is the other way this ended up blank.
+   */
+  useEffect(() => {
+    if (stage !== 'camera') return;
+    const el = video.current;
+    const media = stream.current;
+    if (!el || !media) return;
+    let live = true;
+    el.muted = true;
+    el.playsInline = true;
+    el.srcObject = media;
+    el.play().catch(() => {
+      if (!live) return;
+      // A camera we hold but cannot show is worse than one we never opened: the
+      // light is on and the button lies. Release it and say so.
+      stopCamera();
+      setStage('error');
+      setMessage('The camera opened but could not be shown. Choose a photo instead.');
+    });
+    return () => { live = false; };
+  }, [stage, stopCamera]);
+
   async function run(source: Blob | HTMLVideoElement) {
     setStage('working');
     setMessage(null);
@@ -144,14 +178,8 @@ export function FaceSearch({
         return;
       }
       stream.current = media;
+      // Attaching is the stage effect's job, not this function's — see above.
       setStage('camera');
-      // The <video> only exists once the camera stage renders.
-      requestAnimationFrame(async () => {
-        if (video.current && stream.current) {
-          video.current.srcObject = stream.current;
-          await video.current.play().catch(() => {});
-        }
-      });
     } catch {
       setStage('error');
       setMessage('Could not open the camera. Check the permission in your browser, or upload a photo instead.');
@@ -187,6 +215,7 @@ export function FaceSearch({
                 disorienting to aim. */}
             <video
               ref={video}
+              autoPlay
               playsInline
               muted
               className="aspect-[4/3] w-full -scale-x-100 rounded-lg bg-muted object-cover"

@@ -9,13 +9,21 @@
  * The filters are the three states worth acting on, not a taxonomy. "No bib" is
  * where corrections happen; "no face" is usually the photographer's framing, not
  * a fault.
+ *
+ * The grid is a survey; corrections happen in PhotoEditor, which any photo opens.
+ * Editing in the tiles themselves did not work: the labels are a few pixels wide
+ * at thumbnail size, they pile on top of each other in a pack, and a photo with
+ * no detected face had no control at all — so the album with the worst OCR was
+ * the one with the fewest places to fix it.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { Loader2, RefreshCw, X } from 'lucide-react';
+import { Loader2, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { plural } from '@/lib/format';
+import { INSPECT_COLUMNS, dealIntoColumns, useColumnCount } from '@/lib/grid';
 import { BackLink } from '../components/BackLink';
+import { PhotoEditor } from '../components/PhotoEditor';
 import { Button } from '@/components/ui/button';
 
 // The API's own vocabulary — all | no_face | no_bib | has_bib. Hyphens were
@@ -31,10 +39,11 @@ export default function AdminPhotos() {
   const [filter, setFilter] = useState<Filter>('all');
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
-  const [editing, setEditing] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [draft, setDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
+  /** Which photo is open for correction, by index — arrows step through the set. */
+  const [viewing, setViewing] = useState<number | null>(null);
+  const columnCount = useColumnCount(INSPECT_COLUMNS);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -50,9 +59,12 @@ export default function AdminPhotos() {
 
   /**
    * One small mutation, then reload. Deliberately not patching the row in place:
-   * the previous implementation refetched page 1 with filter 'all' and grepped it,
-   * so a correction past the first page never appeared, and the failure was
-   * swallowed.
+   * an earlier version refetched page 1 with filter 'all' and grepped it, so a
+   * correction past the first page never appeared, and the failure was swallowed.
+   *
+   * Reloading under an open editor is why PhotoEditor is handed rows[viewing]
+   * rather than a copy: after a write it re-renders from the reloaded row, so the
+   * dialog cannot show a bib the list has already dropped.
    */
   async function act(key: string, fn: () => Promise<unknown>) {
     setBusy(key);
@@ -62,12 +74,21 @@ export default function AdminPhotos() {
     finally { setBusy(null); }
   }
 
-  async function saveBib(faceId: string) {
-    const value = draft.trim();
-    setEditing(null);
-    try { await api.admin.setFaceBib(faceId, value); await load(); }
-    catch (e) { setError((e as Error).message); }
-  }
+  // A filter change reshuffles the set, so an index into the old one means
+  // nothing. Closing is the honest answer; keeping it open would show a
+  // different photo than the one being corrected.
+  useEffect(() => { setViewing(null); }, [filter]);
+
+  const columns = useMemo(
+    () => dealIntoColumns(
+      rows.map((row, index) => ({ row, index })),
+      columnCount,
+      // Image ratio plus a constant for the caption, so a column of portrait
+      // frames is not judged shorter than it renders.
+      ({ row }) => (row.width && row.height ? row.height / row.width : 2 / 3) + 0.18,
+    ),
+    [rows, columnCount],
+  );
 
   return (
     <div className="pb-16">
@@ -78,7 +99,8 @@ export default function AdminPhotos() {
         <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
           Each box is a detected face, labelled with the bib read from that
           runner's torso. <span className="tabular text-foreground">?</span> means a
-          face was found but no number could be read — click any label to type it in.
+          face was found but no number could be read. Open any photo to type numbers
+          in — per runner, or for the whole photo when no face was found.
         </p>
       </header>
 
@@ -102,99 +124,97 @@ export default function AdminPhotos() {
       ) : (
         <>
           <p className="tabular mb-4 text-sm text-muted-foreground">{plural(rows.length, 'photo')}</p>
-          {/* items-start, or every card stretches to the tallest in its row and a
-              landscape frame sits above a slab of empty background.
 
-              The frame keeps its natural aspect ratio deliberately: the face boxes
-              are fractions OF THAT FRAME, so cropping to a uniform tile would slide
-              every box away from the face it belongs to — which is the one thing
-              this screen exists to show. */}
-          <div className="grid items-start gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {rows.map((p) => (
-              <figure key={p.id} className="h-fit overflow-hidden rounded-lg border border-border">
-                <div className="relative bg-muted">
-                  {p.thumb_url && <img src={p.thumb_url} alt="" loading="lazy" className="block w-full" />}
-                  {p.faces.map((f) => (
-                    <div
-                      key={f.id}
-                      className="absolute border-2 border-primary"
-                      style={{ left: `${f.x * 100}%`, top: `${f.y * 100}%`, width: `${f.w * 100}%`, height: `${f.h * 100}%` }}
+          {/* Masonry, dealt column by column — the same layout and the same helper
+              as the runner's wall. The CSS grid this replaces stretched every card
+              in a row to the tallest one, so a 3:4 portrait frame (two in five of
+              these photos) put a slab of empty background under its landscape
+              neighbours. */}
+          <div className="flex gap-4">
+            {columns.map((col, i) => (
+              <div key={i} className="flex min-w-0 flex-1 flex-col gap-4">
+                {col.map(({ row: p, index }) => (
+                  <figure key={p.id} className="h-fit overflow-hidden rounded-lg border border-border">
+                    {/* The whole frame opens the editor. The boxes are drawn here
+                        for the survey — where the faces are, which have numbers —
+                        and are deliberately NOT interactive at this size. */}
+                    <button
+                      type="button"
+                      onClick={() => setViewing(index)}
+                      title="Open to correct the bibs"
+                      className="relative block w-full cursor-zoom-in bg-muted
+                                 focus-visible:ring-3 focus-visible:ring-ring focus-visible:outline-none"
                     >
-                      {editing === f.id ? (
-                        <input
-                          autoFocus
-                          value={draft}
-                          onChange={(e) => setDraft(e.target.value)}
-                          onBlur={() => setEditing(null)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') saveBib(f.id);
-                            if (e.key === 'Escape') setEditing(null);
-                          }}
-                          className="tabular absolute -bottom-7 left-0 w-20 rounded bg-background px-1 py-0.5
-                                     text-xs text-foreground outline-none ring-2 ring-primary"
-                        />
-                      ) : (
-                        <button
-                          onClick={() => { setEditing(f.id); setDraft(f.bib ?? ''); }}
-                          className="tabular absolute -bottom-6 left-0 rounded bg-primary px-1.5 py-0.5
-                                     text-xs font-bold text-primary-foreground"
+                      {p.thumb_url && <img src={p.thumb_url} alt="" loading="lazy" decoding="async" className="block w-full" />}
+                      {p.faces.map((f) => (
+                        <span
+                          key={f.id}
+                          className="pointer-events-none absolute border-2 border-primary"
+                          style={{ left: `${f.x * 100}%`, top: `${f.y * 100}%`, width: `${f.w * 100}%`, height: `${f.h * 100}%` }}
                         >
-                          {f.bib ?? '?'}
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-                <figcaption className="space-y-2 px-3 py-2 text-xs text-muted-foreground">
-                  <div className="flex items-center justify-between gap-2">
-                    <span>{p.faces.length ? plural(p.faces.length, 'face') : 'no face found'}</span>
-                    <a href={p.original_url} target="_blank" rel="noreferrer" className="underline-offset-4 hover:underline">
-                      original
-                    </a>
-                  </div>
-
-                  {/* Every bib on this photo, each removable. A wrong number is
-                      worse than a missing one — it puts a stranger in someone's
-                      results — and deleting it also tombstones it, so the next
-                      pass does not read it straight back. */}
-                  {p.bibs.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5">
-                      {p.bibs.map((b) => (
-                        <span key={b.bib}
-                              className="tabular inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5">
-                          {b.bib}
-                          {b.source === 'manual' && <span className="text-primary" title="typed by hand">·</span>}
-                          <button
-                            aria-label={`Remove bib ${b.bib}`}
-                            title="Wrong number — remove it and stop it coming back"
-                            disabled={busy === `bib-${p.id}-${b.bib}`}
-                            onClick={() => act(`bib-${p.id}-${b.bib}`,
-                              () => api.admin.deletePhotoBib(p.id, b.bib))}
-                            className="text-muted-foreground hover:text-destructive"
-                          >
-                            <X className="size-3" />
-                          </button>
+                          <span className="tabular absolute -bottom-5 left-0 rounded bg-primary px-1 text-[0.65rem] font-bold text-primary-foreground">
+                            {f.bib ?? '?'}
+                          </span>
                         </span>
                       ))}
-                    </div>
-                  )}
+                    </button>
+                    <figcaption className="space-y-2 px-3 py-2 text-xs text-muted-foreground">
+                      <div className="flex items-center justify-between gap-2">
+                        <span>{p.faces.length ? plural(p.faces.length, 'face') : 'no face found'}</span>
+                        <button onClick={() => setViewing(index)}
+                                className="underline-offset-4 hover:underline">
+                          correct bibs
+                        </button>
+                      </div>
 
-                  <button
-                    disabled={busy === `re-${p.id}`}
-                    onClick={() => act(`re-${p.id}`, () => api.admin.reindexPhoto(p.id))}
-                    className="inline-flex items-center gap-1 underline-offset-4 hover:underline disabled:opacity-50"
-                    title="Read this one photo again — seconds, rather than the whole folder"
-                  >
-                    {busy === `re-${p.id}`
-                      ? <Loader2 className="size-3 animate-spin" />
-                      : <RefreshCw className="size-3" />}
-                    re-read this photo
-                  </button>
-                </figcaption>
-              </figure>
+                      {/* Every bib on this photo, each removable from here too —
+                          spotting a wrong number is what this survey is for, and
+                          opening a dialog to delete one you can already see would
+                          be a step for nothing. */}
+                      {p.bibs.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {p.bibs.map((b) => (
+                            <span key={b.bib_key}
+                                  className="tabular inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5">
+                              {b.bib}
+                              {b.source === 'manual' && <span className="text-primary" title="typed by hand">·</span>}
+                              <button
+                                aria-label={`Remove bib ${b.bib}`}
+                                title="Wrong number — remove it and stop it coming back"
+                                disabled={busy === `bib-${p.id}-${b.bib_key}`}
+                                onClick={() => act(`bib-${p.id}-${b.bib_key}`,
+                                  () => api.admin.deletePhotoBib(p.id, b.bib))}
+                                className="text-muted-foreground hover:text-destructive"
+                              >
+                                {busy === `bib-${p.id}-${b.bib_key}`
+                                  ? <Loader2 className="size-3 animate-spin" />
+                                  : <X className="size-3" />}
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </figcaption>
+                  </figure>
+                ))}
+              </div>
             ))}
           </div>
         </>
+      )}
+
+      {viewing !== null && rows[viewing] && (
+        <PhotoEditor
+          row={rows[viewing]}
+          position={{ index: viewing, total: rows.length }}
+          onClose={() => setViewing(null)}
+          onChanged={load}
+          onStep={(d) => setViewing((i) => {
+            if (i === null) return i;
+            const next = i + d;
+            return next >= 0 && next < rows.length ? next : i;
+          })}
+        />
       )}
 
       <Button variant="outline" className="mt-8" render={<Link to={`/admin/e/${id}`} />}>

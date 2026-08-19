@@ -14,6 +14,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { ScanFace } from 'lucide-react';
 import { api, type EventSummary, type FaceMatch, type Photo } from '@/lib/api';
 import { plural } from '@/lib/format';
+import { prewarmModels } from '@/lib/face';
 import { Bib } from '../components/Bib';
 import { BibInput } from '../components/BibInput';
 import { PhotoWall, type WallItem } from '../components/PhotoWall';
@@ -50,6 +51,20 @@ export default function EventDetail() {
   const [faceNote, setFaceNote] = useState<string | null>(null);
 
   const showSkeleton = useDeferredLoading(loading);
+
+  // Warm the 16 MB matcher in the background, once, while the runner is reading
+  // the page. Face search is offered on every album, and its whole cost is the
+  // download — paying it during idle time turns a 20-second wait after the tap
+  // into no wait at all. Deferred to idle (and behind a timeout on Safari, which
+  // has no requestIdleCallback) so it never competes with the album request or
+  // the first screen of thumbnails; prewarmModels itself declines on Save-Data
+  // and slow connections.
+  useEffect(() => {
+    const idle = (window as Window & typeof globalThis).requestIdleCallback;
+    if (idle) { const h = idle(() => prewarmModels(), { timeout: 4000 }); return () => window.cancelIdleCallback?.(h); }
+    const t = setTimeout(prewarmModels, 2500);
+    return () => clearTimeout(t);
+  }, []);
 
   useEffect(() => {
     let live = true;

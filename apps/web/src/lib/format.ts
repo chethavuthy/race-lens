@@ -28,9 +28,23 @@ export function clockTime(takenAt: string | null): string {
   return `${String(h).padStart(2, '0')}:${m[2]}`;
 }
 
+/**
+ * A day, readably — "Aug 16, 2026".
+ *
+ * Takes both shapes the API stores: `events.event_date` is a bare day, and
+ * `created_at` is a full ISO instant. The bare day gets T00:00:00 appended so it
+ * is read in LOCAL terms — without it, a race date is parsed as UTC midnight and
+ * shows as the day before for every reader west of Greenwich. A full timestamp
+ * already carries its own zone and is parsed as it stands.
+ *
+ * Appending the suffix unconditionally, as this did, made a timestamp invalid
+ * ("…170ZT00:00:00") and the fallback then returned the raw string — which is how
+ * "last 2026-08-16T07:00:17.170Z" reached the organizers screen.
+ */
 export function formatDate(iso: string | null): string {
   if (!iso) return '';
-  const d = new Date(`${iso}T00:00:00`);
+  const dayOnly = /^\d{4}-\d{2}-\d{2}$/.test(iso.trim());
+  const d = new Date(dayOnly ? `${iso}T00:00:00` : iso);
   return Number.isNaN(d.getTime())
     ? iso
     : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });

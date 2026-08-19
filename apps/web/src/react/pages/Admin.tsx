@@ -41,6 +41,9 @@ function toISODate(d: Date): string {
 
 export default function Admin() {
   const [owner, setOwner] = useState(false);
+  // The signed-in address, kept rather than discarded: it is what decides whose
+  // events are whose. Without it the list could only compare against 'you'.
+  const [me, setMe] = useState<string | null>(null);
   /**
    * Nothing renders until we know whether this person is through the door.
    *
@@ -113,6 +116,7 @@ export default function Admin() {
       try {
         const me = await api.admin.me();
         setOwner(me.owner);
+        setMe((me.email ?? '').toLowerCase() || null);
         setGate(null);
         await refresh();
       } catch (e) {
@@ -167,6 +171,21 @@ export default function Admin() {
   // slow — the same rule the album follows, for the same measured reason.
   if (checking) return showSkeleton ? <AdminSkeleton /> : <div className="min-h-screen" />;
   if (gate) return <Invitation gate={gate} />;
+
+  /**
+   * Whose album is whose.
+   *
+   * A NULL owner_email means the event predates ownership being recorded, and
+   * every one of those is the operator's — see migrations/005. Treating it as
+   * "mine" is what makes the two groups add up to the whole list; it is also why
+   * the row no longer prints "published by you" for some of the operator's
+   * albums and "published by <the operator's own address>" for the others. Same
+   * person, one group.
+   */
+  const isMine = (e: EventSummary) =>
+    !e.owner_email || (me !== null && e.owner_email.toLowerCase() === me);
+  const mine = owner ? events.filter(isMine) : events;
+  const theirs = owner ? events.filter((e) => !isMine(e)) : [];
 
   return (
     <div className="pb-16">
@@ -386,38 +405,69 @@ export default function Admin() {
             Nothing published yet. Check a folder above to make your first album.
           </p>
         ) : (
-          <ul className="divide-y divide-border rounded-xl border border-border">
-            {events.map((e) => (
-              <li key={e.id} className="flex flex-wrap items-center gap-4 px-5 py-4">
-                {/* Same treatment as the public list — an operator checking a
-                    banner should see what a runner sees, not a cropped variant. */}
-                <Link to={`/admin/e/${e.id}`} className="w-28 shrink-0">
-                  <Banner url={e.banner_url} className="rounded-md" />
-                </Link>
-                <div className="min-w-0 flex-1">
-                  <Link to={`/admin/e/${e.id}`} className="font-medium underline-offset-4 hover:underline">
-                    {e.name}
-                  </Link>
-                  <p className="tabular mt-0.5 text-xs text-muted-foreground">
-                    /e/{e.slug} · {e.status} · {plural(e.photo_count, 'photo')}
-                    {e.face_count ? ` · ${plural(e.face_count, 'face')}` : ''}
-                  </p>
-                  {/* Who published it. Only the operator is sent owner_email at
-                      all, and it is null on every event that predates ownership —
-                      which are the operator's own, so those read as "you" rather
-                      than as a blank the reader has to interpret. */}
-                  {owner && (
-                    <p className="mt-0.5 text-xs text-muted-foreground/70">
-                      published by {e.owner_email ?? 'you'}
-                    </p>
-                  )}
-                </div>
-                <Button variant="outline" size="sm" render={<Link to={`/admin/e/${e.id}`} />}>Open</Button>
-              </li>
-            ))}
-          </ul>
+          <>
+            {mine.length ? <EventRows events={mine} /> : (
+              <p className="rounded-xl border border-border p-8 text-center text-sm text-muted-foreground">
+                You have not published an album yet. Check a folder above to make your first.
+              </p>
+            )}
+
+            {/* The operator's own albums and other people's are two different
+                things to look at: one is work, the other is oversight. They were
+                one list, sorted only by date, so a photographer's album sat
+                between two of the operator's own with the difference carried by a
+                line of small grey text. Only the operator ever sees this section —
+                a photographer's request returns their own events and nothing
+                else, so there is no second group to draw. */}
+            {theirs.length > 0 && (
+              <div className="mt-8">
+                <h2 className="mb-3 text-sm font-semibold text-muted-foreground">
+                  Published by others
+                </h2>
+                <EventRows events={theirs} showOwner />
+              </div>
+            )}
+          </>
         )}
       </section>
     </div>
+  );
+}
+
+/**
+ * One group of album rows. Extracted when the single list became two, so both
+ * groups cannot drift apart in layout.
+ *
+ * showOwner is off for the operator's own group: "published by you" on every row
+ * of a section headed "Your events" is the heading again, in smaller type.
+ */
+function EventRows({ events, showOwner }: { events: EventSummary[]; showOwner?: boolean }) {
+  return (
+    <ul className="divide-y divide-border rounded-xl border border-border">
+      {events.map((e) => (
+        <li key={e.id} className="flex flex-wrap items-center gap-4 px-5 py-4">
+          {/* Same treatment as the public list — an operator checking a banner
+              should see what a runner sees, not a cropped variant. */}
+          <Link to={`/admin/e/${e.id}`} className="w-28 shrink-0">
+            <Banner url={e.banner_url} className="rounded-md" />
+          </Link>
+          <div className="min-w-0 flex-1">
+            <Link to={`/admin/e/${e.id}`} className="font-medium underline-offset-4 hover:underline">
+              {e.name}
+            </Link>
+            <p className="tabular mt-0.5 text-xs text-muted-foreground">
+              /e/{e.slug} · {e.status} · {plural(e.photo_count, 'photo')}
+              {e.face_count ? ` · ${plural(e.face_count, 'face')}` : ''}
+            </p>
+            {showOwner && e.owner_email && (
+              <p className="mt-0.5 text-xs text-muted-foreground/70">
+                published by {e.owner_email}
+              </p>
+            )}
+          </div>
+          <Button variant="outline" size="sm" render={<Link to={`/admin/e/${e.id}`} />}>Open</Button>
+        </li>
+      ))}
+    </ul>
   );
 }
