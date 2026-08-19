@@ -7,8 +7,11 @@
  * vector is sent. That is a real privacy property, so it is stated plainly in the
  * dialog rather than buried in a policy.
  *
- * ~16 MB of ONNX loads on first use, never on page load — most visitors search by
- * number and should not pay for a model they will not run.
+ * ~16 MB of ONNX loads on first use, and is warmed during idle time by
+ * prewarmModels once an album page is open — so by the time this dialog runs, the
+ * bytes are usually already on the device. Its size is deliberately NOT mentioned
+ * on screen: it is our engineering problem, not a number a runner can act on, and
+ * naming it only invites them to wonder whether to wait.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Camera, Upload, X } from 'lucide-react';
@@ -229,9 +232,6 @@ export function FaceSearch({
             <div className="mx-auto mb-4 size-8 animate-spin rounded-full border-2 border-muted border-t-primary" />
             <p className="text-sm text-muted-foreground">
               {phase ? PHASE_COPY[phase] : 'Starting…'}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              The matcher is about 16 MB and loads once.
             </p>
           </div>
         ) : (

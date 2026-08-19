@@ -32,7 +32,7 @@ export function PhotoEditor({
   /** Reload the list after a write, so the grid and this dialog cannot disagree. */
   onChanged: () => Promise<void> | void;
   onStep: (delta: number) => void;
-  position: { index: number; total: number };
+  position: { index: number; total: number; hasMore?: boolean };
 }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
@@ -103,7 +103,7 @@ export function PhotoEditor({
     >
       <header className="flex shrink-0 items-center gap-3 px-4 py-3 text-sm text-white/70">
         <span className="tabular">
-          {position.index + 1} / {position.total}
+          {position.index + 1} / {position.total}{position.hasMore ? '+' : ''}
         </span>
         <span className="hidden sm:inline">
           {row.faces.length ? plural(row.faces.length, 'face') : 'no face found'}
@@ -114,7 +114,8 @@ export function PhotoEditor({
             <ChevronLeft />
           </Button>
           <Button variant="ghost" size="icon-sm" aria-label="Next photo"
-                  onClick={() => onStep(1)} disabled={position.index >= position.total - 1}>
+                  onClick={() => onStep(1)}
+                  disabled={position.index >= position.total - 1 && !position.hasMore}>
             <ChevronRight />
           </Button>
           <Button variant="ghost" size="icon-sm" aria-label="Close" onClick={onClose}>

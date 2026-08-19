@@ -16,7 +16,7 @@
  * no detected face had no control at all — so the album with the worst OCR was
  * the one with the fewest places to fix it.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Loader2, X } from 'lucide-react';
 import { api } from '@/lib/api';
@@ -38,18 +38,33 @@ export default function AdminPhotos() {
   const { id = '' } = useParams();
   const [filter, setFilter] = useState<Filter>('all');
   const [rows, setRows] = useState<Row[]>([]);
+  // The API answers 24 at a time and hands back a cursor. Ignoring it is why this
+  // screen showed 24 photos of an album with 32,796 and gave no hint there were
+  // more — an operator looking for the unread bibs was looking at 0.07% of them.
+  const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  /** Which photo is open for correction, by index — arrows step through the set. */
-  const [viewing, setViewing] = useState<number | null>(null);
+  /**
+   * Which photo is open for correction, by ID rather than by index.
+   *
+   * An index is not stable across a reload: correcting a bib under the "No bib"
+   * filter removes that photo from the set, and every photo after it shifts up
+   * one — so an index would quietly point at a DIFFERENT photo than the one just
+   * being edited. Keyed by id, the dialog closes when its photo leaves the set,
+   * which is the truth.
+   */
+  const [viewingId, setViewingId] = useState<string | null>(null);
   const columnCount = useColumnCount(INSPECT_COLUMNS);
+  const sentinel = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const r = await api.admin.photos(id, null, filter);
       setRows(r.photos);
+      setCursor(r.cursor);
       setError(null);
     } catch (e) { setError((e as Error).message); }
     finally { setLoading(false); }
@@ -58,34 +73,83 @@ export default function AdminPhotos() {
   useEffect(() => { load(); }, [load]);
 
   /**
-   * One small mutation, then reload. Deliberately not patching the row in place:
-   * an earlier version refetched page 1 with filter 'all' and grepped it, so a
-   * correction past the first page never appeared, and the failure was swallowed.
-   *
-   * Reloading under an open editor is why PhotoEditor is handed rows[viewing]
-   * rather than a copy: after a write it re-renders from the reloaded row, so the
-   * dialog cannot show a bib the list has already dropped.
+   * The next page. Guarded by the cursor itself rather than a ref, because the
+   * observer below can fire twice before state settles and appending the same
+   * page would duplicate keys.
    */
+  const loadMore = useCallback(async () => {
+    if (!cursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const r = await api.admin.photos(id, cursor, filter);
+      setRows((prev) => [...prev, ...r.photos]);
+      setCursor(r.cursor);
+    } catch (e) { setError((e as Error).message); }
+    finally { setLoadingMore(false); }
+  }, [id, cursor, filter, loadingMore]);
+
+  // Load the next page as the end comes into view. The button below it is not
+  // decoration: it is what keeps this reachable by keyboard, and what works where
+  // IntersectionObserver does not exist.
+  useEffect(() => {
+    if (!cursor || typeof IntersectionObserver === 'undefined') return;
+    const el = sentinel.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entries) => { if (entries[0].isIntersecting) loadMore(); },
+      { rootMargin: '800px' },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [cursor, loadMore]);
+
+  /**
+   * Re-read everything already on screen, keeping the pages that were loaded.
+   *
+   * A plain load() after a correction would throw away pages 2..n and drop the
+   * operator back to the first 24 — mid-edit, on photo 300. So the same span is
+   * fetched again, page by page. Not patched in place: an earlier version
+   * refetched page 1 with filter 'all' and grepped it, so a correction past the
+   * first page never appeared and the failure was swallowed.
+   */
+  const refresh = useCallback(async () => {
+    const want = rows.length;
+    const fresh: Row[] = [];
+    let next: string | null = null;
+    do {
+      const r = await api.admin.photos(id, next, filter);
+      fresh.push(...r.photos);
+      next = r.cursor;
+    } while (next && fresh.length < want);
+    setRows(fresh);
+    setCursor(next);
+  }, [id, filter, rows.length]);
+
   async function act(key: string, fn: () => Promise<unknown>) {
     setBusy(key);
     setError(null);
-    try { await fn(); await load(); }
+    try { await fn(); await refresh(); }
     catch (e) { setError((e as Error).message); }
     finally { setBusy(null); }
   }
 
-  // A filter change reshuffles the set, so an index into the old one means
-  // nothing. Closing is the honest answer; keeping it open would show a
-  // different photo than the one being corrected.
-  useEffect(() => { setViewing(null); }, [filter]);
+  // A filter change reshuffles the set, so anything open belongs to the old one.
+  useEffect(() => { setViewingId(null); }, [filter]);
+
+  const viewingIndex = viewingId === null ? -1 : rows.findIndex((r) => r.id === viewingId);
+  // Its photo left the set — corrected under a filter that was selecting for the
+  // very thing just fixed. Closing beats showing whichever photo took its place.
+  useEffect(() => {
+    if (viewingId !== null && !loading && viewingIndex === -1) setViewingId(null);
+  }, [viewingId, viewingIndex, loading]);
 
   const columns = useMemo(
     () => dealIntoColumns(
-      rows.map((row, index) => ({ row, index })),
+      rows,
       columnCount,
       // Image ratio plus a constant for the caption, so a column of portrait
       // frames is not judged shorter than it renders.
-      ({ row }) => (row.width && row.height ? row.height / row.width : 2 / 3) + 0.18,
+      (row) => (row.width && row.height ? row.height / row.width : 2 / 3) + 0.18,
     ),
     [rows, columnCount],
   );
@@ -123,7 +187,12 @@ export default function AdminPhotos() {
         </p>
       ) : (
         <>
-          <p className="tabular mb-4 text-sm text-muted-foreground">{plural(rows.length, 'photo')}</p>
+          {/* "24 photos" read as the size of the album. It is the size of what has
+              been fetched, and on a 32,796-photo album those are very different
+              claims. */}
+          <p className="tabular mb-4 text-sm text-muted-foreground">
+            {plural(rows.length, 'photo')}{cursor ? ' so far' : ''}
+          </p>
 
           {/* Masonry, dealt column by column — the same layout and the same helper
               as the runner's wall. The CSS grid this replaces stretched every card
@@ -133,14 +202,14 @@ export default function AdminPhotos() {
           <div className="flex gap-4">
             {columns.map((col, i) => (
               <div key={i} className="flex min-w-0 flex-1 flex-col gap-4">
-                {col.map(({ row: p, index }) => (
+                {col.map((p) => (
                   <figure key={p.id} className="h-fit overflow-hidden rounded-lg border border-border">
                     {/* The whole frame opens the editor. The boxes are drawn here
                         for the survey — where the faces are, which have numbers —
                         and are deliberately NOT interactive at this size. */}
                     <button
                       type="button"
-                      onClick={() => setViewing(index)}
+                      onClick={() => setViewingId(p.id)}
                       title="Open to correct the bibs"
                       className="relative block w-full cursor-zoom-in bg-muted
                                  focus-visible:ring-3 focus-visible:ring-ring focus-visible:outline-none"
@@ -161,7 +230,7 @@ export default function AdminPhotos() {
                     <figcaption className="space-y-2 px-3 py-2 text-xs text-muted-foreground">
                       <div className="flex items-center justify-between gap-2">
                         <span>{p.faces.length ? plural(p.faces.length, 'face') : 'no face found'}</span>
-                        <button onClick={() => setViewing(index)}
+                        <button onClick={() => setViewingId(p.id)}
                                 className="underline-offset-4 hover:underline">
                           correct bibs
                         </button>
@@ -200,20 +269,33 @@ export default function AdminPhotos() {
               </div>
             ))}
           </div>
+
+          {cursor && (
+            <div ref={sentinel} className="flex justify-center py-8">
+              <Button variant="outline" onClick={loadMore} disabled={loadingMore}>
+                {loadingMore ? <Loader2 className="animate-spin" /> : null}
+                {loadingMore ? 'Loading…' : 'Load more photos'}
+              </Button>
+            </div>
+          )}
         </>
       )}
 
-      {viewing !== null && rows[viewing] && (
+      {viewingIndex >= 0 && (
         <PhotoEditor
-          row={rows[viewing]}
-          position={{ index: viewing, total: rows.length }}
-          onClose={() => setViewing(null)}
-          onChanged={load}
-          onStep={(d) => setViewing((i) => {
-            if (i === null) return i;
-            const next = i + d;
-            return next >= 0 && next < rows.length ? next : i;
-          })}
+          row={rows[viewingIndex]}
+          position={{ index: viewingIndex, total: rows.length, hasMore: !!cursor }}
+          onClose={() => setViewingId(null)}
+          onChanged={refresh}
+          onStep={(d) => {
+            const next = viewingIndex + d;
+            if (next >= 0 && next < rows.length) setViewingId(rows[next].id);
+            // Stepping off the end of what is loaded fetches the next page rather
+            // than stopping dead: correcting bibs is a walk through the album, and
+            // the page boundary is not something the operator should have to know
+            // about. The arrow lands on the new photo once it arrives.
+            else if (d > 0 && cursor) loadMore();
+          }}
         />
       )}
 
