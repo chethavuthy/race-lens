@@ -23,8 +23,10 @@ import { api } from '@/lib/api';
 import { plural } from '@/lib/format';
 import { INSPECT_COLUMNS, dealIntoColumns, useColumnCount } from '@/lib/grid';
 import { BackLink } from '../components/BackLink';
+import { InspectCardSkeleton, InspectSkeleton } from '../components/AdminSkeleton';
 import { PhotoEditor } from '../components/PhotoEditor';
 import { Button } from '@/components/ui/button';
+import { useDeferredLoading } from '../useDeferredLoading';
 
 // The API's own vocabulary — all | no_face | no_bib | has_bib. Hyphens were
 // silently unrecognised there, so the filter fell through to "everything" and
@@ -58,6 +60,11 @@ export default function AdminPhotos() {
   const [viewingId, setViewingId] = useState<string | null>(null);
   const columnCount = useColumnCount(INSPECT_COLUMNS);
   const sentinel = useRef<HTMLDivElement>(null);
+  // Nothing at all for a fast load, then the placeholder if it is genuinely slow —
+  // see useDeferredLoading. A spinner is what was here, and it says only "wait";
+  // a skeleton says what is coming, which on a filter change is the difference
+  // between the page thinking and the page looking broken.
+  const showSkeleton = useDeferredLoading(loading);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -180,7 +187,7 @@ export default function AdminPhotos() {
       {error && <p className="mb-6 rounded-md border border-destructive/45 px-4 py-3 text-sm text-destructive">{error}</p>}
 
       {loading ? (
-        <p className="flex items-center gap-2 py-10 text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading</p>
+        showSkeleton ? <InspectSkeleton /> : <div className="min-h-screen" />
       ) : !rows.length ? (
         <p className="rounded-xl border border-border p-8 text-center text-sm text-muted-foreground">
           Nothing here — which for this filter is good news.
@@ -269,6 +276,18 @@ export default function AdminPhotos() {
               </div>
             ))}
           </div>
+
+          {/* The next page arriving, in the shape it will arrive in. One card per
+              column so the grid extends rather than jumping. */}
+          {loadingMore && (
+            <div className="mt-4 flex gap-4">
+              {Array.from({ length: columnCount }, (_, i) => (
+                <div key={i} className="flex min-w-0 flex-1 flex-col gap-4">
+                  <InspectCardSkeleton ratio={i % 2 ? '2 / 3' : '3 / 2'} />
+                </div>
+              ))}
+            </div>
+          )}
 
           {cursor && (
             <div ref={sentinel} className="flex justify-center py-8">

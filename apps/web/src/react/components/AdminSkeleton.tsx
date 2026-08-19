@@ -65,3 +65,69 @@ export function EventRowsSkeleton({ rows = 3 }: { rows?: number }) {
     </ul>
   );
 }
+
+/**
+ * The inspect grid, before the photos arrive.
+ *
+ * Same masonry as the loaded screen — three columns at lg, two at sm, one below,
+ * the same 1rem gaps, and a card built from the same parts: a frame, then a
+ * caption line under it. The ratios are the mix these albums actually hold, with
+ * roughly two frames in five portrait, so the placeholder settles to about the
+ * height of the thing it stands in for.
+ *
+ * Columns beyond the first are hidden at the widths where the real grid has no
+ * column to show, rather than squeezing three into a phone.
+ */
+const INSPECT_RATIOS = [
+  ['3 / 2', '2 / 3', '3 / 2'],
+  ['2 / 3', '3 / 2', '3 / 4'],
+  ['3 / 2', '3 / 4', '3 / 2'],
+];
+
+export function InspectSkeleton() {
+  return (
+    <div aria-hidden>
+      {/* The count line the real screen prints above the grid. */}
+      <Skeleton className="mb-4 h-5 w-24" />
+      <div className="flex gap-4">
+        {INSPECT_RATIOS.map((column, i) => (
+          <div key={i} className={`flex min-w-0 flex-1 flex-col gap-4 ${
+            i > 0 ? 'hidden sm:flex' : ''} ${i > 1 ? 'sm:hidden lg:flex' : ''}`}>
+            {column.map((ratio, j) => <InspectCardSkeleton key={j} ratio={ratio} />)}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** One card: figure border, frame, then the caption row. */
+export function InspectCardSkeleton({ ratio = '3 / 2' }: { ratio?: string }) {
+  return (
+    <figure className="h-fit overflow-hidden rounded-lg border border-border" aria-hidden>
+      <Skeleton className="w-full rounded-none" style={{ aspectRatio: ratio }} />
+      <figcaption className="flex items-center justify-between gap-2 px-3 py-2">
+        <Skeleton className="h-3.5 w-16" />
+        <Skeleton className="h-3.5 w-20" />
+      </figcaption>
+    </figure>
+  );
+}
+
+/** The roster on "Who can publish", before it arrives. */
+export function OrganizerRowsSkeleton({ rows = 3 }: { rows?: number }) {
+  return (
+    <ul className="divide-y divide-border rounded-xl border border-border" aria-hidden>
+      {Array.from({ length: rows }, (_, i) => (
+        <li key={i} className="flex flex-wrap items-center gap-4 px-5 py-4">
+          <div className="min-w-0 flex-1">
+            {/* font-medium address, then the tabular counts line beneath it. */}
+            <Skeleton className="h-5 w-[min(16rem,60%)]" />
+            <Skeleton className="mt-1.5 h-3.5 w-64 max-w-full" />
+          </div>
+          <Skeleton className="h-7 w-28" />
+        </li>
+      ))}
+    </ul>
+  );
+}

@@ -18,6 +18,7 @@ import { Loader2, UserPlus } from 'lucide-react';
 import { api, type Organizer } from '@/lib/api';
 import { formatDate, plural } from '@/lib/format';
 import { BackLink } from '../components/BackLink';
+import { OrganizerRowsSkeleton } from '../components/AdminSkeleton';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
@@ -78,7 +79,7 @@ export default function Organizers() {
       </div>
 
       {loading ? (
-        <p className="flex items-center gap-2 py-10 text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading</p>
+        <OrganizerRowsSkeleton />
       ) : !rows.length ? (
         <p className="rounded-xl border border-border p-8 text-center text-sm text-muted-foreground">
           Nobody yet. Add a photographer's email above and they can sign in.
