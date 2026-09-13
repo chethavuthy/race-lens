@@ -22,7 +22,6 @@ import logging
 
 from .bibs import BibReader
 from .faces import FaceEngine, quantize
-from .main import load_bgr
 from .timing import Stages
 
 log = logging.getLogger(__name__)
@@ -56,12 +55,35 @@ def process_one(engine: FaceEngine, reader: "BibReader | None",
     which install their own fakes on the modules and would never reach a
     worker's globals.
     """
+    # Imported here, not at module scope: main imports THIS module, so a
+    # top-level import back into it is a cycle.
+    from .main import load_bgr
+
     st = Stages()
     with st.timed("decode_s"):
         bgr = load_bgr(path)
     if bgr is None:
         return {"drive_file_id": drive_file_id, "decoded": False,
                 "faces": [], "torso_bibs": [], "tile_bibs": [], "stages": st.as_dict()}
+    return process_frame(engine, reader, drive_file_id, bgr, st)
+
+
+def process_frame(engine: FaceEngine, reader: "BibReader | None",
+                  drive_file_id: str, bgr, st: "Stages | None" = None) -> dict:
+    """The same work, on a frame somebody else has already decoded.
+
+    Exists so the caller that made the THUMBNAIL from this frame does not have
+    to decode the file a second time to look at it. The two used to be separate
+    loops — make_thumbnail opened, EXIF-rotated and converted the file, then
+    load_bgr opened, EXIF-rotated and converted the identical file again — and
+    they were separate only because put_photos had to return photo_ids before
+    faces could be attributed to anything.
+
+    The frame is the caller's to release. It is the only large object here, and
+    holding a batch of them is the ~1.8 GB OOM that main.py's batch loop is
+    written to avoid.
+    """
+    st = st if st is not None else Stages()
 
     with st.timed("detect_s"):
         faces = engine.detect(bgr)

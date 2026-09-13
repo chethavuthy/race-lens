@@ -46,8 +46,8 @@ import numpy as np
 from .bibs import BibReader
 from .drive import DriveClient, QuotaExceeded
 from .faces import FaceEngine
-from .main import make_thumbnail
-from .photo_work import init_worker, process_one, work_photo
+from .main import decode_once, make_thumbnail
+from .photo_work import init_worker, process_frame, process_one, work_photo
 from .timing import Stages
 
 log = logging.getLogger("bench")
@@ -170,7 +170,8 @@ def _assemble(results, thumbs: dict, names: dict, embeddings: list,
 
 def process_batch(local: list, engine, reader,
                   cfg_thumb_edge: int, cfg_thumb_quality: int,
-                  embeddings: list, stages: Stages, pool=None) -> list:
+                  embeddings: list, stages: Stages, pool=None,
+                  single_decode: bool = False) -> list:
     """One batch, in main.py's exact order.
 
     Two passes over the batch, and they decode the same files twice — that is
@@ -179,6 +180,28 @@ def process_batch(local: list, engine, reader,
     anything. Merging them was queued as optimisation #2; the measured cost of
     the second decode is what decides whether that is worth doing.
     """
+    if single_decode:
+        # ONE decode per photo: the thumbnail and the detector's frame come out
+        # of the same one. This is the variant under test — run it against the
+        # two-pass path below, in the same job on the same machine, and the
+        # difference is the cost of the second decode and nothing else.
+        thumbs: dict = {}
+        names: dict = {}
+        results = []
+        for img, path in local:
+            names[img.id] = img.name
+            try:
+                with stages.timed("thumbnail_s"):
+                    thumb, full_w, full_h, bgr = decode_once(
+                        path, cfg_thumb_edge, cfg_thumb_quality)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Decode failed for %s: %s", img.name, exc)
+                continue
+            thumbs[img.id] = (_sha1(thumb), full_w, full_h)
+            results.append(process_frame(engine, reader, img.id, bgr, stages))
+            del bgr
+        return _assemble(results, thumbs, names, embeddings, stages)
+
     # PASS 1 — thumbnail. Decodes every file once. Sequential in both modes:
     # this is the pass optimisation #4 is about, and mixing it into #1 would
     # leave neither measurable on its own.
@@ -257,7 +280,8 @@ def run(args: argparse.Namespace) -> int:
         for i in range(0, len(local), args.batch_size):
             batch = local[i : i + args.batch_size]
             photos.extend(process_batch(batch, engine, reader, args.thumb_max_edge,
-                                        args.thumb_quality, embeddings, stages, pool))
+                                        args.thumb_quality, embeddings, stages, pool,
+                                        args.single_decode))
             log.info("batch %d done (%d photos) | %s",
                      i // args.batch_size, len(batch), stages.summary())
     finally:
@@ -279,6 +303,7 @@ def run(args: argparse.Namespace) -> int:
             "det_size": args.det_size,
             "sample": len(local),
             "workers": args.workers,
+            "single_decode": bool(args.single_decode),
             "batch_size": args.batch_size,
             "image_source": args.image_source,
             "python": platform.python_version(),
@@ -331,6 +356,8 @@ def main() -> int:
     # Accepted now, honoured by optimisation #1. Recorded in the report from the
     # start so a baseline and a parallel run are labelled distinguishably.
     p.add_argument("--workers", type=int, default=1)
+    # Optimisation #2, as a switch, so both shapes can run in one job.
+    p.add_argument("--single-decode", action="store_true")
     return run(p.parse_args())
 
 

@@ -47,6 +47,9 @@ on:
       b_threads:
         description: Second variant's onnxruntime threads (empty = library default)
         default: ''
+      single_decode:
+        description: Which variants decode once (optimisation 2)? none / a / b / both
+        default: none
       image_source:
         description: Drive's resized copy, or the full original
         type: choice
@@ -117,6 +120,7 @@ jobs:
           THREADS: ${{ inputs.threads }}
           B_WORKERS: ${{ inputs.b_workers }}
           B_THREADS: ${{ inputs.b_threads }}
+          SINGLE_DECODE: ${{ inputs.single_decode }}
         run: |
           # Which CPU this run drew. Runners are not one machine type, and that
           # is the leading suspect for both the timing spread between runs and
@@ -127,7 +131,13 @@ jobs:
           nproc
 
           run_variant() {
-            local label="$1" workers="$2" threads="$3"
+            local label="$1" workers="$2" threads="$3" which="$4"
+            local sd=""
+            case "$SINGLE_DECODE" in
+              both) sd="--single-decode" ;;
+              a) [ "$which" = a ] && sd="--single-decode" ;;
+              b) [ "$which" = b ] && sd="--single-decode" ;;
+            esac
             if [ -n "$threads" ]; then
               export OMP_NUM_THREADS="$threads" OPENBLAS_NUM_THREADS="$threads" \
                      MKL_NUM_THREADS="$threads"
@@ -142,15 +152,16 @@ jobs:
               --workers       "$workers" \
               --image-source  "$IMAGE_SOURCE" \
               --cache         /tmp/bench-cache \
-              --out           "bench-$label.json"
+              --out           "bench-$label.json" \
+              $sd
           }
 
-          run_variant "$LABEL" "$WORKERS" "$THREADS"
+          run_variant "$LABEL" "$WORKERS" "$THREADS" a
 
           # Both variants on ONE machine, so the comparison is paired and the
           # machine cancels out of it.
           if [ -n "$B_WORKERS" ]; then
-            run_variant "$LABEL-b" "$B_WORKERS" "$B_THREADS"
+            run_variant "$LABEL-b" "$B_WORKERS" "$B_THREADS" b
             echo "=== paired diff (same runner, same photos) ==="
             python3 tools/bench_diff.py "bench-$LABEL.json" "bench-$LABEL-b.json" || true
           fi
