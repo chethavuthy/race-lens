@@ -105,9 +105,70 @@ def fetch(drive: DriveClient, images: list, cache: str, image_source: str,
     return out
 
 
+# One engine set per worker process, built once in the initializer rather than
+# per photo. Module-level globals because that is the only thing a Pool worker
+# can carry between tasks.
+_ENGINE: "FaceEngine | None" = None
+_READER: "BibReader | None" = None
+
+
+def _init_worker(det_size: int) -> None:
+    global _ENGINE, _READER
+    _ENGINE = FaceEngine(det_size=det_size)
+    _READER = BibReader()
+
+
+def _work_photo(task: tuple) -> dict:
+    """The per-photo half of pass 2, with NO shared state.
+
+    Everything this returns is plain data. In particular it returns the
+    QUANTIZED embedding bytes rather than a row index: the worker has no idea
+    where its faces will land in the shard, and must not — assigning row_idx is
+    the parent's job precisely because that is the ordering that must not move.
+    """
+    drive_file_id, name, path = task
+    st = Stages()
+    with st.timed("decode_s"):
+        bgr = load_bgr(path)
+    if bgr is None:
+        return {"drive_file_id": drive_file_id, "decoded": False, "stages": st.as_dict()}
+
+    with st.timed("detect_s"):
+        faces = _ENGINE.detect(bgr)
+
+    out_faces = []
+    torso_bibs = []
+    for face in faces:
+        with st.timed("torso_ocr_s"):
+            hit = _READER.read_torso(bgr, face.bbox)
+        bib = None
+        if hit:
+            bib = hit.bib
+            torso_bibs.append({"bib": hit.bib, "raw": hit.raw, "conf": round(hit.conf, 6)})
+        q = quantize(face.embedding)
+        out_faces.append({
+            "bbox": [round(float(v), 2) for v in face.bbox],
+            "det_score": round(float(face.det_score), 6),
+            "q": q.tobytes(order="C"),
+            "bib": bib,
+        })
+
+    with st.timed("tile_ocr_s"):
+        tiles = _READER.read_tiles(bgr)
+    del bgr
+    return {
+        "drive_file_id": drive_file_id,
+        "decoded": True,
+        "faces": out_faces,
+        "torso_bibs": torso_bibs,
+        "tile_bibs": [{"bib": h.bib, "raw": h.raw, "conf": round(h.conf, 6)} for h in tiles],
+        "stages": st.as_dict(),
+    }
+
+
 def process_batch(local: list, engine: FaceEngine, reader: BibReader,
                   cfg_thumb_edge: int, cfg_thumb_quality: int,
-                  embeddings: list, stages: Stages) -> list:
+                  embeddings: list, stages: Stages, pool=None) -> list:
     """One batch, in main.py's exact order.
 
     Two passes over the batch, and they decode the same files twice — that is
@@ -128,6 +189,9 @@ def process_batch(local: list, engine: FaceEngine, reader: BibReader,
         thumbs[img.id] = (_sha1(thumb), full_w, full_h)
 
     # PASS 2 — decode again, detect, read. This is where row_idx is assigned.
+    if pool is not None:
+        return _pass2_parallel(local, thumbs, embeddings, stages, pool)
+
     rows = []
     for img, path in local:
         if img.id not in thumbs:
@@ -188,6 +252,59 @@ def process_batch(local: list, engine: FaceEngine, reader: BibReader,
     return rows
 
 
+def _pass2_parallel(local: list, thumbs: dict, embeddings: list,
+                    stages: Stages, pool) -> list:
+    """Pass 2 across worker processes, assembled back into ONE order.
+
+    imap, not imap_unordered, and the appends below happen in submission order.
+    That is the whole safety argument: row_idx is taken from len(embeddings) at
+    the instant the embedding is appended, so as long as the PARENT appends in
+    the batch's original order, the shard it builds is not merely equivalent to
+    the sequential one — it is identical, byte for byte, and row_idx means the
+    same thing it always did.
+
+    The workers never see row_idx. They cannot: a worker holds one photo and has
+    no idea how many faces the photos before it produced. Handing them the
+    counter is the version of this change that corrupts the index silently.
+    """
+    tasks = [(img.id, img.name, path) for img, path in local if img.id in thumbs]
+    by_id = {img.id: img for img, _ in local}
+    rows = []
+    for res in pool.imap(_work_photo, tasks):
+        # Worker CPU time, summed across processes. Deliberately kept in the
+        # same accumulator: the per-stage RANKING stays meaningful, while wall
+        # time is measured separately and is the only thing that shows the win.
+        stages.merge(res["stages"])
+        if not res["decoded"]:
+            continue
+        drive_file_id = res["drive_file_id"]
+        thumb_sha, full_w, full_h = thumbs[drive_file_id]
+
+        face_out = []
+        for face in res["faces"]:
+            q = np.frombuffer(face["q"], dtype=np.int8)
+            face_out.append({
+                "bbox": face["bbox"],
+                "det_score": face["det_score"],
+                "emb_sha1": _sha1(face["q"]),
+                "row_idx": len(embeddings),
+                "bib": face["bib"],
+            })
+            embeddings.append(q)
+
+        rows.append({
+            "drive_file_id": drive_file_id,
+            "name": by_id[drive_file_id].name,
+            "width": full_w,
+            "height": full_h,
+            "thumb_sha1": thumb_sha,
+            "faces": face_out,
+            "torso_bibs": res["torso_bibs"],
+            "tile_bibs": res["tile_bibs"],
+        })
+    return rows
+
+
 def run(args: argparse.Namespace) -> int:
     api_key = os.environ.get("GOOGLE_API_KEY")
     if not api_key:
@@ -210,18 +327,37 @@ def run(args: argparse.Namespace) -> int:
     # Engines built BEFORE the clock starts. Model load is ~100 MB off disk and
     # a one-off per pass; including it would tax a 40-photo benchmark with a
     # cost the real 1,881-photo pass amortises to nothing.
-    engine = FaceEngine(det_size=args.det_size)
-    reader = BibReader()
+    #
+    # And built in the PARENT only when there are no workers. Pass 1 needs
+    # neither engine — it only makes thumbnails — so the parallel path never
+    # forks a process that is already holding onnxruntime sessions, which is the
+    # classic way a forked worker deadlocks on a lock its parent's threads left
+    # held.
+    pool = None
+    engine = reader = None
+    if args.workers > 1:
+        import multiprocessing as mp
+
+        pool = mp.Pool(args.workers, initializer=_init_worker, initargs=(args.det_size,))
+        log.info("%d worker processes", args.workers)
+    else:
+        engine = FaceEngine(det_size=args.det_size)
+        reader = BibReader()
 
     embeddings: list = []
     photos: list = []
     wall0 = time.perf_counter()
-    for i in range(0, len(local), args.batch_size):
-        batch = local[i : i + args.batch_size]
-        photos.extend(process_batch(batch, engine, reader, args.thumb_max_edge,
-                                    args.thumb_quality, embeddings, stages))
-        log.info("batch %d done (%d photos) | %s",
-                 i // args.batch_size, len(batch), stages.summary())
+    try:
+        for i in range(0, len(local), args.batch_size):
+            batch = local[i : i + args.batch_size]
+            photos.extend(process_batch(batch, engine, reader, args.thumb_max_edge,
+                                        args.thumb_quality, embeddings, stages, pool))
+            log.info("batch %d done (%d photos) | %s",
+                     i // args.batch_size, len(batch), stages.summary())
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
     wall = time.perf_counter() - wall0
 
     try:
@@ -242,6 +378,11 @@ def run(args: argparse.Namespace) -> int:
             "python": platform.python_version(),
             "onnxruntime": ort_version,
             "cpu_count": os.cpu_count(),
+            # Recorded because onnxruntime's thread count is a plausible reason
+            # for two runs to disagree at the last bits, and a parallel run must
+            # pin it to 1 to avoid oversubscribing 4 vCPUs. If results ever move,
+            # this is the first column to check against the sequential baseline.
+            "omp_num_threads": os.environ.get("OMP_NUM_THREADS", "unset"),
             "machine": platform.machine(),
         },
         "totals": {

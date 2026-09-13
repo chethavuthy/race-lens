@@ -28,6 +28,14 @@ on:
       workers:
         description: Worker processes (1 until optimisation 1 lands)
         default: '1'
+      threads:
+        description: >
+          onnxruntime threads per process. Leave empty for the library default.
+          A parallel run must set this to 1 — N workers each spawning 4 intra-op
+          threads on a 4 vCPU runner spend more time contending than working.
+          It is also the one knob that could plausibly change results rather than
+          just timing, so it is recorded in the report and compared explicitly.
+        default: ''
       image_source:
         description: Drive's resized copy, or the full original
         type: choice
@@ -91,7 +99,15 @@ jobs:
           LABEL: ${{ inputs.label }}
           WORKERS: ${{ inputs.workers }}
           IMAGE_SOURCE: ${{ inputs.image_source }}
+          THREADS: ${{ inputs.threads }}
         run: |
+          # Exported before python starts: onnxruntime reads these when it builds
+          # a session, and a value set from inside the process arrives too late.
+          if [ -n "$THREADS" ]; then
+            export OMP_NUM_THREADS="$THREADS"
+            export OPENBLAS_NUM_THREADS="$THREADS"
+            export MKL_NUM_THREADS="$THREADS"
+          fi
           python -m indexer.bench_pipeline \
             --folder-id     "$FOLDER_ID" \
             --sample        "$SAMPLE" \
