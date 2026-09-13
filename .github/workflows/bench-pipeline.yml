@@ -36,6 +36,17 @@ on:
           It is also the one knob that could plausibly change results rather than
           just timing, so it is recorded in the report and compared explicitly.
         default: ''
+      b_workers:
+        description: >
+          Second variant's worker count. Set this (with b_threads) to run TWO
+          configurations back to back in ONE job, on ONE machine, and diff them.
+          That is the only way to see an effect smaller than the ~19% spread
+          between runners — measured, by running the identical config twice and
+          getting 6.29 and 7.48 s/photo.
+        default: ''
+      b_threads:
+        description: Second variant's onnxruntime threads (empty = library default)
+        default: ''
       image_source:
         description: Drive's resized copy, or the full original
         type: choice
@@ -104,22 +115,45 @@ jobs:
           WORKERS: ${{ inputs.workers }}
           IMAGE_SOURCE: ${{ inputs.image_source }}
           THREADS: ${{ inputs.threads }}
+          B_WORKERS: ${{ inputs.b_workers }}
+          B_THREADS: ${{ inputs.b_threads }}
         run: |
-          # Exported before python starts: onnxruntime reads these when it builds
-          # a session, and a value set from inside the process arrives too late.
-          if [ -n "$THREADS" ]; then
-            export OMP_NUM_THREADS="$THREADS"
-            export OPENBLAS_NUM_THREADS="$THREADS"
-            export MKL_NUM_THREADS="$THREADS"
+          # Which CPU this run drew. Runners are not one machine type, and that
+          # is the leading suspect for both the timing spread between runs and
+          # the float drift in the embeddings. Without it, a differing pair of
+          # runs is uninterpretable.
+          echo "=== runner CPU ==="
+          grep -m1 'model name' /proc/cpuinfo || true
+          nproc
+
+          run_variant() {
+            local label="$1" workers="$2" threads="$3"
+            if [ -n "$threads" ]; then
+              export OMP_NUM_THREADS="$threads" OPENBLAS_NUM_THREADS="$threads" \
+                     MKL_NUM_THREADS="$threads"
+            else
+              unset OMP_NUM_THREADS OPENBLAS_NUM_THREADS MKL_NUM_THREADS
+            fi
+            echo "=== variant $label: workers=$workers threads=${threads:-default} ==="
+            python -m indexer.bench_pipeline \
+              --folder-id     "$FOLDER_ID" \
+              --sample        "$SAMPLE" \
+              --label         "$label" \
+              --workers       "$workers" \
+              --image-source  "$IMAGE_SOURCE" \
+              --cache         /tmp/bench-cache \
+              --out           "bench-$label.json"
+          }
+
+          run_variant "$LABEL" "$WORKERS" "$THREADS"
+
+          # Both variants on ONE machine, so the comparison is paired and the
+          # machine cancels out of it.
+          if [ -n "$B_WORKERS" ]; then
+            run_variant "$LABEL-b" "$B_WORKERS" "$B_THREADS"
+            echo "=== paired diff (same runner, same photos) ==="
+            python3 tools/bench_diff.py "bench-$LABEL.json" "bench-$LABEL-b.json" || true
           fi
-          python -m indexer.bench_pipeline \
-            --folder-id     "$FOLDER_ID" \
-            --sample        "$SAMPLE" \
-            --label         "$LABEL" \
-            --workers       "$WORKERS" \
-            --image-source  "$IMAGE_SOURCE" \
-            --cache         /tmp/bench-cache \
-            --out           "bench-$LABEL.json"
 
       # Self-consistency is checked on every run, before any human looks at the
       # numbers. It needs only this one report: each face records both its
