@@ -155,8 +155,11 @@ export default function Admin() {
         });
         eventId = created.event.id;
       }
-      await api.admin.ingest(eventId, url.trim(), size ?? undefined);
-      setNotice('Indexing started. It runs in rounds and carries on by itself.');
+      const r = await api.admin.ingest(eventId, url.trim(), size ?? undefined);
+      setNotice(r.started
+        ? 'Indexing started. It runs in rounds and carries on by itself.'
+        : 'Link added, and queued behind a pass already running. One pass runs at a '
+          + 'time because they share one Google Drive quota; this one starts by itself.');
       setUrl(''); setFolder(null); setName(''); setSize(null);
       await refresh();
     } catch (e) { setError((e as Error).message); }

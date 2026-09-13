@@ -82,11 +82,15 @@ export function BibRules({
     try {
       const r = await api.admin.rereadBibs(event.id);
       const rounds = r.started.reduce((n, s) => n + s.rounds, 0);
+      // `started` means ENQUEUED: one pass per link, and at most one of them is in
+      // CI right now. Saying "re-reading N links" would promise parallel work the
+      // queue deliberately does not do, and the round count is the whole job, not
+      // the wait for the first one.
       onChanged(
-        `Re-reading bib numbers on ${r.started.length} `
-        + `${r.started.length === 1 ? 'Drive link' : 'Drive links'}. Every photo is `
-        + `downloaded again, so expect about ${rounds} ${rounds === 1 ? 'round' : 'rounds'}. `
-        + 'Faces and thumbnails are untouched.');
+        `Queued a bib re-read on ${r.started.length} `
+        + `${r.started.length === 1 ? 'Drive link' : 'Drive links'}, one at a time. `
+        + `Every photo is downloaded again, so expect about ${rounds} `
+        + `${rounds === 1 ? 'round' : 'rounds'} in all. Faces and thumbnails are untouched.`);
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(null); }
   }

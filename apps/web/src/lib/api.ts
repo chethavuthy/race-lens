@@ -310,11 +310,13 @@ export const api = {
     // form, which never passes one, reset the row toggle every time it ran.
     //
     // The operator's Add-link form now always passes one — it makes the choice
-    // explicit before dispatching, since the run starts immediately and the row
-    // toggle is disabled for its duration. A photographer's form still omits it,
-    // and the API forces 'thumb' for them regardless.
+    // explicit up front, because the size is frozen into the queued pass at this
+    // moment and the row toggle cannot change it afterwards. A photographer's form
+    // still omits it, and the API forces 'thumb' for them regardless.
     ingest: (eventId: string, driveUrl: string, imageSource?: 'original' | 'thumb') =>
-      req<{ job_id: string; source_id: string; folder_id: string }>(
+      req<{ job_id: string; source_id: string; folder_id: string;
+            /** False when the pass was queued behind another rather than started. */
+            started: boolean }>(
         '/api/admin/ingest',
         json({
           event_id: eventId,
@@ -367,7 +369,9 @@ export const api = {
       req<{ ok: true }>(`/api/admin/sources/${sourceId}/restore`, { method: 'POST' }),
 
     reindexSource: (sourceId: string) =>
-      req<{ job_id: string }>(`/api/admin/sources/${sourceId}/reindex`, { method: 'POST' }),
+      req<{ job_id: string;
+            /** False when the pass was queued behind another rather than started. */
+            started: boolean }>(`/api/admin/sources/${sourceId}/reindex`, { method: 'POST' }),
 
     /**
      * Re-read bib numbers across the whole album, applying the current rules to
@@ -481,7 +485,14 @@ export const api = {
                   indexed: number; missing: number };
         jobs: { id: string; source_id: string | null; status: string; done: number; total: number;
                 skipped: number; attempts: number; error: string | null; updated_at: string;
-                stop_requested: number; stale: boolean }[];
+                stop_requested: number; stale: boolean;
+                /**
+                 * Waiting in OUR queue, never handed to CI. Distinct from a
+                 * dispatched job that still reads 'queued' because the runner has
+                 * not picked it up yet, and mutually exclusive with `stale`: a
+                 * pass waiting its turn is not a pass that went quiet.
+                 */
+                waiting: boolean }[];
         log: { level: string; code: string | null; message: string;
                drive_file_id: string | null; created_at: string }[];
         summary: { level: string; code: string | null; n: number }[];
@@ -489,6 +500,15 @@ export const api = {
                    photos_with_bib: number; distinct_bibs: number;
                    photos_without_face: number; photos_without_bib: number };
         top_bibs: { bib: string; n: number }[];
+        /**
+         * Passes waiting to be dispatched, in order — across EVERY event, because
+         * the queue is global: they all compete for one Google Drive quota. An
+         * entry with `mine: false` belongs to another album and is still the
+         * reason this one is waiting, so it counts toward the position shown.
+         */
+        queue: {
+          /** Null for another organizer's pass — it is a position here, nothing more. */
+          job_id: string | null; position: number; mine: boolean }[];
         /** How many exist server-side vs how many this response carries. */
         jobs_total: number;
         jobs_returned: number;

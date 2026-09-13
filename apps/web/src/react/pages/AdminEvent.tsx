@@ -43,12 +43,13 @@ export default function AdminEvent() {
   const [owner, setOwner] = useState(false);
   const [newLink, setNewLink] = useState('');
   /**
-   * Size for the link about to be added. Deliberately unset: adding a link
-   * dispatches the run in the same request, and the row's own toggle is disabled
-   * while a job is active — which it then is. A default here would not be a
-   * starting point the operator could correct, it would be the decision, and the
-   * only way back is a full re-index. That is how every new folder ended up on
-   * full-size originals at ~25 photos a round.
+   * Size for the link about to be added. Deliberately unset: the choice is frozen
+   * into the queued pass at this moment, and the row's own toggle cannot reach it
+   * afterwards — it is disabled while a pass of ours is queued or running, and by
+   * the time it frees up the pass has read the payload it was enqueued with. A
+   * default here would not be a starting point the operator could correct, it
+   * would be the decision, and the only way back is a full re-index. That is how
+   * every new folder ended up on full-size originals at ~25 photos a round.
    */
   const [newSize, setNewSize] = useState<'original' | 'thumb' | null>(null);
   const [creditDraft, setCreditDraft] = useState<Record<string, string>>({});
@@ -75,12 +76,40 @@ export default function AdminEvent() {
 
   const showSkeleton = useDeferredLoading(!report || !event);
 
-  const active = report?.jobs.find((j) => ['running', 'queued'].includes(j.status) && !j.stale) ?? null;
+  /**
+   * The pass actually in CI for this album, if any.
+   *
+   * `waiting` is what separates this from "there is a job row": a queued pass
+   * sitting in our own queue has no runner, no progress and nothing to stop
+   * mid-batch, and showing it as "Indexing — 0 / 1,881" was a lie the page told
+   * for as long as the queue was invisible to it.
+   *
+   * Explicitly NOT `.find()` on status alone. Jobs arrive ordered by updated_at
+   * DESC, so with a running pass and a freshly queued one the newest row wins —
+   * and the Stop button would then carry the waiting job's id and leave the pass
+   * that is actually downloading untouched.
+   */
+  const active = report?.jobs.find(
+    (j) => ['running', 'queued'].includes(j.status) && !j.stale && !j.waiting) ?? null;
+  /** Passes of ours in line, and how many passes in total sit ahead of the first. */
+  const waiting = report?.jobs.filter((j) => j.waiting) ?? [];
+  const queue = report?.queue ?? [];
+  const ahead = queue.findIndex((q) => q.mine);
+  /**
+   * A pass of ours is somewhere in the pipeline, running or merely in line.
+   *
+   * The controls that change what a pass will DO — image size, recheck, takedown —
+   * gate on this rather than on `active`. A queued pass froze its payload at
+   * enqueue, so editing the row now would not reach it, and the operator would be
+   * editing a setting that silently does not apply.
+   */
+  const busyPass = !!active || waiting.length > 0;
+
   // Coverage is a snapshot of what the pipeline read, so it is refetched when a
-  // pass finishes rather than on a timer: `active` going from set to null is
+  // pass finishes rather than on a timer: `busyPass` going from set to null is
   // exactly the moment the numbers can have changed.
   useEffect(() => {
-    if (active) return;
+    if (busyPass) return;
     let live = true;
     api.admin.coverage(id)
       .then((r) => {
@@ -93,19 +122,27 @@ export default function AdminEvent() {
       // is indexed, what is missing — do not come from here.
       .catch(() => {});
     return () => { live = false; };
-  }, [id, active]);
+  }, [id, busyPass]);
 
-  // Poll only while something is moving, and only while the tab is visible: the
-  // report is eight aggregate queries and a rate-limited album can sit here for
-  // hours.
+  /**
+   * Poll only while something is moving, and only while the tab is visible: the
+   * report is eight aggregate queries and a rate-limited album can sit here for
+   * hours.
+   *
+   * "Moving" now includes a non-empty GLOBAL queue, entries of other albums
+   * included. The report is one of the few things that advances the queue, and
+   * there is no cron behind it — so a page that stopped polling the moment its own
+   * pass ended would strand whatever was waiting behind it, on this album or any
+   * other, until somebody happened to open an admin page.
+   */
   useEffect(() => {
     clearInterval(poll.current);
-    if (!active) return;
+    if (!active && !queue.length) return;
     poll.current = setInterval(() => {
       if (document.visibilityState === 'visible') load();
     }, 15000) as unknown as number;
     return () => clearInterval(poll.current);
-  }, [active, load]);
+  }, [active, queue.length, load]);
 
   /**
    * Take a photographer's album down, all of it.
@@ -138,9 +175,22 @@ export default function AdminEvent() {
     } finally { setBusy(null); }
   }
 
-  async function run(key: string, fn: () => Promise<unknown>, ok: string) {
+  /**
+   * Run one admin action, then say what happened.
+   *
+   * `ok` may be omitted when the action itself decides the wording: since passes
+   * are queued rather than dispatched, only the response knows whether a link
+   * started indexing or went into line, and the page must not claim the first
+   * while the second is true.
+   */
+  async function run(key: string, fn: () => Promise<unknown>, ok?: string) {
     setBusy(key);
-    try { await fn(); setNotice(ok); setError(null); await load(); }
+    try {
+      const said = await fn();
+      setNotice(typeof said === 'string' ? said : ok ?? null);
+      setError(null);
+      await load();
+    }
     catch (e) { setNotice(null); setError((e as Error).message); }
     finally { setBusy(null); }
   }
@@ -200,6 +250,29 @@ export default function AdminEvent() {
               style={{ width: `${Math.min(100, (active.done / Math.max(active.total, 1)) * 100)}%` }}
             />
           </div>
+        </div>
+      )}
+
+      {/* Waiting is its own state, not a stalled pass and not an idle album. Without
+          this the operator queues four folders and the page shows nothing at all
+          between them, which reads exactly like the Add link that silently failed. */}
+      {waiting.length > 0 && (
+        <div className="mb-8 rounded-xl border border-border px-5 py-4">
+          <p className="text-sm font-semibold">
+            {waiting.length === 1
+              ? 'One pass queued'
+              : `${waiting.length.toLocaleString()} passes queued`}
+            {ahead > 0 && (
+              <span className="tabular font-normal text-muted-foreground">
+                {' · '}{ahead.toLocaleString()} ahead on other albums
+              </span>
+            )}
+          </p>
+          <p className="mt-0.5 text-sm text-muted-foreground">
+            One pass runs at a time, because they all share one Google Drive quota.
+            Each starts by itself when the one before it finishes — you can close this
+            page, and you can keep adding links.
+          </p>
         </div>
       )}
 
@@ -283,7 +356,7 @@ export default function AdminEvent() {
       <BibRules
         event={event}
         indexed={t.indexed}
-        busyPass={!!active}
+        busyPass={busyPass}
         onChanged={async (m: string) => { setNotice(m); setError(null); await load(); }}
       />
 
@@ -366,14 +439,14 @@ export default function AdminEvent() {
                       <button
                         key={v} type="button" role="radio"
                         aria-checked={(s.image_source === 'thumb' ? 'thumb' : 'original') === v}
-                        disabled={busy === `src-${s.id}` || !!active}
+                        disabled={busy === `src-${s.id}` || busyPass}
                         title={v === 'thumb'
                           ? "Drive's resized copy — same faces and bibs, about 600 photos a round"
                           : 'Full-size originals — about 25 photos a round'}
                         onClick={() => run(`src-${s.id}`, () => api.admin.setImageSource(s.id, v),
                           v === 'thumb'
-                            ? 'Switched to resized copies — run the album again to carry on at the faster rate.'
-                            : 'Switched to full originals — run the album again to carry on.')}
+                            ? 'Switched to resized copies — run the album again to carry on at the faster rate. It queues if a pass is already running.'
+                            : 'Switched to full originals — run the album again to carry on. It queues if a pass is already running.')}
                         className={`rounded-md px-2.5 py-1 text-xs disabled:opacity-50 ${
                           (s.image_source === 'thumb' ? 'thumb' : 'original') === v
                             ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`}
@@ -385,9 +458,12 @@ export default function AdminEvent() {
                 )}
                 <Button
                   variant="outline" size="sm"
-                  disabled={busy === s.id || !!active}
-                  onClick={() => run(s.id, () => api.admin.reindexSource(s.id),
-                    complete ? 'Checking for new photos.' : 'Indexing the photos not done yet.')}
+                  disabled={busy === s.id || busyPass}
+                  onClick={() => run(s.id, async () => {
+                    const r = await api.admin.reindexSource(s.id);
+                    if (!r.started) return 'Queued behind a pass already running. It starts by itself.';
+                    return complete ? 'Checking for new photos.' : 'Indexing the photos not done yet.';
+                  })}
                 >
                   {busy === s.id ? <Loader2 className="animate-spin" /> : null}
                   {complete ? 'Recheck' : 'Continue'}
@@ -410,7 +486,7 @@ export default function AdminEvent() {
                     </div>
                   ) : (
                     <Button variant="destructive" size="sm"
-                            disabled={!!busy || !!active}
+                            disabled={!!busy || busyPass}
                             title="The photographer asked for this album to be taken down"
                             onClick={() => setConfirmRemove(s.id)}>
                       Remove
@@ -486,14 +562,20 @@ export default function AdminEvent() {
               </div>
             )}
             <Button
-              disabled={busy === 'add' || !newLink.trim() || (owner && !newSize) || !!active}
+              // Deliberately NOT gated on a pass being in flight. Adding a link
+              // enqueues; it no longer dispatches. Blocking this while something ran
+              // was the whole reason an operator with a 32,000-photo album could not
+              // line up the rest of the day's folders and walk away.
+              disabled={busy === 'add' || !newLink.trim() || (owner && !newSize)}
               title={owner && !newSize ? 'Pick Original or Resized first' : undefined}
               onClick={() => run('add', async () => {
-                await api.admin.ingest(id, newLink.trim(), newSize ?? undefined);
+                const r = await api.admin.ingest(id, newLink.trim(), newSize ?? undefined);
+                const size = newSize === 'thumb' ? 'Drive’s resized copies' : 'full originals';
                 setNewLink(''); setNewSize(null);
-              }, newSize === 'thumb'
-                ? 'Link added — indexing started on Drive’s resized copies.'
-                : 'Link added — indexing started on full originals.')}
+                return r.started
+                  ? `Link added — indexing started on ${size}.`
+                  : `Link added — queued on ${size}. It starts when the pass ahead finishes.`;
+              })}
             >
               {busy === 'add' ? <Loader2 className="animate-spin" /> : null} Add link
             </Button>
