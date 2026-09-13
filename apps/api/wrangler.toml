@@ -73,6 +73,11 @@ CF_ACCESS_TEAM = "workroom"
 #   race-lens.runlytics.fit -> 3c8aa0da…
 CF_ACCESS_AUD = "a113d076162960e7b8026ff5cd12ff0ccfe2bb61ed43cbfea65dbc05c85de171,3c8aa0dad25694b63206951931a20af6804a10281668de17c8f267986e00c255"
 
+# Backstop for the pass queue. Every other drain() rides on a request that
+# happened to arrive; this is the only thing that keeps time. See src/index.ts.
+[triggers]
+crons = ["*/5 * * * *"]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "race-lens"

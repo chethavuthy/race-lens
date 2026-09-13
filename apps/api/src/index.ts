@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { Env } from './types';
 import { HttpError } from './lib';
+import { drain } from './queue';
 import { publicRoutes } from './routes/public';
 import { adminRoutes } from './routes/admin';
 import { internalRoutes } from './routes/internal';
@@ -72,4 +73,24 @@ app.onError((err, c) => {
   return c.json({ error: 'Internal error', code: 'internal' }, 500);
 });
 
-export default app;
+/**
+ * The queue's backstop clock.
+ *
+ * Every other drain() rides on a request that happened to come in — an enqueue, a
+ * runner's terminal ping, an admin page poll. That covers the happy path and
+ * nothing else: the runner swallows ping failures, so one blip loses the terminal
+ * ping; a runner GitHub reclaims never pings at all; and the admin page only polls
+ * while its own tab is visible. Lose the ping while nobody is looking and the
+ * passes behind it wait indefinitely, because nothing in the system keeps time.
+ *
+ * Five minutes is far apart enough to be nearly free — a few thousand invocations
+ * a month against an included budget in the millions — and far closer than the
+ * only alternative, which was an organizer eventually noticing.
+ */
+const scheduled: ExportedHandlerScheduledHandler<Env> = async (_event, env, ctx) => {
+  ctx.waitUntil(drain(env).then(({ dispatched }) => {
+    if (dispatched) console.log('cron drained', dispatched);
+  }));
+};
+
+export default { fetch: app.fetch, scheduled };
