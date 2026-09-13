@@ -272,6 +272,33 @@ export const api = {
       return req<{ banner_url: string }>(`/api/admin/events/${eventId}/banner`, { method: 'POST', body: fd });
     },
 
+    /**
+     * Rename the event.
+     *
+     * The SLUG does not follow. It is the album's address, and organizers share
+     * it — on posters, in group chats, printed on a banner at the finish line —
+     * long before anyone thinks to correct a typo in the title. A rename that
+     * moved the URL would quietly break every one of those, so the name is free
+     * to change and /e/<slug> stays where it was.
+     */
+    renameEvent: (eventId: string, name: string) =>
+      req<{ event: EventSummary }>(`/api/admin/events/${eventId}`, {
+        ...json({ name }),
+        method: 'PATCH',
+      }),
+
+    /**
+     * Change the album's address. Draft events only — the API refuses otherwise.
+     *
+     * Whatever is sent is slugified, so the field can be typed in freely; what
+     * comes back on `event.slug` is what the URL actually became.
+     */
+    setSlug: (eventId: string, slug: string) =>
+      req<{ event: EventSummary }>(`/api/admin/events/${eventId}`, {
+        ...json({ slug }),
+        method: 'PATCH',
+      }),
+
     setStatus: (eventId: string, status: EventSummary['status']) =>
       req<{ event: EventSummary }>(`/api/admin/events/${eventId}`, {
         ...json({ status }),

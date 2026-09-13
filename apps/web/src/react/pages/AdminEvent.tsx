@@ -52,6 +52,15 @@ export default function AdminEvent() {
    * every new folder ended up on full-size originals at ~25 photos a round.
    */
   const [newSize, setNewSize] = useState<'original' | 'thumb' | null>(null);
+  /**
+   * Undefined until the operator types, so the field shows the event's own name
+   * and keeps showing it as the report reloads. Holding a copy in state from the
+   * first render instead would let a rename made in another tab be overwritten by
+   * a stale draft that was never edited.
+   */
+  const [nameDraft, setNameDraft] = useState<string | undefined>(undefined);
+  /** Same rule as nameDraft: undefined until typed, so the stored slug shows through. */
+  const [slugDraft, setSlugDraft] = useState<string | undefined>(undefined);
   const [creditDraft, setCreditDraft] = useState<Record<string, string>>({});
   const [removing, setRemoving] = useState<{ id: string; purged: number } | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
@@ -308,6 +317,75 @@ export default function AdminEvent() {
 
       <section className="mb-8 rounded-xl border border-border p-5">
         <h2 className="mb-4 text-sm font-semibold text-muted-foreground">This event</h2>
+
+        <div className="mb-4 flex flex-wrap items-center gap-3">
+          <Input
+            value={nameDraft ?? event.name}
+            onChange={(e) => setNameDraft(e.target.value)}
+            aria-label="Event name"
+            className="min-w-[16rem] max-w-md flex-1"
+          />
+          <Button
+            variant="outline"
+            disabled={busy === 'name'
+                      || !(nameDraft ?? '').trim()
+                      || (nameDraft ?? event.name) === event.name}
+            onClick={() => run('name', async () => {
+              await api.admin.renameEvent(id, (nameDraft ?? '').trim());
+              setNameDraft(undefined);
+            }, 'Name changed. The album’s link is unchanged, so anything already shared still works.')}
+          >
+            {busy === 'name' ? <Loader2 className="animate-spin" /> : null}
+            Save name
+          </Button>
+        </div>
+        {/* Said next to the field, not in a tooltip: an organizer renaming an
+            event is usually fixing something they have already put on a poster,
+            and the first question is whether the link they handed out still
+            works. */}
+        <p className="mb-4 max-w-2xl text-sm text-muted-foreground">
+          Runners see this name. The album’s address stays{' '}
+          <span className="tabular">/e/{event.slug}</span>, so posters, QR codes and
+          links you have already shared keep working.
+        </p>
+
+        {/* The address is editable only while nothing has been handed out. There is
+            no redirect from an old slug — it simply stops existing — so once this
+            album is listed the link is a promise, and the name above is the way to
+            fix a title. */}
+        {event.status === 'draft' && (
+          <>
+            <div className="mb-4 flex flex-wrap items-center gap-3">
+              <span className="tabular text-sm text-muted-foreground">/e/</span>
+              <Input
+                value={slugDraft ?? event.slug}
+                onChange={(e) => setSlugDraft(e.target.value)}
+                aria-label="Album address"
+                className="tabular min-w-[12rem] max-w-xs flex-1"
+              />
+              <Button
+                variant="outline"
+                disabled={busy === 'slug'
+                          || !(slugDraft ?? '').trim()
+                          || (slugDraft ?? event.slug) === event.slug}
+                onClick={() => run('slug', async () => {
+                  const r = await api.admin.setSlug(id, (slugDraft ?? '').trim());
+                  setSlugDraft(undefined);
+                  return `Address changed to /e/${r.event.slug}. The old one no longer works.`;
+                })}
+              >
+                {busy === 'slug' ? <Loader2 className="animate-spin" /> : null}
+                Save address
+              </Button>
+            </div>
+            <p className="mb-4 max-w-2xl text-sm text-muted-foreground">
+              You can still change this because the album is not published. Once it
+              is, the address is fixed — there is no redirect from an old one, so a
+              link already shared would stop working.
+            </p>
+          </>
+        )}
+
         <div className="flex flex-wrap items-center gap-3">
           <Button
             variant="outline"

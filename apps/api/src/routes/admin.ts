@@ -525,13 +525,49 @@ adminRoutes.patch('/events/:id', async (c) => {
   const id = c.req.param('id');
   await ownEvent(c, id);
   const body = await c.req.json<{
-    name?: string; event_date?: string; status?: string; bibs_enabled?: boolean;
+    name?: string; slug?: string; event_date?: string; status?: string;
+    bibs_enabled?: boolean;
     bib_min_digits?: number; bib_max_digits?: number; bib_prefixes?: string;
     bib_prefix_required?: boolean;
   }>();
   const allowed = ['draft', 'indexing', 'ready', 'partial'];
   if (body.status && !allowed.includes(body.status)) {
     throw new HttpError(400, 'Invalid status', 'bad_status');
+  }
+
+  /**
+   * The slug moves only while the album is unpublished.
+   *
+   * It is the address runners are given — on a poster, in a group chat, as a QR
+   * code on a finish-line banner — and this app has no redirect table, so an old
+   * slug 404s the moment a new one is written. While an event is 'draft' it has
+   * never been listed and nothing depends on it yet; once it is live, the link is
+   * a promise and renaming the event is the way to fix a title.
+   *
+   * Checked against the status ALREADY STORED, not the one this request is
+   * setting. That direction matters: a published album cannot have its address
+   * changed by the same call that unpublishes it, which would otherwise be a
+   * one-request way around the rule. Going the other way — change the address
+   * while it is still a draft, publish in the same breath — is fine, because
+   * nothing was ever handed out under the old one.
+   */
+  let slug: string | null = null;
+  if (body.slug !== undefined) {
+    const current = await c.env.DB.prepare('SELECT status, slug FROM events WHERE id = ?')
+      .bind(id).first<{ status: string; slug: string }>();
+    if (current?.status !== 'draft') {
+      throw new HttpError(
+        409,
+        'This album is published, so its link cannot change. Unpublish it first, or change the name instead — that is safe at any time.',
+        'slug_locked');
+    }
+    slug = slugify(body.slug);
+    if (!slug) throw new HttpError(400, 'Could not make a link out of that', 'bad_slug');
+    if (slug !== current.slug) {
+      const taken = await c.env.DB.prepare('SELECT id FROM events WHERE slug = ? AND id != ?')
+        .bind(slug, id).first();
+      if (taken) throw new HttpError(409, `The link "/e/${slug}" is already taken`, 'dup_slug');
+    }
   }
   // Every rule is checked against the state AFTER this write, not as it is now:
   // sending one half of a pair must not be able to leave the event contradictory.
@@ -568,6 +604,7 @@ adminRoutes.patch('/events/:id', async (c) => {
     // (once as the "was it sent" flag, once as the value), and mixing ?N with a
     // bare ? renumbers the lot.
     `UPDATE events SET name = COALESCE(?1, name),
+                       slug = COALESCE(?11, slug),
                        event_date = COALESCE(?2, event_date),
                        status = COALESCE(?3, status),
                        bibs_enabled = COALESCE(?4, bibs_enabled),
@@ -585,7 +622,7 @@ adminRoutes.patch('/events/:id', async (c) => {
          body.bib_min_digits ?? null,
          body.bib_prefixes === undefined ? 0 : 1, prefixes, id,
          body.bib_max_digits ?? null,
-         prefixRequired).run();
+         prefixRequired, slug).run();
   const row = await c.env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(id).first<EventRow>();
   if (!row) throw new HttpError(404, 'Event not found', 'no_event');
   // Neither bib setting is in publicEvent — runners have no use for them — so the
