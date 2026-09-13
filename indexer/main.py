@@ -30,6 +30,7 @@ from .config import Config
 from .drive import DriveClient, DriveImage, QuotaExceeded
 from .faces import FaceEngine, quantize
 from .resume import pending
+from .timing import Stages
 from .upload import Uploader
 
 log = logging.getLogger("indexer")
@@ -211,6 +212,11 @@ def run(args: argparse.Namespace) -> int:
 
     embeddings: list[np.ndarray] = []
     face_rows: list[dict] = []
+    # Per-stage wall clock for the whole pass. Log-only: nothing below branches
+    # on it. It exists because "OCR dominates" was an inference from the shape of
+    # the loop (~9 OCR invocations a photo at ~5 faces) and never a measurement,
+    # and every optimisation queued behind it is ordered by that guess.
+    stages = Stages()
     processed = 0
     downloaded = 0
     skipped = 0
@@ -252,10 +258,11 @@ def run(args: argparse.Namespace) -> int:
         for img in batch:
             dest = os.path.join(work, img.id)
             try:
-                if args.image_source == "thumb":
-                    drive.download_thumb(img.id, dest)
-                else:
-                    drive.download(img.id, dest)
+                with stages.timed("download_s"):
+                    if args.image_source == "thumb":
+                        drive.download_thumb(img.id, dest)
+                    else:
+                        drive.download(img.id, dest)
                 local.append((img, dest))
                 downloaded += 1
                 # Downloading dominates wall time on full-size originals, so
@@ -310,13 +317,15 @@ def run(args: argparse.Namespace) -> int:
                 continue
 
             try:
-                thumb, full_w, full_h = make_thumbnail(path, cfg.thumb_max_edge, cfg.thumb_quality)
+                with stages.timed("thumbnail_s"):
+                    thumb, full_w, full_h = make_thumbnail(path, cfg.thumb_max_edge, cfg.thumb_quality)
             except Exception as exc:  # noqa: BLE001
                 log.warning("Thumbnail failed for %s: %s", img.name, exc)
                 note("error", "thumbnail_failed", f"{img.name}: {str(exc)[:180]}", img.id)
                 continue
 
-            up.put_bytes(thumb_key, thumb, "image/webp")
+            with stages.timed("upload_s"):
+                up.put_bytes(thumb_key, thumb, "image/webp")
             photo_payload.append(
                 {
                     "drive_file_id": img.id,
@@ -355,7 +364,8 @@ def run(args: argparse.Namespace) -> int:
 
             # Decoded here, one frame resident at a time, and released at the end of
             # the iteration.
-            bgr = load_bgr(path)
+            with stages.timed("decode_s"):
+                bgr = load_bgr(path)
             if bgr is None:
                 # Journalled, not just logged. A decode failure means no faces and no
                 # bibs for a photo that nonetheless has a thumbnail and appears in the
@@ -367,9 +377,14 @@ def run(args: argparse.Namespace) -> int:
                 continue
             read_ids.append(photo_id)
 
-            faces = engine.detect(bgr)
+            with stages.timed("detect_s"):
+                faces = engine.detect(bgr)
             for face in faces:
-                hit = reader.read_torso(bgr, face.bbox) if reader else None
+                if reader:
+                    with stages.timed("torso_ocr_s"):
+                        hit = reader.read_torso(bgr, face.bbox)
+                else:
+                    hit = None
                 if hit:
                     face.bib = hit.bib
                     bib_payload.append({"photo_id": photo_id, "bib": hit.bib, "bib_raw": hit.raw, "conf": hit.conf})
@@ -395,7 +410,9 @@ def run(args: argparse.Namespace) -> int:
             # 21 -> 27 distinct bibs. Tiling alone is a regression, so it runs
             # alongside the torso pass rather than instead of it.
             if reader:
-                for hit in reader.read_tiles(bgr):
+                with stages.timed("tile_ocr_s"):
+                    tiles = reader.read_tiles(bgr)
+                for hit in tiles:
                     bib_payload.append({"photo_id": photo_id, "bib": hit.bib,
                                         "bib_raw": hit.raw, "conf": hit.conf})
 
@@ -471,6 +488,10 @@ def run(args: argparse.Namespace) -> int:
             "Batch %d: %d photos, %d faces so far, %d/%d done",
             batch_no + 1, len(local), faces_indexed, processed, total,
         )
+        # Cumulative, not per-batch: a single batch of 25 is a small enough
+        # sample that one slow download reorders the ranking, and the ranking is
+        # the only thing this line is for.
+        log.info("Time so far: %s", stages.summary())
 
         if journal:
             up.log(args.event_id, journal)

@@ -1,0 +1,119 @@
+name: Benchmark pipeline
+
+# Speed + equivalence measurement for the per-photo indexing pipeline.
+#
+# Runs on ubuntu-latest because that is the machine the real pass runs on, and
+# both numbers this produces are machine-specific: timings obviously, but also
+# the EXACT bib and embedding values, which differ between CPU architectures at
+# the last bits. A benchmark run on a laptop proves nothing about either.
+#
+# This workflow writes nothing to D1, R2 or the API — it takes only
+# GOOGLE_API_KEY, reads a Drive folder, and uploads a JSON artifact. It is safe
+# to run while a real indexing pass is in flight. The one resource it shares
+# with a live pass is Drive download quota, which is why the photo cache below
+# matters: the first run pays for the downloads and every later run is free.
+
+on:
+  workflow_dispatch:
+    inputs:
+      folder_id:
+        description: Drive folder id to sample
+        required: true
+      sample:
+        description: How many photos to benchmark
+        default: '40'
+      label:
+        description: Name for this run (e.g. baseline, parallel-workers)
+        required: true
+      workers:
+        description: Worker processes (1 until optimisation 1 lands)
+        default: '1'
+      image_source:
+        description: Drive's resized copy, or the full original
+        type: choice
+        options: [thumb, original]
+        default: thumb
+
+# One at a time. Two benchmark runs on the same runner class would still be
+# isolated, but they would compete for Drive quota with each other and with any
+# live indexing pass — and a timing measured under that competition is noise.
+concurrency:
+  group: bench-pipeline
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: indexer/requirements.txt
+
+      - name: Cache insightface models
+        uses: actions/cache@v4
+        with:
+          path: ~/.insightface/models
+          key: insightface-buffalo_s-v1
+
+      # Keyed on folder + sample + source, NOT on the commit: the whole point is
+      # that every commit under test benchmarks the identical bytes. A cache
+      # miss here does not fail the run, it just spends Drive quota once.
+      - name: Cache benchmark photos
+        uses: actions/cache@v4
+        with:
+          path: /tmp/bench-cache
+          key: bench-photos-${{ inputs.folder_id }}-${{ inputs.sample }}-${{ inputs.image_source }}
+
+      - name: Install system libs
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libglib2.0-0
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r indexer/requirements.txt
+
+      - name: Benchmark
+        env:
+          # Inputs reach the shell as environment variables, never as script
+          # text — see the note in index-event.yml. The same reasoning applies
+          # here even though this workflow holds only one secret.
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          FOLDER_ID: ${{ inputs.folder_id }}
+          SAMPLE: ${{ inputs.sample }}
+          LABEL: ${{ inputs.label }}
+          WORKERS: ${{ inputs.workers }}
+          IMAGE_SOURCE: ${{ inputs.image_source }}
+        run: |
+          python -m indexer.bench_pipeline \
+            --folder-id     "$FOLDER_ID" \
+            --sample        "$SAMPLE" \
+            --label         "$LABEL" \
+            --workers       "$WORKERS" \
+            --image-source  "$IMAGE_SOURCE" \
+            --cache         /tmp/bench-cache \
+            --out           "bench-$LABEL.json"
+
+      # Self-consistency is checked on every run, before any human looks at the
+      # numbers. It needs only this one report: each face records both its
+      # row_idx and its own embedding hash, so a face pointing at the wrong
+      # vector is detectable without a baseline to compare against. That failure
+      # is silent in production — face search just returns strangers — so it is
+      # a gate here rather than a note in the log.
+      - name: Check row_idx/embedding self-consistency
+        env:
+          LABEL: ${{ inputs.label }}
+        run: python3 tools/bench_diff.py "bench-$LABEL.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ inputs.label }}
+          path: bench-*.json
+          retention-days: 30
