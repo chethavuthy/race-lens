@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { Env, EventRow, JobRow } from '../types';
 import { chunk, clampLimit, HttpError, newId, nowIso, publicEvent, publicPhoto, r2Url, slugify } from '../lib';
+import { drain, enqueue, pending } from '../queue';
 import { PREFIX_SEP, normalizeBib, parsePrefixes } from '../bib';
 import { bannerKey, bannerType } from '../banner';
 import { faceBox } from '../bbox';
@@ -732,9 +733,6 @@ adminRoutes.post('/ingest', async (c) => {
        ON CONFLICT (event_id, drive_folder_id) DO UPDATE SET
          drive_url = excluded.drive_url, image_source = excluded.image_source`,
     ).bind(sourceId, event_id, folderId, drive_url, ts, imgSrc),
-    c.env.DB.prepare(
-      'INSERT INTO jobs (id, event_id, source_id, status, updated_at) VALUES (?, ?, ?, ?, ?)',
-    ).bind(jobId, event_id, sourceId, 'queued', ts),
     // Only a draft becomes 'indexing'. An event that is already published must
     // STAY published while more photos are added: 'indexing' is excluded from
     // GET /api/events, so flipping a live event would pull it off the site and
@@ -745,37 +743,21 @@ adminRoutes.post('/ingest', async (c) => {
     ).bind(event_id),
   ]);
 
-  const res = await fetch(`https://api.github.com/repos/${c.env.GH_REPO}/dispatches`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${c.env.GH_DISPATCH_TOKEN}`,
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'race-lens-worker',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      event_type: 'index-event',
-      client_payload: {
-        event_id, source_id: sourceId, folder_id: folderId, job_id: jobId,
-        image_source: imgSrc,
-      },
-    }),
+  // Queued, not dispatched. If nothing is running it goes to CI within this
+  // request and behaves exactly as before; if a pass is already moving it waits
+  // its turn instead of competing with it for Drive's quota.
+  await enqueue(c.env, {
+    id: jobId, event_id, source_id: sourceId,
+    payload: { folder_id: folderId, image_source: imgSrc },
   });
+  const { dispatched } = await drain(c.env);
 
-  if (!res.ok) {
-    // The upstream body goes to the Worker log, not into the job row: job.error
-    // is rendered on a page photographers now reach, and that body names the
-    // repository and the API behind it.
-    console.error('index dispatch failed', res.status, (await res.text()).slice(0, 300));
-    // Mark the job failed immediately rather than leaving the admin UI
-    // polling a job that no runner will ever pick up.
-    await c.env.DB.prepare(
-      "UPDATE jobs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
-    ).bind(`could not start indexing (${res.status})`, nowIso(), jobId).run();
-    throw new HttpError(502, `Could not start indexing (${res.status}). Try again in a minute.`, 'dispatch_failed');
-  }
-
-  return c.json({ job_id: jobId, source_id: sourceId, folder_id: folderId }, 202);
+  return c.json({
+    job_id: jobId, source_id: sourceId, folder_id: folderId,
+    // So the page can say "started" or "queued" honestly, rather than claiming
+    // one and showing the other.
+    started: dispatched === jobId,
+  }, 202);
 });
 
 /**
@@ -783,33 +765,6 @@ adminRoutes.post('/ingest', async (c) => {
  * access to CI logs: every link bound to the event, what each one found versus
  * what actually landed, and the reason for each miss.
  */
-/**
- * Dispatch one indexing pass. Returns null on success, or the upstream status.
- *
- * Extracted because this same fetch was written out verbatim at every site that
- * starts a pass, and the payload has a history of drifting between them: omitting
- * image_source silently downgraded continuations of a 'thumb' source back to
- * full-size downloads, straight into the quota that had ended the previous pass.
- * One place to add a key means one place to get it wrong.
- */
-async function dispatchIndex(
-  c: AdminCtx, payload: Record<string, unknown>,
-): Promise<number | null> {
-  const res = await fetch(`https://api.github.com/repos/${c.env.GH_REPO}/dispatches`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${c.env.GH_DISPATCH_TOKEN}`,
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'race-lens-worker', 'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ event_type: 'index-event', client_payload: payload }),
-  });
-  if (res.ok) return null;
-  // Body to the log, not to the caller: it names the repository and the API.
-  console.error('index dispatch failed', res.status, (await res.text()).slice(0, 300));
-  return res.status;
-}
-
 /**
  * Re-read bib numbers for an album that is already indexed.
  *
@@ -846,12 +801,19 @@ adminRoutes.post('/events/:id/bibs/reread', async (c) => {
   // the second would sit behind the first anyway. Stale jobs do not count — same
   // 20-minute rule the report uses, or a runner GitHub reclaimed would block this
   // forever.
+  //
+  // A job WAITING in our queue always counts, however long it has waited. Its
+  // updated_at is its enqueue time and never moves, so on a busy queue the plain
+  // age test would call a perfectly healthy queued pass stale after twenty
+  // minutes and let a second re-read through — enqueuing a duplicate pass per
+  // link, all of which would then race exactly as this guard exists to prevent.
   const STALE_MS = 20 * 60 * 1000;
   const { results: live } = await c.env.DB.prepare(
-    `SELECT id, updated_at FROM jobs
+    `SELECT id, dispatched_at, updated_at FROM jobs
       WHERE event_id = ? AND status IN ('queued', 'running')`,
-  ).bind(eventId).all<{ id: string; updated_at: string }>();
-  if (live.some((j) => Date.now() - Date.parse(j.updated_at) < STALE_MS)) {
+  ).bind(eventId).all<{ id: string; dispatched_at: string | null; updated_at: string }>();
+  if (live.some((j) => j.dispatched_at === null
+                       || Date.now() - Date.parse(j.updated_at) < STALE_MS)) {
     throw new HttpError(
       409, 'A pass is already running on this album. Wait for it to finish, or stop it first.',
       'job_active');
@@ -867,41 +829,32 @@ adminRoutes.post('/events/:id/bibs/reread', async (c) => {
     throw new HttpError(400, 'This event has no Drive links to re-read', 'no_sources');
   }
 
+  // One pass per link, all QUEUED. This used to fire a dispatch per source and
+  // leave GitHub's per-event concurrency group to line them up, which worked but
+  // put the queue somewhere this app cannot see: five jobs showed as "queued" with
+  // no way to tell which was moving. Now the first goes to CI and the rest wait
+  // here, in order, visible on the event page.
   const started: { job_id: string; source_id: string; photos: number; rounds: number }[] = [];
-  const failed: { source_id: string; status: number }[] = [];
   for (const src of sources) {
     const jobId = newId();
-    await c.env.DB.prepare(
-      'INSERT INTO jobs (id, event_id, source_id, status, total, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
-    ).bind(jobId, eventId, src.id, 'queued', src.photos, nowIso()).run();
-    const status = await dispatchIndex(c, {
-      event_id: eventId, source_id: src.id, folder_id: src.drive_folder_id,
-      job_id: jobId,
-      // Carried explicitly: the workflow defaults to 'original' when absent, which
-      // would turn a ~2-round pass into ~27.
-      image_source: src.image_source ?? 'original',
-      bibs_only: true,
+    await enqueue(c.env, {
+      id: jobId, event_id: eventId, source_id: src.id, total: src.photos,
+      payload: {
+        folder_id: src.drive_folder_id,
+        // Carried explicitly: the workflow defaults to 'original' when absent,
+        // which would turn a ~2-round pass into ~27.
+        image_source: src.image_source ?? 'original',
+        bibs_only: true,
+      },
     });
-    if (status !== null) {
-      await c.env.DB.prepare("UPDATE jobs SET status='failed', error=?, updated_at=? WHERE id=?")
-        .bind(`could not start the bib re-read (${status})`, nowIso(), jobId).run();
-      failed.push({ source_id: src.id, status });
-      continue;
-    }
     // Same per-round rates the event page quotes for a link's remaining work.
     const perRound = (src.image_source ?? 'original') === 'thumb' ? 600 : 25;
     started.push({ job_id: jobId, source_id: src.id, photos: src.photos,
                    rounds: Math.max(1, Math.ceil(src.photos / perRound)) });
   }
 
-  // Partial failure is reported rather than thrown: passes that DID start are
-  // running, and a 502 here would read as "nothing happened".
-  if (!started.length) {
-    throw new HttpError(
-      502, `Could not start the bib re-read (${failed[0]?.status}). Try again in a minute.`,
-      'dispatch_failed');
-  }
-  return c.json({ started, failed }, 202);
+  await drain(c.env);
+  return c.json({ started, failed: [] as { source_id: string; status: number }[] }, 202);
 });
 
 adminRoutes.get('/events/:id/report', async (c) => {
@@ -926,7 +879,7 @@ adminRoutes.get('/events/:id/report', async (c) => {
 
   const { results: rawJobs } = await c.env.DB.prepare(
     `SELECT id, source_id, status, done, total, skipped, attempts, error,
-            stop_requested, updated_at
+            stop_requested, dispatched_at, updated_at
        FROM jobs WHERE event_id = ? ORDER BY updated_at DESC LIMIT ?`,
   ).bind(eventId, JOBS_LIMIT).all<any>();
 
@@ -944,9 +897,25 @@ adminRoutes.get('/events/:id/report', async (c) => {
   const now = Date.now();
   const jobs = rawJobs.map((j) => ({
     ...j,
-    stale: ['queued', 'running'].includes(j.status) &&
-           now - Date.parse(j.updated_at) > STALE_MS,
+    // Waiting in our own queue is not a runner going quiet. A job that has never
+    // been dispatched has nothing that could ping, so ageing it into 'stale' would
+    // report a pass as stalled while it sits perfectly healthily in line — and
+    // would also unblock the guards that use staleness to allow a second pass.
+    waiting: j.dispatched_at === null && j.status === 'queued',
+    stale: j.dispatched_at !== null
+           && ['queued', 'running'].includes(j.status)
+           && now - Date.parse(j.updated_at) > STALE_MS,
   }));
+
+  // The queue drains from here as well as from the events that fill it, and from
+  // the cron. This response is polled by the event page while a pass runs, which
+  // makes it the one place guaranteed to be called soon after a pass ends.
+  //
+  // Drain FIRST, then read the queue: the other order reported the very job this
+  // call had just sent to CI as still waiting, first in line, for one whole poll
+  // cycle. Nothing to do when the queue is empty: one indexed count.
+  if ((await pending(c.env)).length) await drain(c.env);
+  const queued = await pending(c.env);
 
   const { results: log } = await c.env.DB.prepare(
     `SELECT level, code, message, drive_file_id, source_id, created_at
@@ -1026,6 +995,18 @@ adminRoutes.get('/events/:id/report', async (c) => {
     },
     top_bibs: topBibs,
     jobs, log, summary: counts,
+    // Position in line, across every album — the queue is global because Google
+    // Drive's quota is. Without this, two queued passes look identical and the
+    // organizer cannot tell which is next or how long the wait is.
+    //
+    // Another organizer's pass is a position and nothing else. Their job_id is not
+    // this event's business, and every photographer with a link on any album reads
+    // this response.
+    queue: queued.map((j, i) => ({
+      job_id: j.event_id === eventId ? j.id : null,
+      position: i + 1,
+      mine: j.event_id === eventId,
+    })),
     // The client pages through what it was sent; these say how much exists, so
     // "showing 100 of 412" can be honest about the tail it will never render.
     jobs_total: totals?.jobs ?? jobs.length,
@@ -1206,22 +1187,31 @@ adminRoutes.post('/sources/:id/reindex', async (c) => {
   const src = await c.env.DB.prepare('SELECT * FROM sources WHERE id = ?').bind(sourceId).first<any>();
   if (!src) throw new HttpError(404, 'Source not found', 'no_source');
 
-  const jobId = newId();
-  await c.env.DB.prepare(
-    'INSERT INTO jobs (id, event_id, source_id, status, updated_at) VALUES (?, ?, ?, ?, ?)',
-  ).bind(jobId, src.event_id, sourceId, 'queued', nowIso()).run();
-
-  const status = await dispatchIndex(c, {
-    event_id: src.event_id, source_id: sourceId,
-    folder_id: src.drive_folder_id, job_id: jobId,
-    image_source: src.image_source ?? 'original',
-  });
-  if (status !== null) {
-    await c.env.DB.prepare("UPDATE jobs SET status='failed', error=?, updated_at=? WHERE id=?")
-      .bind(`could not start indexing (${status})`, nowIso(), jobId).run();
-    throw new HttpError(502, `Could not start indexing (${status}). Try again in a minute.`, 'dispatch_failed');
+  // One pass per link at a time. With dispatch-on-the-spot a second press raced
+  // the first and GitHub's concurrency group absorbed it; now it simply adds
+  // another entry to the queue, and four impatient presses on an album that looks
+  // idle become four full passes over the same folder, run one after another.
+  const dup = await c.env.DB.prepare(
+    `SELECT id FROM jobs
+      WHERE source_id = ? AND status IN ('queued', 'running')
+        AND (dispatched_at IS NULL OR updated_at > ?)`,
+  ).bind(sourceId, new Date(Date.now() - 20 * 60 * 1000).toISOString()).first<{ id: string }>();
+  if (dup) {
+    throw new HttpError(
+      409, 'This link already has a pass queued or running. Wait for it to finish, or stop it first.',
+      'job_active');
   }
-  return c.json({ job_id: jobId }, 202);
+
+  const jobId = newId();
+  await enqueue(c.env, {
+    id: jobId, event_id: src.event_id, source_id: sourceId,
+    payload: {
+      folder_id: src.drive_folder_id,
+      image_source: src.image_source ?? 'original',
+    },
+  });
+  const { dispatched } = await drain(c.env);
+  return c.json({ job_id: jobId, started: dispatched === jobId }, 202);
 });
 
 adminRoutes.get('/events/:id', async (c) => {
@@ -1523,9 +1513,17 @@ adminRoutes.post('/photos/:id/reindex', async (c) => {
   ]);
 
   const jobId = newId();
+  // dispatched_at is set even though this row never goes through the queue: it
+  // dispatches itself, below. A one-photo re-run is seconds of work and must not
+  // wait behind a 32,000-photo album, but leaving dispatched_at NULL would make
+  // this row indistinguishable from a waiting queue entry — and the next drain()
+  // would claim it, find no payload, fall back to the source's folder and
+  // dispatch a re-index of the ENTIRE album. See queue.ts.
+  const ts = nowIso();
   await c.env.DB.prepare(
-    'INSERT INTO jobs (id, event_id, source_id, status, total, updated_at) VALUES (?, ?, ?, ?, 1, ?)',
-  ).bind(jobId, photo.event_id, photo.source_id, 'queued', nowIso()).run();
+    `INSERT INTO jobs (id, event_id, source_id, status, total, dispatched_at, updated_at)
+     VALUES (?, ?, ?, ?, 1, ?, ?)`,
+  ).bind(jobId, photo.event_id, photo.source_id, 'queued', ts, ts).run();
 
   const res = await fetch(`https://api.github.com/repos/${c.env.GH_REPO}/dispatches`, {
     method: 'POST',
@@ -1657,11 +1655,17 @@ adminRoutes.post('/jobs/:id/stop', async (c) => {
     return c.json({ stopped: false, status: job.status, reason: 'not_running' });
   }
 
-  // 'queued' has no runner mid-batch to wait for, so it ends here. 'running'
-  // keeps its status until the runner writes its own — the pass is genuinely
-  // still going, and claiming otherwise would have the page report an idle
-  // album while a runner is still downloading into it.
-  const queued = job.status === 'queued';
+  // Only a pass still WAITING in our queue ends here: it has no runner to wait
+  // for, so stopping it is just not dispatching it.
+  //
+  // Deliberately not `status === 'queued'`, which now means three different
+  // things — waiting, dispatched but not yet booted, and every continuation round,
+  // because each hand-off writes the status back to 'queued'. Reading those as
+  // "nothing is running" flipped a pass that had indexed 30,000 photos over forty
+  // rounds straight to 'stopped', told the organizer it had "stopped before it
+  // started", and freed the slot to a second pass while that runner was still
+  // downloading.
+  const queued = job.dispatched_at === null;
   await c.env.DB.prepare(
     `UPDATE jobs SET stop_requested = 1,
                      status = CASE WHEN ?1 = 1 THEN 'stopped' ELSE status END,
@@ -1674,6 +1678,10 @@ adminRoutes.post('/jobs/:id/stop', async (c) => {
       : 'Stopping after the batch in progress — press Continue to carry on later.',
     nowIso(), id,
   ).run();
+
+  // A pass that ended here frees the slot. A 'running' one does not yet — it
+  // stops itself between batches and reports, and that report drains the queue.
+  if (queued) await drain(c.env);
 
   return c.json({ stopped: true, status: queued ? 'stopped' : 'stopping' });
 });

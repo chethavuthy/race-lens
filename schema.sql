@@ -206,8 +206,23 @@ CREATE TABLE IF NOT EXISTS jobs (
   -- faces_done and skipped by the next resume, so a stopped job is picked up
   -- exactly where it left off by the ordinary Continue button.
   stop_requested INTEGER NOT NULL DEFAULT 0,
+  -- The workflow payload this pass will be dispatched with: folder, image_source,
+  -- and the bibs_only / no_resume / rebuild flags, as JSON. Stored because the
+  -- dispatch happens later, from the queue, and not in the request that created
+  -- the row. See migrations/014.
+  payload    TEXT,
+  -- NULL means "waiting in our queue, not yet handed to CI". That is the whole
+  -- queue: exactly one pass is dispatched at a time, because Google Drive's quota
+  -- is one shared resource and GitHub's own concurrency group is per event.
+  --
+  -- It is also where the staleness clock starts. A job waiting its turn is not
+  -- late, and must never be aged into 'stale'.
+  dispatched_at TEXT,
   updated_at TEXT NOT NULL
 );
+
+-- The drain query: undispatched, queued, oldest first.
+CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(dispatched_at, status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_event ON jobs(event_id, updated_at);
 
 -- Per-event ingest journal. The organizer pastes a link and walks away; when

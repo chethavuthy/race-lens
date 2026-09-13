@@ -102,5 +102,17 @@ export interface JobRow {
   error: string | null;
   /** The organizer asked this pass to stop; the runner honours it between batches. */
   stop_requested?: number;
+  /**
+   * What this pass will be dispatched with, as JSON — folder, image_source and the
+   * bibs_only / no_resume / rebuild flags. See queue.ts. Null on rows that never
+   * went through the queue: the single-photo re-index, and anything predating it.
+   */
+  payload?: string | null;
+  /**
+   * NULL means "waiting in our queue, not yet handed to CI". Nothing else carries
+   * that distinction — `status` reads 'queued' for a waiting pass, for a dispatched
+   * one that has not booted, and for every continuation round alike.
+   */
+  dispatched_at?: string | null;
   updated_at: string;
 }

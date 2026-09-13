@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import type { Env } from '../types';
 import { HttpError, chunk, newId, nowIso, timingSafeEqual } from '../lib';
+import { busy, drain } from '../queue';
 import { bboxFitsFrame } from '../bbox';
 import { D1_MAX_PARAMS, DIM, invalidateIndex } from '../search';
 
@@ -54,6 +55,14 @@ internalRoutes.post('/jobs/:id/progress', async (c) => {
   // progress it just wrote.
   const job = await c.env.DB.prepare('SELECT stop_requested FROM jobs WHERE id = ?')
     .bind(id).first<{ stop_requested: number }>();
+
+  // A pass that just reported a terminal status has released the CI slot, so the
+  // next queued pass starts now rather than waiting for someone to open the event
+  // page. This is the queue's main clock: every pass ends with one of these.
+  if (b.status && ['done', 'partial', 'failed', 'stopped'].includes(b.status)) {
+    await drain(c.env);
+  }
+
   return c.json({ ok: true, stop: (job?.stop_requested ?? 0) === 1 });
 });
 
@@ -165,6 +174,26 @@ internalRoutes.post('/jobs/:id/continue', async (c) => {
     .bind(job.source_id).first<{ drive_folder_id: string; image_source: string | null }>();
   if (!source) throw new HttpError(400, 'Job has no source to continue', 'no_source');
 
+  // A continuation normally owns the slot already — the runner asks for it before
+  // it reports anything terminal, so busy() still counts this very job and no
+  // drain can have given the slot away.
+  //
+  // Unless this job was written off first: a long silent stretch, a lost ping, a
+  // boot that outran its grace. Then the queue has already started someone else,
+  // and dispatching here anyway would put two passes on Drive at once AND leave
+  // the queue believing the slot is held by the wrong row. Go back into the line
+  // instead. Nothing is lost: the resume path skips what is already done.
+  await c.env.DB.prepare(
+    "UPDATE jobs SET dispatched_at = NULL, status = 'queued', updated_at = ? WHERE id = ?",
+  ).bind(nowIso(), id).run();
+  if (await busy(c.env)) {
+    await c.env.DB.prepare(
+      'UPDATE jobs SET error = ?, updated_at = ? WHERE id = ?',
+    ).bind('Waiting for the pass ahead of it to finish — it carries on by itself.',
+           nowIso(), id).run();
+    return c.json({ dispatched: false, reason: 'queued_behind' });
+  }
+
   const res = await fetch(`https://api.github.com/repos/${c.env.GH_REPO}/dispatches`, {
     method: 'POST',
     headers: {
@@ -184,12 +213,18 @@ internalRoutes.post('/jobs/:id/continue', async (c) => {
   });
 
   if (!res.ok) {
+    // Left with dispatched_at NULL from the re-claim above, so it is back in the
+    // queue and a later drain retries it rather than the chain simply ending.
     return c.json({ dispatched: false, reason: `github_${res.status}` });
   }
 
+  // dispatched_at moves with it: this is a fresh hand-off to CI, and the staleness
+  // clock the queue uses to decide whether the slot is still held must start from
+  // THIS dispatch. Leaving the original timestamp would make a long chain of
+  // continuations look stalled and let a second pass in beside it.
   await c.env.DB.prepare(
     `UPDATE jobs SET attempts = attempts + 1, status = 'queued',
-                     error = ?, updated_at = ? WHERE id = ?`,
+                     error = ?1, dispatched_at = ?2, updated_at = ?2 WHERE id = ?3`,
   ).bind(
     `${timedOut ? 'Reached this round’s time limit' : 'Google Drive slowed downloads'} — ` +
       `continuing automatically (round ${(job.attempts ?? 0) + 2} of ${MAX_ATTEMPTS + 1}).`,
