@@ -623,6 +623,33 @@ adminRoutes.patch('/events/:id', async (c) => {
          body.bib_prefixes === undefined ? 0 : 1, prefixes, id,
          body.bib_max_digits ?? null,
          prefixRequired, slug).run();
+
+  /**
+   * Publishing mid-index used to list the album as "0 photos".
+   *
+   * photo_count and face_count are denormalized, and their only writer is
+   * POST /api/internal/events/:id/finalize — which runs at the END of an
+   * indexing pass. An organizer who publishes while a pass is still moving
+   * therefore publishes the numbers from the last pass that finished, which on
+   * a brand-new album is zero: the card said "0 photos" over an album with 775
+   * of them already searchable.
+   *
+   * Recounted here so the listing states what is actually browsable at the
+   * moment it goes live. Nothing is lost by doing it twice — the next finalize
+   * writes the same two counts, only larger.
+   *
+   * Only on the way OUT of draft. Unpublishing does not need fresh numbers, and
+   * a rename should not pay for two COUNT(*)s over the photos table.
+   */
+  if (body.status && body.status !== 'draft') {
+    const counts = await c.env.DB.prepare(
+      `SELECT (SELECT COUNT(*) FROM photos WHERE event_id = ?1) AS photos,
+              (SELECT COUNT(*) FROM faces  WHERE event_id = ?1) AS faces`,
+    ).bind(id).first<{ photos: number; faces: number }>();
+    await c.env.DB.prepare('UPDATE events SET photo_count = ?, face_count = ? WHERE id = ?')
+      .bind(counts?.photos ?? 0, counts?.faces ?? 0, id).run();
+  }
+
   const row = await c.env.DB.prepare('SELECT * FROM events WHERE id = ?').bind(id).first<EventRow>();
   if (!row) throw new HttpError(404, 'Event not found', 'no_event');
   // Neither bib setting is in publicEvent — runners have no use for them — so the
