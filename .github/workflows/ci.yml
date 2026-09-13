@@ -132,7 +132,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Compile-check the indexer
-        run: python -m compileall -q indexer tools/golden
+        run: python -m compileall -q indexer tools/golden tools/bench_diff.py
 
       # numpy and Pillow are real because run() genuinely uses them; the heavy
       # half of the CV stack (onnxruntime, insightface, opencv, rapidocr) is

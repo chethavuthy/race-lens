@@ -45,8 +45,9 @@ import numpy as np
 
 from .bibs import BibReader
 from .drive import DriveClient, QuotaExceeded
-from .faces import FaceEngine, quantize
-from .main import load_bgr, make_thumbnail
+from .faces import FaceEngine
+from .main import make_thumbnail
+from .photo_work import init_worker, process_one, work_photo
 from .timing import Stages
 
 log = logging.getLogger("bench")
@@ -105,68 +106,60 @@ def fetch(drive: DriveClient, images: list, cache: str, image_source: str,
     return out
 
 
-# One engine set per worker process, built once in the initializer rather than
-# per photo. Module-level globals because that is the only thing a Pool worker
-# can carry between tasks.
-_ENGINE: "FaceEngine | None" = None
-_READER: "BibReader | None" = None
+def _assemble(results, thumbs: dict, names: dict, embeddings: list,
+              stages: Stages) -> list:
+    """Turn per-photo results into rows, assigning every shard position here.
 
+    This is the ONLY place row_idx is produced, and both the sequential and the
+    parallel path feed it the same kind of result in the same order — so the two
+    paths cannot build different shards, only take different amounts of time to
+    build the same one.
 
-def _init_worker(det_size: int) -> None:
-    global _ENGINE, _READER
-    _ENGINE = FaceEngine(det_size=det_size)
-    _READER = BibReader()
-
-
-def _work_photo(task: tuple) -> dict:
-    """The per-photo half of pass 2, with NO shared state.
-
-    Everything this returns is plain data. In particular it returns the
-    QUANTIZED embedding bytes rather than a row index: the worker has no idea
-    where its faces will land in the shard, and must not — assigning row_idx is
-    the parent's job precisely because that is the ordering that must not move.
+    row_idx comes from len(embeddings) at the moment the embedding is appended,
+    exactly as the real pass does it. Keeping those two statements adjacent, in
+    one place, under one caller, is the whole defence: split them across workers
+    and faces start pointing at other people's vectors with nothing raised and
+    nothing logged.
     """
-    drive_file_id, name, path = task
-    st = Stages()
-    with st.timed("decode_s"):
-        bgr = load_bgr(path)
-    if bgr is None:
-        return {"drive_file_id": drive_file_id, "decoded": False, "stages": st.as_dict()}
+    rows = []
+    for res in results:
+        # Worker CPU time, summed across processes. The per-stage RANKING stays
+        # meaningful; wall time is measured separately and is the only thing
+        # that shows the win.
+        stages.merge(res["stages"])
+        drive_file_id = res["drive_file_id"]
+        if not res["decoded"] or drive_file_id not in thumbs:
+            continue
+        thumb_sha, full_w, full_h = thumbs[drive_file_id]
 
-    with st.timed("detect_s"):
-        faces = _ENGINE.detect(bgr)
+        face_out = []
+        for face in res["faces"]:
+            q = face["q"]
+            face_out.append({
+                "bbox": [round(float(v), 2) for v in face["bbox"]],
+                "det_score": round(float(face["det_score"]), 6),
+                "emb_sha1": _sha1(q.tobytes(order="C")),
+                "row_idx": len(embeddings),
+                "bib": face["bib"],
+            })
+            embeddings.append(q)
 
-    out_faces = []
-    torso_bibs = []
-    for face in faces:
-        with st.timed("torso_ocr_s"):
-            hit = _READER.read_torso(bgr, face.bbox)
-        bib = None
-        if hit:
-            bib = hit.bib
-            torso_bibs.append({"bib": hit.bib, "raw": hit.raw, "conf": round(hit.conf, 6)})
-        q = quantize(face.embedding)
-        out_faces.append({
-            "bbox": [round(float(v), 2) for v in face.bbox],
-            "det_score": round(float(face.det_score), 6),
-            "q": q.tobytes(order="C"),
-            "bib": bib,
+        rows.append({
+            "drive_file_id": drive_file_id,
+            "name": names.get(drive_file_id, ""),
+            "width": full_w,
+            "height": full_h,
+            "thumb_sha1": thumb_sha,
+            "faces": face_out,
+            "torso_bibs": [{"bib": h["bib"], "raw": h["raw"], "conf": round(h["conf"], 6)}
+                           for h in res["torso_bibs"]],
+            "tile_bibs": [{"bib": h["bib"], "raw": h["raw"], "conf": round(h["conf"], 6)}
+                          for h in res["tile_bibs"]],
         })
-
-    with st.timed("tile_ocr_s"):
-        tiles = _READER.read_tiles(bgr)
-    del bgr
-    return {
-        "drive_file_id": drive_file_id,
-        "decoded": True,
-        "faces": out_faces,
-        "torso_bibs": torso_bibs,
-        "tile_bibs": [{"bib": h.bib, "raw": h.raw, "conf": round(h.conf, 6)} for h in tiles],
-        "stages": st.as_dict(),
-    }
+    return rows
 
 
-def process_batch(local: list, engine: FaceEngine, reader: BibReader,
+def process_batch(local: list, engine, reader,
                   cfg_thumb_edge: int, cfg_thumb_quality: int,
                   embeddings: list, stages: Stages, pool=None) -> list:
     """One batch, in main.py's exact order.
@@ -174,12 +167,16 @@ def process_batch(local: list, engine: FaceEngine, reader: BibReader,
     Two passes over the batch, and they decode the same files twice — that is
     the real pipeline's shape, not an oversight here. main.py separates them
     because put_photos must return photo_ids before faces can be attributed to
-    anything. Collapsing them is optimisation #2, and it has to be measured
-    against this.
+    anything. Merging them was queued as optimisation #2; the measured cost of
+    the second decode is what decides whether that is worth doing.
     """
-    # PASS 1 — thumbnail. Decodes every file once.
+    # PASS 1 — thumbnail. Decodes every file once. Sequential in both modes:
+    # this is the pass optimisation #4 is about, and mixing it into #1 would
+    # leave neither measurable on its own.
     thumbs: dict = {}
+    names: dict = {}
     for img, path in local:
+        names[img.id] = img.name
         try:
             with stages.timed("thumbnail_s"):
                 thumb, full_w, full_h = make_thumbnail(path, cfg_thumb_edge, cfg_thumb_quality)
@@ -188,121 +185,20 @@ def process_batch(local: list, engine: FaceEngine, reader: BibReader,
             continue
         thumbs[img.id] = (_sha1(thumb), full_w, full_h)
 
-    # PASS 2 — decode again, detect, read. This is where row_idx is assigned.
+    # PASS 2 — decode again, detect, read.
+    tasks = [(img.id, path) for img, path in local if img.id in thumbs]
     if pool is not None:
-        return _pass2_parallel(local, thumbs, embeddings, stages, pool)
-
-    rows = []
-    for img, path in local:
-        if img.id not in thumbs:
-            continue
-        thumb_sha, full_w, full_h = thumbs[img.id]
-
-        with stages.timed("decode_s"):
-            bgr = load_bgr(path)
-        if bgr is None:
-            continue
-
-        with stages.timed("detect_s"):
-            faces = engine.detect(bgr)
-
-        face_out = []
-        torso_bibs = []
-        for face in faces:
-            with stages.timed("torso_ocr_s"):
-                hit = reader.read_torso(bgr, face.bbox)
-            bib = None
-            if hit:
-                bib = hit.bib
-                torso_bibs.append({"bib": hit.bib, "raw": hit.raw, "conf": round(hit.conf, 6)})
-
-            # The lockstep that must survive parallelisation.
-            #
-            # row_idx is a POSITION in the shard written to R2, and it is taken
-            # from len(embeddings) at the instant the embedding is appended. If
-            # the two ever disagree nothing crashes and nothing logs: faces
-            # simply point at other people's vectors and face search returns
-            # strangers. Recording row_idx alongside the embedding's own hash is
-            # what lets the diff tool prove, per run, that they still agree.
-            q = quantize(face.embedding)
-            face_out.append({
-                "bbox": [round(float(v), 2) for v in face.bbox],
-                "det_score": round(float(face.det_score), 6),
-                "emb_sha1": _sha1(q.tobytes(order="C")),
-                "row_idx": len(embeddings),
-                "bib": bib,
-            })
-            embeddings.append(q)
-
-        with stages.timed("tile_ocr_s"):
-            tiles = reader.read_tiles(bgr)
-        tile_bibs = [{"bib": h.bib, "raw": h.raw, "conf": round(h.conf, 6)} for h in tiles]
-
-        rows.append({
-            "drive_file_id": img.id,
-            "name": img.name,
-            "width": full_w,
-            "height": full_h,
-            "thumb_sha1": thumb_sha,
-            "faces": face_out,
-            "torso_bibs": torso_bibs,
-            "tile_bibs": tile_bibs,
-        })
-        del bgr
-    return rows
-
-
-def _pass2_parallel(local: list, thumbs: dict, embeddings: list,
-                    stages: Stages, pool) -> list:
-    """Pass 2 across worker processes, assembled back into ONE order.
-
-    imap, not imap_unordered, and the appends below happen in submission order.
-    That is the whole safety argument: row_idx is taken from len(embeddings) at
-    the instant the embedding is appended, so as long as the PARENT appends in
-    the batch's original order, the shard it builds is not merely equivalent to
-    the sequential one — it is identical, byte for byte, and row_idx means the
-    same thing it always did.
-
-    The workers never see row_idx. They cannot: a worker holds one photo and has
-    no idea how many faces the photos before it produced. Handing them the
-    counter is the version of this change that corrupts the index silently.
-    """
-    tasks = [(img.id, img.name, path) for img, path in local if img.id in thumbs]
-    by_id = {img.id: img for img, _ in local}
-    rows = []
-    for res in pool.imap(_work_photo, tasks):
-        # Worker CPU time, summed across processes. Deliberately kept in the
-        # same accumulator: the per-stage RANKING stays meaningful, while wall
-        # time is measured separately and is the only thing that shows the win.
-        stages.merge(res["stages"])
-        if not res["decoded"]:
-            continue
-        drive_file_id = res["drive_file_id"]
-        thumb_sha, full_w, full_h = thumbs[drive_file_id]
-
-        face_out = []
-        for face in res["faces"]:
-            q = np.frombuffer(face["q"], dtype=np.int8)
-            face_out.append({
-                "bbox": face["bbox"],
-                "det_score": face["det_score"],
-                "emb_sha1": _sha1(face["q"]),
-                "row_idx": len(embeddings),
-                "bib": face["bib"],
-            })
-            embeddings.append(q)
-
-        rows.append({
-            "drive_file_id": drive_file_id,
-            "name": by_id[drive_file_id].name,
-            "width": full_w,
-            "height": full_h,
-            "thumb_sha1": thumb_sha,
-            "faces": face_out,
-            "torso_bibs": res["torso_bibs"],
-            "tile_bibs": res["tile_bibs"],
-        })
-    return rows
+        # imap, not imap_unordered: results arrive in submission order, so the
+        # shard the parent builds is identical to the sequential one rather than
+        # merely equivalent to it. chunksize stays at its default of 1, which
+        # matters more than it looks — face counts per photo are severely skewed
+        # (median 2, with crowd shots over 100), so handing out tasks one at a
+        # time is the difference between load balancing and one worker drawing
+        # the long straw for a whole pre-assigned chunk.
+        results = pool.imap(work_photo, tasks)
+    else:
+        results = (process_one(engine, reader, fid, path) for fid, path in tasks)
+    return _assemble(results, thumbs, names, embeddings, stages)
 
 
 def run(args: argparse.Namespace) -> int:
@@ -338,7 +234,8 @@ def run(args: argparse.Namespace) -> int:
     if args.workers > 1:
         import multiprocessing as mp
 
-        pool = mp.Pool(args.workers, initializer=_init_worker, initargs=(args.det_size,))
+        pool = mp.Pool(args.workers, initializer=init_worker,
+                       initargs=(args.det_size, {}))
         log.info("%d worker processes", args.workers)
     else:
         engine = FaceEngine(det_size=args.det_size)
