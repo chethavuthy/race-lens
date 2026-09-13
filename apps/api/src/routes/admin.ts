@@ -536,6 +536,36 @@ adminRoutes.patch('/events/:id', async (c) => {
   }
 
   /**
+   * An album published while a pass is still running goes live as 'partial'.
+   *
+   * The admin screen offers Publish during indexing — everything read so far is
+   * already browsable and searchable, so there is no reason to make an organizer
+   * wait. But 'ready' is a claim that the album is COMPLETE: it is what suppresses
+   * the "still growing" line on the listing, and an organizer who publishes at
+   * photo 905 of 1,881 would otherwise be telling runners that the missing 976
+   * are not coming.
+   *
+   * Resolved here rather than in the browser. The page has the job numbers and
+   * could decide this itself, but then the honesty of the public listing would
+   * rest on the caller — and PATCH is reachable without it. Same query finalize
+   * uses (internal.ts), so the two agree on what "complete" means: every live
+   * source has as many photos as the walk discovered in it.
+   *
+   * Only ever downgrades. 'partial' is never promoted to 'ready' here — that is
+   * finalize's call at the end of a pass, which is the moment it can be true.
+   */
+  let status = body.status ?? null;
+  if (status === 'ready') {
+    const short = await c.env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM sources s
+        WHERE s.event_id = ? AND s.removed_at IS NULL
+          AND COALESCE(s.discovered, 0) >
+              (SELECT COUNT(*) FROM photos p WHERE p.source_id = s.id)`,
+    ).bind(id).first<{ n: number }>();
+    if ((short?.n ?? 0) > 0) status = 'partial';
+  }
+
+  /**
    * The slug moves only while the album is unpublished.
    *
    * It is the address runners are given — on a poster, in a group chat, as a QR
@@ -617,7 +647,7 @@ adminRoutes.patch('/events/:id', async (c) => {
                        -- internal.ts.
                        bib_prefixes = CASE WHEN ?6 = 1 THEN ?7 ELSE bib_prefixes END
       WHERE id = ?8`,
-  ).bind(body.name ?? null, body.event_date ?? null, body.status ?? null,
+  ).bind(body.name ?? null, body.event_date ?? null, status,
          body.bibs_enabled === undefined ? null : (body.bibs_enabled ? 1 : 0),
          body.bib_min_digits ?? null,
          body.bib_prefixes === undefined ? 0 : 1, prefixes, id,
@@ -641,7 +671,7 @@ adminRoutes.patch('/events/:id', async (c) => {
    * Only on the way OUT of draft. Unpublishing does not need fresh numbers, and
    * a rename should not pay for two COUNT(*)s over the photos table.
    */
-  if (body.status && body.status !== 'draft') {
+  if (status && status !== 'draft') {
     const counts = await c.env.DB.prepare(
       `SELECT (SELECT COUNT(*) FROM photos WHERE event_id = ?1) AS photos,
               (SELECT COUNT(*) FROM faces  WHERE event_id = ?1) AS faces`,

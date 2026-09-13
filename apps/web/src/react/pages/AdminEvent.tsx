@@ -213,6 +213,23 @@ export default function AdminEvent() {
   const q = report.quality;
   const live = report.sources.filter((s) => !s.removed_at);
 
+  /**
+   * Is this album on the public site RIGHT NOW.
+   *
+   * The same list GET /api/events and GET /api/events/:slug select on
+   * (routes/public.ts) — deliberately, because this screen's job is to report
+   * what runners can see, and any second opinion about that is a lie waiting to
+   * happen.
+   *
+   * It used to be `status !== 'draft'`, which put 'indexing' on the wrong side.
+   * An album mid-pass is not listed and its page 404s, but the button said
+   * Unpublish and the note underneath said unpublishing would hide it from
+   * runners — so the only way to get a new album onto the site was to press
+   * Unpublish (which did nothing a runner could see) and then Publish. That
+   * round trip was the workaround for this one comparison.
+   */
+  const listed = ['ready', 'partial'].includes(event.status);
+
   return (
     <div className="pb-16">
       <BackLink to="/admin">All events</BackLink>
@@ -391,13 +408,15 @@ export default function AdminEvent() {
             variant="outline"
             disabled={busy === 'status'}
             onClick={() => run('status',
-              () => api.admin.setStatus(id, event.status === 'draft' ? 'ready' : 'draft'),
-              event.status === 'draft'
-                ? 'Published — runners can find this album now.'
-                : 'Unpublished — hidden from runners. Photos and search data are kept.')}
+              () => api.admin.setStatus(id, listed ? 'draft' : 'ready'),
+              listed
+                ? 'Unpublished — hidden from runners. Photos and search data are kept.'
+                : busyPass
+                  ? 'Published — runners can find this album now, and the rest of the photos appear as they are indexed.'
+                  : 'Published — runners can find this album now.')}
           >
             {busy === 'status' ? <Loader2 className="animate-spin" /> : null}
-            {event.status === 'draft' ? 'Publish' : 'Unpublish'}
+            {listed ? 'Unpublish' : 'Publish'}
           </Button>
 
           {/* A file input styled as a button: the native control cannot be
@@ -418,9 +437,15 @@ export default function AdminEvent() {
           />
         </div>
         <p className="mt-3 max-w-2xl text-sm text-muted-foreground">
-          {event.status === 'draft'
-            ? 'This album is not listed for runners yet.'
-            : 'Unpublishing hides the event from runners. Photos and search data are kept, so publishing again is instant.'}
+          {/* Three states, not two. The middle one — indexing, not yet listed —
+              had no copy at all, because the page did not believe it existed. */}
+          {listed
+            ? (busyPass
+                ? 'Unpublishing hides the event from runners. Photos and search data are kept — but this album is still indexing, and an unpublished album does NOT go back up on its own when the pass finishes. You would need to publish it again yourself.'
+                : 'Unpublishing hides the event from runners. Photos and search data are kept, so publishing again is instant.')
+            : (busyPass
+                ? 'Runners cannot find this album yet. You do not have to wait for indexing to finish — publish now and everything read so far is browsable and searchable, with the rest appearing as it is indexed.'
+                : 'This album is not listed for runners yet.')}
         </p>
         {event.banner_url && (
           <div className="mt-4 w-64">
