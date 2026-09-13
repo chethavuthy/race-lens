@@ -94,6 +94,10 @@ jobs:
           # text — see the note in index-event.yml. The same reasoning applies
           # here even though this workflow holds only one secret.
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          # Unbuffered, so the per-photo heartbeat reaches the log as it happens
+          # rather than at exit. A run that is stuck and a run that is merely
+          # slow look identical until the lines arrive.
+          PYTHONUNBUFFERED: '1'
           FOLDER_ID: ${{ inputs.folder_id }}
           SAMPLE: ${{ inputs.sample }}
           LABEL: ${{ inputs.label }}

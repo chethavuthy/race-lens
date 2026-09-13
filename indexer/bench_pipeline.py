@@ -122,11 +122,20 @@ def _assemble(results, thumbs: dict, names: dict, embeddings: list,
     nothing logged.
     """
     rows = []
-    for res in results:
+    # A heartbeat, because a Pool that loses a worker during init does not raise
+    # — imap simply never yields again, and the run sits there looking like slow
+    # work until the job timeout kills it 90 minutes later. A per-photo line is
+    # the difference between "it is slow" and "it is stuck", and the two want
+    # opposite responses.
+    t0 = time.perf_counter()
+    for n, res in enumerate(results, 1):
         # Worker CPU time, summed across processes. The per-stage RANKING stays
         # meaningful; wall time is measured separately and is the only thing
         # that shows the win.
         stages.merge(res["stages"])
+        log.info("photo %d/%d  %s  %.1fs elapsed  (%d faces)",
+                 n, len(thumbs), res["drive_file_id"][:12],
+                 time.perf_counter() - t0, len(res.get("faces") or []))
         drive_file_id = res["drive_file_id"]
         if not res["decoded"] or drive_file_id not in thumbs:
             continue
