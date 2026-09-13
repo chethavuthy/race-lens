@@ -115,6 +115,28 @@ jobs:
       - name: Index
         if: github.event.action != 'benchmark-folder'
         env:
+          # onnxruntime threading is a LOSS on this workload, not a win.
+          #
+          # Nothing in the repo sets session options, so onnxruntime defaults
+          # intra_op_num_threads to the core count and fans every operator out
+          # across all four vCPUs. Measured over a fixed 40-photo sample on this
+          # same runner class: 7.83 and 7.61 s/photo at the default, 6.29 s/photo
+          # pinned to one thread. The tensors here are small — a torso crop, one
+          # of four tiles — so the sync costs more than the parallelism returns.
+          #
+          # Pinning also makes the pass more reproducible, which is the opposite
+          # of what it sounds like it should do. Against a default-threaded run:
+          # zero difference in face count, boxes, bib strings or the set of bib
+          # readings, and detection-score differences fell from 12 to 0 and bib
+          # confidence jitter from 94 to 0. Multi-threaded reduction order was
+          # the source of that jitter.
+          #
+          # Set here rather than in config.py because onnxruntime reads these
+          # when it BUILDS a session: exported from inside the process it would
+          # arrive too late to have any effect.
+          OMP_NUM_THREADS: '1'
+          OPENBLAS_NUM_THREADS: '1'
+          MKL_NUM_THREADS: '1'
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           API_BASE_URL: ${{ secrets.API_BASE_URL }}
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
