@@ -56,7 +56,7 @@ def run(args: argparse.Namespace) -> int:
     drive = DriveClient(cfg.google_api_key)
     up.benchmark(args.benchmark_id, status="running")
 
-    images = drive.walk(args.folder_id)
+    images = drive.walk(args.folder_id).images
     if not images:
         up.benchmark(args.benchmark_id, status="failed", error="No images in that folder")
         return 1

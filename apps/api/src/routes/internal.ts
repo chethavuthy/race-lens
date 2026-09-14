@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import type { Env } from '../types';
 import { HttpError, chunk, newId, nowIso, timingSafeEqual } from '../lib';
+import { pruneRefusal } from '../prune';
 import { busy, drain } from '../queue';
 import { bboxFitsFrame } from '../bbox';
 import { D1_MAX_PARAMS, DIM, invalidateIndex } from '../search';
@@ -647,6 +648,95 @@ internalRoutes.post('/sources/:id/discovered', async (c) => {
   await c.env.DB.prepare('UPDATE sources SET discovered = ? WHERE id = ?')
     .bind(Number(count) || 0, c.req.param('id')).run();
   return c.json({ ok: true });
+});
+
+/**
+ * Every drive_file_id this LINK holds, so a pass can spot the ones that have
+ * left the folder.
+ *
+ * Deliberately per-source, unlike GET /events/:id/indexed. An event can absorb
+ * several photographers' folders, and a file absent from the folder being walked
+ * is usually present in a sibling's — comparing against the event would make
+ * every link look like it had lost the other links' photos.
+ */
+internalRoutes.get('/sources/:id/photos', async (c) => {
+  const { results } = await c.env.DB.prepare(
+    'SELECT drive_file_id FROM photos WHERE source_id = ?',
+  ).bind(c.req.param('id')).all<{ drive_file_id: string }>();
+  return c.json({ drive_file_ids: results.map((r) => r.drive_file_id) });
+});
+
+/**
+ * Delete photos that are no longer in their link's Drive folder.
+ *
+ * Indexing is otherwise additive, so before this a photographer who tidied their
+ * Drive left the album serving rows, thumbnails and face vectors for files they
+ * had already taken down. Only a whole-link takedown could remove one.
+ *
+ * THE CEILING IS THE POINT. Drive answers a listing of a folder that has been
+ * deleted or unshared with HTTP 200 and an empty `files` array — a total loss
+ * and a genuinely empty folder are the same response. The runner already
+ * refuses to prune on an empty walk; this refuses independently, against its own
+ * count, because the runner is exactly the party whose view of the folder is in
+ * question. It is the same reasoning as /finalize declining to take the runner's
+ * word that an event is ready.
+ *
+ * Half of a link is far more likely to be a listing that failed than a
+ * photographer who deleted most of their own work, and the two cost differently:
+ * refusing leaves stale photos up until someone looks, while pruning wrongly
+ * deletes a published album and its face index with no way back. A refusal is
+ * reported to the organizer through the ingest journal.
+ *
+ * Face VECTORS stay in their shards, as in the link takedown: a shard is an
+ * immutable byte range that every later row_idx is defined against. With no
+ * faces row pointing at them they are unreachable by any query — see the join in
+ * search.ts.
+ */
+internalRoutes.post('/sources/:id/prune', async (c) => {
+  const sourceId = c.req.param('id');
+  const { drive_file_ids: ids, total_stale: totalStale } = await c.req.json<{
+    drive_file_ids: string[]; total_stale?: number;
+  }>();
+  if (!Array.isArray(ids) || !ids.length) throw new HttpError(400, 'drive_file_ids are required', 'bad_request');
+
+  const held = await c.env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM photos WHERE source_id = ?',
+  ).bind(sourceId).first<{ n: number }>();
+  const total = held?.n ?? 0;
+  // `total_stale` is the whole prune the runner intends, not just this chunk —
+  // without it a large prune would slip through 90 at a time, each chunk
+  // comfortably under the ceiling.
+  const wanted = Math.max(totalStale ?? 0, ids.length);
+  const refusal = pruneRefusal(wanted, total);
+  if (refusal) return c.json({ refused: true, reason: refusal, removed: 0 });
+
+  const { results: doomed } = await c.env.DB.prepare(
+    `SELECT id, thumb_key FROM photos
+      WHERE source_id = ? AND drive_file_id IN (${ids.map(() => '?').join(',')})`,
+  ).bind(sourceId, ...ids).all<{ id: string; thumb_key: string | null }>();
+  if (!doomed.length) return c.json({ removed: 0 });
+
+  for (const part of chunk(doomed.map((p) => p.id), 90)) {
+    const marks = part.map(() => '?').join(',');
+    // Order matters: the child rows reference photos(id), so photos goes last.
+    await c.env.DB.batch([
+      c.env.DB.prepare(`DELETE FROM faces WHERE photo_id IN (${marks})`).bind(...part),
+      c.env.DB.prepare(`DELETE FROM bibs WHERE photo_id IN (${marks})`).bind(...part),
+      c.env.DB.prepare(`DELETE FROM bib_rejects WHERE photo_id IN (${marks})`).bind(...part),
+      c.env.DB.prepare(`DELETE FROM photos WHERE id IN (${marks})`).bind(...part),
+    ]);
+  }
+
+  // Our own published copies of a photo the photographer has withdrawn.
+  const keys = doomed.map((p) => p.thumb_key).filter((k): k is string => !!k);
+  if (keys.length) await c.env.BUCKET.delete(keys);
+
+  // The cached shard-to-photo view still joins the rows just deleted.
+  const src = await c.env.DB.prepare('SELECT event_id FROM sources WHERE id = ?')
+    .bind(sourceId).first<{ event_id: string }>();
+  if (src) invalidateIndex(src.event_id);
+
+  return c.json({ removed: doomed.length });
 });
 
 internalRoutes.post('/benchmarks/:id', async (c) => {

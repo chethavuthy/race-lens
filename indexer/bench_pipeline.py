@@ -219,7 +219,7 @@ def run(args: argparse.Namespace) -> int:
     stages = Stages()
 
     log.info("walking folder %s", args.folder_id)
-    images = drive.walk(args.folder_id)
+    images = drive.walk(args.folder_id).images
     if not images:
         raise SystemExit("No images in that folder")
     sample = pick_sample(images, args.sample)
