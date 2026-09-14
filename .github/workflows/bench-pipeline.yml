@@ -28,6 +28,60 @@ on:
       workers:
         description: Worker processes (1 until optimisation 1 lands)
         default: '1'
+      threads:
+        description: >
+          onnxruntime threads per process. Leave empty for the library default.
+          A parallel run must set this to 1 — N workers each spawning 4 intra-op
+          threads on a 4 vCPU runner spend more time contending than working.
+          It is also the one knob that could plausibly change results rather than
+          just timing, so it is recorded in the report and compared explicitly.
+        default: ''
+      b_workers:
+        description: >
+          Second variant's worker count. Set this (with b_threads) to run TWO
+          configurations back to back in ONE job, on ONE machine, and diff them.
+          That is the only way to see an effect smaller than the ~19% spread
+          between runners — measured, by running the identical config twice and
+          getting 6.29 and 7.48 s/photo.
+        default: ''
+      b_threads:
+        description: Second variant's onnxruntime threads (empty = library default)
+        default: ''
+      single_decode:
+        description: Which variants decode once (optimisation 2)? none / a / b / both
+        default: none
+      interleave:
+        description: >
+          Download inside the pass, per batch, the way production runs it.
+          Required to measure optimisation 3 at all — with the default
+          up-front fetch there is nothing left for the overlap to overlap.
+        type: choice
+        options: ["no", "yes"]
+        default: 'no'
+      a_prefetch:
+        description: Variant A read-ahead depth (0 = today's turn-taking)
+        default: '0'
+      b_prefetch:
+        description: Variant B read-ahead depth (0 = today's turn-taking)
+        default: '0'
+      upload_probe:
+        description: >
+          Price the R2 thumbnail PUT (optimisation 4). Sends RANDOM bytes the
+          same size as each thumbnail under a bench/ prefix and deletes them
+          afterwards — same request and payload size, no photograph written to a
+          new URL. Off by default: this is the only setting that lets the
+          benchmark write anything at all.
+        type: choice
+        options: ["no", "yes"]
+        default: 'no'
+      no_cache:
+        description: >
+          Download for real instead of reusing the cached photos. Needed for a
+          download measurement; each variant gets its OWN directory so the
+          second cannot find the first's files and report a cost of zero.
+        type: choice
+        options: ["no", "yes"]
+        default: 'no'
       image_source:
         description: Drive's resized copy, or the full original
         type: choice
@@ -86,20 +140,85 @@ jobs:
           # text — see the note in index-event.yml. The same reasoning applies
           # here even though this workflow holds only one secret.
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          # Unbuffered, so the per-photo heartbeat reaches the log as it happens
+          # rather than at exit. A run that is stuck and a run that is merely
+          # slow look identical until the lines arrive.
+          PYTHONUNBUFFERED: '1'
           FOLDER_ID: ${{ inputs.folder_id }}
           SAMPLE: ${{ inputs.sample }}
           LABEL: ${{ inputs.label }}
           WORKERS: ${{ inputs.workers }}
           IMAGE_SOURCE: ${{ inputs.image_source }}
+          THREADS: ${{ inputs.threads }}
+          B_WORKERS: ${{ inputs.b_workers }}
+          B_THREADS: ${{ inputs.b_threads }}
+          SINGLE_DECODE: ${{ inputs.single_decode }}
+          INTERLEAVE: ${{ inputs.interleave }}
+          A_PREFETCH: ${{ inputs.a_prefetch }}
+          B_PREFETCH: ${{ inputs.b_prefetch }}
+          NO_CACHE: ${{ inputs.no_cache }}
+          UPLOAD_PROBE: ${{ inputs.upload_probe }}
+          # Only the R2 credentials, and only so the probe can PUT and DELETE
+          # its own throwaway objects. Deliberately NOT INGEST_SECRET: nothing
+          # here should be able to write to D1.
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
-          python -m indexer.bench_pipeline \
-            --folder-id     "$FOLDER_ID" \
-            --sample        "$SAMPLE" \
-            --label         "$LABEL" \
-            --workers       "$WORKERS" \
-            --image-source  "$IMAGE_SOURCE" \
-            --cache         /tmp/bench-cache \
-            --out           "bench-$LABEL.json"
+          # Which CPU this run drew. Runners are not one machine type, and that
+          # is the leading suspect for both the timing spread between runs and
+          # the float drift in the embeddings. Without it, a differing pair of
+          # runs is uninterpretable.
+          echo "=== runner CPU ==="
+          grep -m1 'model name' /proc/cpuinfo || true
+          nproc
+
+          run_variant() {
+            local label="$1" workers="$2" threads="$3" which="$4"
+            local sd="" net=""
+            case "$SINGLE_DECODE" in
+              both) sd="--single-decode" ;;
+              a) [ "$which" = a ] && sd="--single-decode" ;;
+              b) [ "$which" = b ] && sd="--single-decode" ;;
+            esac
+            if [ "$INTERLEAVE" = yes ]; then
+              local depth="$A_PREFETCH"
+              [ "$which" = b ] && depth="$B_PREFETCH"
+              # Validated rather than trusted: these reach a command line, and
+              # the note at the top of index-event.yml is about exactly this.
+              case "$depth" in ''|*[!0-9]*) echo "bad prefetch depth"; exit 1 ;; esac
+              net="--interleave --prefetch $depth"
+              [ "$NO_CACHE" = yes ] && net="$net --no-cache"
+            fi
+            [ "$UPLOAD_PROBE" = yes ] && net="$net --upload-probe"
+            if [ -n "$threads" ]; then
+              export OMP_NUM_THREADS="$threads" OPENBLAS_NUM_THREADS="$threads" \
+                     MKL_NUM_THREADS="$threads"
+            else
+              unset OMP_NUM_THREADS OPENBLAS_NUM_THREADS MKL_NUM_THREADS
+            fi
+            echo "=== variant $label: workers=$workers threads=${threads:-default} ==="
+            python -m indexer.bench_pipeline \
+              --folder-id     "$FOLDER_ID" \
+              --sample        "$SAMPLE" \
+              --label         "$label" \
+              --workers       "$workers" \
+              --image-source  "$IMAGE_SOURCE" \
+              --cache         /tmp/bench-cache \
+              --out           "bench-$label.json" \
+              $sd $net
+          }
+
+          run_variant "$LABEL" "$WORKERS" "$THREADS" a
+
+          # Both variants on ONE machine, so the comparison is paired and the
+          # machine cancels out of it.
+          if [ -n "$B_WORKERS" ]; then
+            run_variant "$LABEL-b" "$B_WORKERS" "$B_THREADS" b
+            echo "=== paired diff (same runner, same photos) ==="
+            python3 tools/bench_diff.py "bench-$LABEL.json" "bench-$LABEL-b.json" || true
+          fi
 
       # Self-consistency is checked on every run, before any human looks at the
       # numbers. It needs only this one report: each face records both its

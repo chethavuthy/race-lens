@@ -43,6 +43,10 @@ def _install_cv_stubs() -> None:
         def __init__(self, bbox):
             self.bbox = bbox
             self.embedding = np.zeros(512, dtype=np.float32)
+            # The real Face carries this and the pipeline reads it. A stub that
+            # omitted it passed only for as long as nothing on run()'s path
+            # happened to look.
+            self.det_score = 0.9
             self.bib = None
 
     class FaceEngine:
@@ -242,6 +246,10 @@ def wired(monkeypatch, tmp_path):
         cfg = types.SimpleNamespace(
             google_api_key="k", batch_size=25, thumb_max_edge=1000,
             thumb_quality=80, det_size=640, work_dir=str(tmp_path / "work"),
+            # Depth 1 rather than the production default: these tests assert on
+            # the ORDER photos are handed over in, and a deeper read-ahead only
+            # changes how far in front the downloader runs, never that order.
+            prefetch_depth=1,
             # Effectively no deadline unless a test asks for one: every other
             # scenario here would otherwise depend on how long it took to run.
             deadline_min=deadline_min,
@@ -425,16 +433,23 @@ def test_a_decode_failure_does_not_wipe_that_photos_bibs(wired, monkeypatch):
     """
     _, up = wired(_images("src2", 3), set(), quota_after=1000)
 
-    real_load = run_mod.load_bgr
+    # Injected at decode_once, which is where a file now fails to decode: the
+    # thumbnail and the detector's frame come out of ONE decode, so the original
+    # shape of this bug — thumbnail succeeds, second decode of the same bytes
+    # fails — can no longer happen. What must still hold is the invariant it
+    # cost bibs to learn: a photo this pass did not read must never be listed as
+    # authoritative in put_bibs, or its stored bibs are deleted with nothing
+    # written back.
+    real_decode = run_mod.decode_once
     victim = "src2-1"
 
-    def flaky(path):
+    def flaky(path, max_edge, quality):
         # dest is os.path.join(work_dir, drive_file_id), so the basename is the id.
         if os.path.basename(path) == victim:
-            return None
-        return real_load(path)
+            raise OSError("truncated file")
+        return real_decode(path, max_edge, quality)
 
-    monkeypatch.setattr(run_mod, "load_bgr", flaky)
+    monkeypatch.setattr(run_mod, "decode_once", flaky)
 
     assert run_mod.run(_args()) == 0
 
@@ -456,7 +471,10 @@ def test_a_decode_failure_is_journalled_for_the_organizer(wired, monkeypatch):
     entries: list[dict] = []
     up.log = lambda _event_id, es: entries.extend(es)
 
-    monkeypatch.setattr(run_mod, "load_bgr", lambda _p: None)
+    def cannot_decode(_path, _max_edge, _quality):
+        raise OSError("truncated file")
+
+    monkeypatch.setattr(run_mod, "decode_once", cannot_decode)
     assert run_mod.run(_args()) == 0
 
     codes = [e.get("code") for e in entries]

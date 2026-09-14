@@ -204,6 +204,48 @@ def _by_id(report: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+def classify(base: Dict[str, Any], cand: Dict[str, Any]) -> Dict[str, Any]:
+    """Split the differences into the ones that change the product and the ones
+    that are float noise.
+
+    Measured on this pipeline: two runs of IDENTICAL code on identical photos
+    produced identical face counts, identical boxes and identical bib strings,
+    while 20% of the int8 embeddings differed. Multi-threaded onnxruntime does
+    not fix its reduction order, so the last bits of a float32 embedding move
+    between runs, and `round(v * 127)` turns a last-bit difference into a
+    different int8 whenever a component sits near a .5 boundary.
+
+    So "any difference is a bug" is not a usable rule for this pipeline, and a
+    flat list of changed hashes buries the one question worth asking: did the
+    ANSWERS move, or only the arithmetic? This counts both, separately.
+    """
+    b = _by_id(base)
+    c = _by_id(cand)
+    shared = sorted(set(b) & set(c))
+    out = {"face_count": 0, "bbox": 0, "det_score": 0, "bib": 0, "embedding": 0,
+           "faces": 0, "bib_readings_gained": [], "bib_readings_lost": [],
+           "bib_conf_jitter": 0}
+    for fid in shared:
+        fb = sorted(b[fid].get("faces") or [], key=lambda f: (f.get("bbox"), f.get("det_score")))
+        fc = sorted(c[fid].get("faces") or [], key=lambda f: (f.get("bbox"), f.get("det_score")))
+        if len(fb) != len(fc):
+            out["face_count"] += 1
+            continue
+        for x, y in zip(fb, fc):
+            out["faces"] += 1
+            out["bbox"] += x.get("bbox") != y.get("bbox")
+            out["det_score"] += x.get("det_score") != y.get("det_score")
+            out["bib"] += x.get("bib") != y.get("bib")
+            out["embedding"] += x.get("emb_sha1") != y.get("emb_sha1")
+        for field in ("torso_bibs", "tile_bibs"):
+            hb = {(h.get("bib"), h.get("raw")): h.get("conf") for h in (b[fid].get(field) or [])}
+            hc = {(h.get("bib"), h.get("raw")): h.get("conf") for h in (c[fid].get(field) or [])}
+            out["bib_readings_lost"] += [k[0] for k in hb if k not in hc]
+            out["bib_readings_gained"] += [k[0] for k in hc if k not in hb]
+            out["bib_conf_jitter"] += sum(1 for k in hb if k in hc and hb[k] != hc[k])
+    return out
+
+
 def check_equivalence(base: Dict[str, Any], cand: Dict[str, Any]) -> Dict[str, Any]:
     """Compare results as SETS keyed by drive_file_id, never by list position.
 
@@ -216,6 +258,7 @@ def check_equivalence(base: Dict[str, Any], cand: Dict[str, Any]) -> Dict[str, A
     b_ids, c_ids = set(b_photos), set(c_photos)
 
     result: Dict[str, Any] = {
+        "classified": classify(base, cand),
         "missing_photos": sorted(b_ids - c_ids),
         "extra_photos": sorted(c_ids - b_ids),
         "photo_diffs": [],
@@ -471,7 +514,24 @@ def report_text(
         if equiv["equivalent"]:
             print("  identical — same photos, faces, bibs and thumbnails")
         else:
-            print("  THESE ARE BUGS, NOT NOISE. The pipeline changed its answers.")
+            cl = equiv.get("classified") or {}
+            product = (cl.get("face_count", 0) + cl.get("bbox", 0) + cl.get("bib", 0)
+                       + len(cl.get("bib_readings_lost", []))
+                       + len(cl.get("bib_readings_gained", [])))
+            if product:
+                print("  THESE ARE BUGS, NOT NOISE. The pipeline changed its answers.")
+            else:
+                print("  No ANSWER changed. Every difference below is float noise.")
+            print("  what moved, across %d faces:" % cl["faces"])
+            print("    photos whose face COUNT differs : %d" % cl["face_count"])
+            print("    faces whose bbox differs        : %d" % cl["bbox"])
+            print("    faces whose bib differs         : %d" % cl["bib"])
+            print("    bib readings lost / gained      : %d / %d"
+                  % (len(cl["bib_readings_lost"]), len(cl["bib_readings_gained"])))
+            print("    ---- below here is arithmetic, not answers ----")
+            print("    faces whose det_score differs   : %d" % cl["det_score"])
+            print("    faces whose EMBEDDING differs   : %d" % cl["embedding"])
+            print("    bib confidences that jittered   : %d" % cl["bib_conf_jitter"])
             if equiv["missing_photos"]:
                 print("  photos missing from candidate (%d):" % len(equiv["missing_photos"]))
                 for fid in equiv["missing_photos"][:40]:
