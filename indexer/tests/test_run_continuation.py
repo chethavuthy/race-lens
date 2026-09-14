@@ -1,4 +1,8 @@
-"""End-to-end run() coverage for the continuation decision.
+"""End-to-end run() coverage for the continuation decision, and for pruning.
+
+Both live here for the same reason: they are decisions run() makes by composing
+the walk, the resume filter and the Worker client, and every one of those parts
+was individually correct while the composition was not.
 
 This drives the real run() — the resume filter, the batch loop, the quota
 break, the remaining count and the request_continue call — against fake Drive
@@ -102,7 +106,7 @@ def _install_cv_stubs() -> None:
 _install_cv_stubs()
 
 from indexer import main as run_mod  # noqa: E402
-from indexer.drive import DriveImage, QuotaExceeded  # noqa: E402
+from indexer.drive import DriveImage, QuotaExceeded, Walk  # noqa: E402
 
 
 # --- fakes ------------------------------------------------------------------
@@ -117,7 +121,7 @@ class FakeDrive:
         self.served = 0
 
     def walk(self, _folder_id, max_folders=500):
-        return list(self._images)
+        return Walk(images=list(self._images), folders=1, skipped_shortcuts=[])
 
     def download_thumb(self, file_id, dest):
         if self.served >= self._quota_after:
@@ -132,8 +136,17 @@ class FakeDrive:
 
 
 class FakeUploader:
-    def __init__(self, indexed_event_wide, bibs_enabled=True, stop_after=None):
+    def __init__(self, indexed_event_wide, bibs_enabled=True, stop_after=None,
+                 source_photo_ids=None):
         self.stop_after = stop_after
+        # What THIS link has indexed, which is what a prune compares against.
+        # Deliberately separate from `indexed_event_wide`: that set spans every
+        # link on the event, and pruning against it would delete each link's
+        # photos for the crime of being in another link's folder. Empty by
+        # default, so a test that says nothing about pruning prunes nothing.
+        self.source_photo_ids = list(source_photo_ids or [])
+        self.pruned: list[str] = []
+        self.prune_refuses = False
         self._indexed = set(indexed_event_wide)
         self.continue_requested = False
         self.continue_reason = None
@@ -164,6 +177,17 @@ class FakeUploader:
 
     def already_indexed(self, _event_id, complete_only=False):
         return set(self._indexed)
+
+    def source_photos(self, _source_id):
+        return list(self.source_photo_ids)
+
+    def prune(self, _source_id, drive_file_ids):
+        # 0 is how the real Worker reports a refusal, not a failure — see the
+        # ceiling in prune.ts. The runner has to tell the two apart.
+        if self.prune_refuses:
+            return 0
+        self.pruned.extend(drive_file_ids)
+        return len(drive_file_ids)
 
     def set_discovered(self, _source_id, _count):
         pass
@@ -238,10 +262,12 @@ def _images(prefix, n):
 def wired(monkeypatch, tmp_path):
     """Patch run()'s collaborators, keeping numpy/Pillow real."""
     def _build(folder_images, indexed_event_wide, quota_after, bibs_enabled=True,
-               deadline_min=10_000, stop_after=None):
+               deadline_min=10_000, stop_after=None, source_photo_ids=None,
+               prune_refuses=False):
         drive = FakeDrive(folder_images, quota_after)
         up = FakeUploader(indexed_event_wide, bibs_enabled=bibs_enabled,
-                          stop_after=stop_after)
+                          stop_after=stop_after, source_photo_ids=source_photo_ids)
+        up.prune_refuses = prune_refuses
 
         cfg = types.SimpleNamespace(
             google_api_key="k", batch_size=25, thumb_max_edge=1000,
@@ -743,3 +769,120 @@ def test_an_undelivered_ping_does_not_stop_the_pass(wired, monkeypatch):
         _post=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("network down")),
     )
     assert Uploader.progress(unreachable, "job-1", done=1) is False
+
+
+# --- pruning ----------------------------------------------------------------
+#
+# Indexing is otherwise additive: before this, a photographer who removed photos
+# from their Drive folder left the album serving rows, thumbnails and face
+# vectors for files that were already gone, and only a whole-link takedown could
+# remove one.
+#
+# The guards carry the weight, because Drive answers a listing of a folder that
+# has been deleted or unshared with HTTP 200 and an empty `files` array — the
+# same response a genuinely emptied folder gives. KAIIA RUPP's second link is in
+# that state today: 510 live photos behind a folder id that files.get answers
+# 404 for.
+
+
+def test_a_photo_that_left_the_folder_is_pruned(wired):
+    folder = _images("src2", 40)
+    held = [f"src2-{i}" for i in range(40)] + ["gone-1", "gone-2"]
+
+    _, up = wired(folder, set(), quota_after=1000, source_photo_ids=held)
+    assert run_mod.run(_args()) == 0
+
+    assert up.pruned == ["gone-1", "gone-2"]
+
+
+def test_a_folder_that_lists_empty_prunes_nothing(wired):
+    """The KAIIA RUPP shape, and the reason this guard exists at all.
+
+    The link holds 510 photos and the walk comes back empty, which is what Drive
+    says both for a deleted folder and for one whose sharing was revoked. Every
+    photo therefore looks stale. Pruning here would delete a published album and
+    its face index, and the organizer's first sign of it would be a blank page.
+    """
+    held = [f"src2-{i}" for i in range(510)]
+
+    _, up = wired([], set(), quota_after=1000, source_photo_ids=held)
+    assert run_mod.run(_args()) == 1      # "No images found in that folder"
+
+    assert up.pruned == []
+
+
+def test_a_full_album_that_lost_nothing_prunes_nothing(wired):
+    folder = _images("src2", 40)
+    held = [f"src2-{i}" for i in range(40)]
+
+    _, up = wired(folder, set(), quota_after=1000, source_photo_ids=held)
+    assert run_mod.run(_args()) == 0
+
+    assert up.pruned == []
+
+
+def test_single_photo_mode_never_prunes(wired):
+    """--only-file re-does one photo. It has no opinion about the other 39."""
+    folder = _images("src2", 40)
+    held = [f"src2-{i}" for i in range(40)] + ["gone-1"]
+
+    _, up = wired(folder, set(), quota_after=1000, source_photo_ids=held)
+    assert run_mod.run(_args(only_file="src2-3")) == 0
+
+    assert up.pruned == []
+
+
+def test_a_refused_prune_does_not_stop_the_pass(wired):
+    """The Worker can decline as too large; indexing still has work to do."""
+    folder = _images("src2", 40)
+    held = [f"src2-{i}" for i in range(40)] + [f"gone-{i}" for i in range(30)]
+
+    _, up = wired(folder, set(), quota_after=1000,
+                  source_photo_ids=held, prune_refuses=True)
+    assert run_mod.run(_args()) == 0
+
+    assert up.pruned == []
+    assert up.finalized == ["ready"]
+
+
+def test_a_prune_only_pass_still_journals_what_it_removed(wired):
+    """An album with nothing left to index takes the early return.
+
+    That path used to drop the journal on the floor, which is exactly where the
+    record of a prune lives — and a prune-only pass is the ordinary case for an
+    album that is already fully indexed.
+    """
+    folder = _images("src2", 40)
+    indexed = {f"src2-{i}" for i in range(40)}
+    held = [f"src2-{i}" for i in range(40)] + ["gone-1"]
+
+    _, up = wired(folder, indexed, quota_after=1000, source_photo_ids=held)
+    logged: list[dict] = []
+    up.log = lambda _event_id, entries: logged.extend(entries)
+
+    assert run_mod.run(_args()) == 0
+
+    assert up.pruned == ["gone-1"]
+    assert any(e["code"] == "pruned" for e in logged), \
+        "the organizer's only record of the removal"
+
+
+def test_a_refused_shortcut_reaches_the_organizer(wired, monkeypatch):
+    """CI logs are not something an organizer can read; the journal is."""
+    from indexer.drive import Walk
+
+    folder = _images("src2", 5)
+    drive, up = wired(folder, set(), quota_after=1000)
+    monkeypatch.setattr(
+        drive, "walk",
+        lambda _f, max_folders=500: Walk(images=list(folder), folders=1,
+                                         skipped_shortcuts=["Hideaway_08_Angust"]),
+    )
+    logged: list[dict] = []
+    up.log = lambda _event_id, entries: logged.extend(entries)
+
+    assert run_mod.run(_args()) == 0
+
+    skipped = [e for e in logged if e["code"] == "shortcut_skipped"]
+    assert len(skipped) == 1
+    assert "Hideaway_08_Angust" in skipped[0]["message"]

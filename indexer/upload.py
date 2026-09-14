@@ -165,6 +165,49 @@ class Uploader:
             log.warning("Could not fetch indexed ids (%s); processing everything", exc)
             return set()
 
+    def source_photos(self, source_id: str) -> list[str]:
+        """drive_file_ids this LINK has indexed, for the prune comparison.
+
+        Scoped to the source, unlike already_indexed(): an event can hold several
+        links, and a file missing from THIS folder is very often sitting in a
+        sibling link's folder. Comparing against the event would prune the
+        neighbours.
+
+        Empty on failure, which reads as "nothing is stale" and prunes nothing —
+        the safe direction. The opposite default would delete an album because a
+        request timed out.
+        """
+        try:
+            res = self.session.get(
+                f"{self.cfg.api_base_url}/api/internal/sources/{source_id}/photos", timeout=60)
+            res.raise_for_status()
+            return list(res.json().get("drive_file_ids", []))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not fetch this link's photo ids (%s); skipping prune", exc)
+            return []
+
+    def prune(self, source_id: str, drive_file_ids: list[str]) -> int:
+        """Delete photos that have left the folder. Returns how many went.
+
+        0 means the Worker refused the whole prune as too large — see the
+        ceiling in main.py. That is a real answer, not a failure, so the caller
+        tells the organizer rather than retrying.
+
+        Chunked at 90 because the Worker binds one parameter per id and D1 caps
+        a statement at 100.
+        """
+        if not drive_file_ids:
+            return 0
+        removed = 0
+        for part in chunked(drive_file_ids, 90):
+            res = self._post(f"/api/internal/sources/{source_id}/prune",
+                             {"drive_file_ids": part, "total_stale": len(drive_file_ids)})
+            if res.get("refused"):
+                log.warning("Worker refused the prune: %s", res.get("reason"))
+                return 0
+            removed += int(res.get("removed", 0))
+        return removed
+
     def event_config(self, event_id: str) -> dict:
         """Per-event indexing settings.
 

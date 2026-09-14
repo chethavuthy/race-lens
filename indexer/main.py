@@ -131,7 +131,8 @@ def run(args: argparse.Namespace) -> int:
                     error="Stopped before it started. Press Continue to run it.")
         return 0
 
-    images: list[DriveImage] = drive.walk(args.folder_id)
+    walk = drive.walk(args.folder_id)
+    images: list[DriveImage] = walk.images
     discovered = len(images)
     # Snapshot before the resume filter rewrites `images`. The continuation
     # check at the end needs "how many files in THIS folder are still missing",
@@ -161,6 +162,55 @@ def run(args: argparse.Namespace) -> int:
     up.set_discovered(args.source_id, discovered)
     note("info", "walk", f"Found {discovered} images in this folder")
 
+    # The organizer is the only one who can act on this, and they cannot read CI
+    # logs — so a refused shortcut is journalled, not just logged. See walk().
+    for name in walk.skipped_shortcuts:
+        note("warn", "shortcut_skipped",
+             f"Did not follow the shortcut to '{name}'. A shortcut leads out of "
+             "the folder you linked, into one whose contents you do not control, so its "
+             "photos are not indexed. If those photos belong in this album, move them "
+             "into the linked folder or add that folder as its own link.")
+
+    # Prune: photos this album still shows that are no longer in the folder.
+    #
+    # Indexing is otherwise purely additive, so a photographer tidying their
+    # Drive left Race Lens serving rows — and thumbnails, and face vectors — for
+    # files they had already removed. Nothing but a full link takedown could
+    # take one back out.
+    #
+    # The guards are the whole design, because an empty or short listing is
+    # indistinguishable from a real deletion at this level. Drive answers a
+    # request for the children of a folder that was DELETED or UNSHARED with
+    # HTTP 200 and an empty file list — no error to catch. KAIIA RUPP's second
+    # link is in exactly that state today: 510 live photos, and a folder id that
+    # files.get now answers 404 for. Pruning on that listing would delete a
+    # published album and its face index, silently, and the organizer's first
+    # sign of it would be the empty page.
+    #
+    # So: never on an empty walk, and never more than half a source at once. A
+    # real tidy-up removes a handful of frames; anything larger is far more
+    # likely to be a listing that failed than a photographer who deleted most of
+    # their own work, and the cost of guessing wrong is asymmetric. The Worker
+    # re-checks the same ceiling against its own count rather than trusting this
+    # one — see POST /internal/sources/:id/prune.
+    if args.only_file:
+        pass          # this pass looked at one file; it knows nothing about the rest
+    elif not discovered:
+        log.warning("Walk found no images; skipping prune")
+    else:
+        stale = sorted(set(up.source_photos(args.source_id)) - folder_ids)
+        if stale:
+            removed = up.prune(args.source_id, stale)
+            if removed:
+                note("info", "pruned",
+                     f"Removed {removed} photo(s) that are no longer in this folder")
+            else:
+                note("warn", "prune_refused",
+                     f"{len(stale)} of this link's photos are no longer in the folder — "
+                     "too many to remove automatically. If the photographer really did "
+                     "delete them, remove the link and re-add it; otherwise check that "
+                     "the folder is still shared with 'anyone with the link'.")
+
     # Resume. Drive throttles sustained bulk downloading, so a big album often
     # needs more than one run; without this every run re-fetches the same prefix
     # and stalls at exactly the same place.
@@ -182,12 +232,18 @@ def run(args: argparse.Namespace) -> int:
                 log.info("Nothing left to index")
                 up.progress(args.job_id, status="done", done=discovered, total=discovered)
                 up.finalize(args.event_id, "ready")
+                # This is the ordinary path for a pass that only pruned: nothing
+                # to download, but the journal holds the one record the organizer
+                # gets of what was removed and why. Both early returns used to
+                # drop it on the floor.
+                up.log(args.event_id, journal)
                 return 0
 
     total = len(images)
     up.progress(args.job_id, total=total)
     if not total:
         up.progress(args.job_id, status="failed", error="No images found in that folder")
+        up.log(args.event_id, journal)
         return 1
 
     # Some events hand out no bibs at all — fun runs, community runs. Reading

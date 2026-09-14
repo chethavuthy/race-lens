@@ -54,6 +54,20 @@ class DriveImage:
     height: int | None
 
 
+@dataclass
+class Walk:
+    """What one recursive listing of a folder found.
+
+    `skipped_shortcuts` names the folder shortcuts the walk refused to follow —
+    see walk() for why it refuses. It is carried out rather than merely logged
+    because the organizer is the only person who can act on it, and CI logs are
+    not something they can read.
+    """
+    images: list[DriveImage]
+    folders: int
+    skipped_shortcuts: list[str]
+
+
 class DriveClient:
     def __init__(self, api_key: str, session: requests.Session | None = None) -> None:
         self.api_key = api_key
@@ -118,9 +132,36 @@ class DriveClient:
             if not page_token:
                 return
 
-    def walk(self, root_id: str, max_folders: int = 500) -> list[DriveImage]:
-        """Recursive image listing. Race albums are nearly always nested."""
+    def walk(self, root_id: str, max_folders: int = 500) -> Walk:
+        """Recursive image listing. Race albums are nearly always nested.
+
+        A folder SHORTCUT is listed but never entered, and this is the one place
+        the walk deliberately stops short of what Drive would let it read.
+
+        A shortcut is a link to a folder somewhere else in Drive — outside the
+        tree the organizer pasted, and usually outside their control. Following
+        one makes the album's contents depend on a folder nobody chose:
+        NIGHT RUNNERS CLUB linked one photographer's race folder, which held a
+        shortcut to that photographer's nightclub work. The first pass indexed
+        315 correct photos. A pass six days later followed the shortcut into
+        `Hideaway_08_Angust` and added 105 photos of a club night to a running
+        album — face vectors included, so a runner searching their own face on
+        that album could be shown a party they were never at. Two more club
+        nights (211 photos) had landed in the same tree by the time it was
+        found, and would have arrived on the next pass.
+
+        Subfolder RECURSION stays: real albums nest (Angkor spans 22 folders),
+        and a subfolder is inside the tree the organizer actually pasted. It is
+        only the hop OUT of that tree that is refused. Across all 13 sources
+        indexed to date this shortcut was the only one of its kind, and there
+        were no image shortcuts at all — so nothing legitimate depends on
+        following them, while this is what following them costs.
+
+        Image shortcuts are still resolved. They point AT a photo, not out of
+        the tree, so they add nothing that is not already the organizer's.
+        """
         images: list[DriveImage] = []
+        skipped: list[str] = []
         seen = {root_id}
         queue = [root_id]
 
@@ -129,12 +170,20 @@ class DriveClient:
             for raw in self.list_folder(current):
                 mime = raw["mimeType"]
                 file_id = raw["id"]
+                via_shortcut = False
 
                 if mime == SHORTCUT_MIME and raw.get("shortcutDetails"):
                     file_id = raw["shortcutDetails"]["targetId"]
                     mime = raw["shortcutDetails"].get("targetMimeType", "")
+                    via_shortcut = True
 
                 if mime == FOLDER_MIME:
+                    if via_shortcut:
+                        name = raw.get("name", file_id)
+                        log.warning("Not following folder shortcut %r (%s)", name, file_id)
+                        if name not in skipped:
+                            skipped.append(name)
+                        continue
                     if file_id not in seen and len(seen) < max_folders:
                         seen.add(file_id)
                         queue.append(file_id)
@@ -153,7 +202,7 @@ class DriveClient:
                     )
 
         log.info("Walked %d folders, found %d images", len(seen), len(images))
-        return images
+        return Walk(images=images, folders=len(seen), skipped_shortcuts=skipped)
 
     # Drive's resized-image endpoint. Measured on a real 6000x4000 race photo:
     #   original  20.4 MB   8 faces, 4 bibs
