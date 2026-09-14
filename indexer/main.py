@@ -13,7 +13,6 @@ mid-run. Each batch is also a natural progress checkpoint.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import io
 import logging
 import os
@@ -374,14 +373,7 @@ def run(args: argparse.Namespace) -> int:
         # never written.
         results: list[tuple[str, str, dict]] = []
 
-        # closing(), so the downloader thread is guaranteed to be finished when
-        # this loop ends — including on a break. The next batch starts by
-        # rmtree-ing the work directory, and a thread still writing a file into
-        # it would be a race with nothing in the log to show for it. CPython
-        # would usually finalize the generator here anyway; "usually" is not the
-        # standard for a thread and a recursive delete.
-        photos_in = contextlib.closing(arriving())
-        for img, path in photos_in:
+        for img, path in arriving():
             if path is None:
                 note("error", "download_failed",
                      f"{img.name}: {download_errors.get(img.id, 'download failed')}", img.id)
