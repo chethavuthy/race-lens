@@ -241,9 +241,54 @@ def process_batch(local: list, engine, reader,
     return _assemble(results, thumbs, names, embeddings, stages)
 
 
+class UploadProbe:
+    """Prices the R2 thumbnail PUT, without publishing a single photograph.
+
+    Optimisation 4 overlaps the thumbnail upload with the next photo's work. Its
+    prize is therefore exactly the upload time, and this harness has never
+    measured that: it takes only GOOGLE_API_KEY, by design, so `upload_s` in
+    every report so far is not a small number but an absent one.
+
+    What is actually being timed is "how long does it take to PUT N bytes to
+    R2", and that does not need the bytes to be a real thumbnail. So the probe
+    sends RANDOM bytes of the same length as the thumbnail that was just made,
+    under a bench/ prefix, and deletes them afterwards. Same request, same
+    payload size, same round trip — and no race photo is written to a new
+    public URL to find it out.
+
+    Off unless asked for. A harness that writes to production by default is a
+    harness nobody dares run while a pass is in flight.
+    """
+
+    def __init__(self, uploader, prefix: str) -> None:
+        self.up = uploader
+        self.prefix = prefix
+        self.keys: list = []
+
+    def put_like(self, thumb: bytes, drive_file_id: str, stages: Stages) -> None:
+        key = f"{self.prefix}/{drive_file_id}.bin"
+        payload = os.urandom(len(thumb))
+        with stages.timed("upload_s"):
+            self.up.put_bytes(key, payload, "application/octet-stream")
+        self.keys.append(key)
+
+    def cleanup(self) -> int:
+        removed = 0
+        for key in self.keys:
+            try:
+                self.up.s3.delete_object(Bucket=self.up.cfg.r2_bucket, Key=key)
+                removed += 1
+            except Exception as exc:  # noqa: BLE001
+                # Reported rather than raised: a leftover object under bench/ is
+                # inert, and losing the measurement to a failed tidy-up would be
+                # the worse outcome.
+                log.warning("Could not delete probe object %s: %s", key, exc)
+        return removed
+
+
 def interleaved_batch(batch: list, download, engine, reader, thumb_edge: int,
                       thumb_quality: int, embeddings: list, stages: Stages,
-                      prefetch_depth: int) -> list:
+                      prefetch_depth: int, probe=None) -> list:
     """One batch the way the REAL pass runs it: fetch and read, interleaved.
 
     The rest of this harness downloads everything up front, outside the clock,
@@ -278,6 +323,8 @@ def interleaved_batch(batch: list, download, engine, reader, thumb_edge: int,
             log.warning("Decode failed for %s: %s", img.name, exc)
             continue
         thumbs[img.id] = (_sha1(thumb), full_w, full_h)
+        if probe is not None:
+            probe.put_like(thumb, img.id, stages)
         results.append(process_frame(engine, reader, img.id, bgr))
         del bgr
     return _assemble(results, thumbs, names, embeddings, stages)
@@ -357,6 +404,31 @@ def run(args: argparse.Namespace) -> int:
             log.warning("Skipping %s (%s): %s", img.name, img.id, exc)
             return None
 
+    probe = None
+    if args.upload_probe:
+        # R2 fields only. The full Config also demands INGEST_SECRET and
+        # API_BASE_URL, and this job has no business holding the key that writes
+        # to D1 just to time a PUT.
+        from .upload import Uploader as _Up
+
+        class _R2Only:
+            r2_account_id = os.environ.get("R2_ACCOUNT_ID", "")
+            r2_access_key_id = os.environ.get("R2_ACCESS_KEY_ID", "")
+            r2_secret_access_key = os.environ.get("R2_SECRET_ACCESS_KEY", "")
+            r2_bucket = os.environ.get("R2_BUCKET", "")
+            ingest_secret = ""          # never sent: the probe only PUTs and DELETEs
+            api_base_url = ""
+
+            @property
+            def r2_endpoint(self) -> str:
+                return f"https://{self.r2_account_id}.r2.cloudflarestorage.com"
+
+        cfg_r2 = _R2Only()
+        if not cfg_r2.r2_bucket:
+            raise SystemExit("--upload-probe needs the R2_* environment variables")
+        probe = UploadProbe(_Up(cfg_r2), f"bench/{os.environ.get('GITHUB_RUN_ID', 'local')}/{args.label}")
+        log.info("upload probe on: writing random payloads to %s/, deleted after", probe.prefix)
+
     # Started before the first download in interleaved mode: the whole point is
     # that the fetch is part of the pass.
     wall0 = time.perf_counter()
@@ -366,7 +438,7 @@ def run(args: argparse.Namespace) -> int:
                 batch = sample[i : i + args.batch_size]
                 photos.extend(interleaved_batch(
                     batch, download, engine, reader, args.thumb_max_edge,
-                    args.thumb_quality, embeddings, stages, args.prefetch))
+                    args.thumb_quality, embeddings, stages, args.prefetch, probe))
                 log.info("batch %d done (%d photos) | %s",
                          i // args.batch_size, len(batch), stages.summary())
         else:
@@ -382,6 +454,8 @@ def run(args: argparse.Namespace) -> int:
             pool.close()
             pool.join()
     wall = time.perf_counter() - wall0
+    if probe is not None:
+        log.info("upload probe: deleted %d/%d objects", probe.cleanup(), len(probe.keys))
     if scratch:
         shutil.rmtree(scratch, ignore_errors=True)
 
@@ -402,6 +476,7 @@ def run(args: argparse.Namespace) -> int:
             "interleave": bool(args.interleave),
             "prefetch": args.prefetch,
             "no_cache": bool(args.no_cache),
+            "upload_probe": bool(args.upload_probe),
             "batch_size": args.batch_size,
             "image_source": args.image_source,
             "python": platform.python_version(),
@@ -461,6 +536,9 @@ def main() -> int:
     p.add_argument("--interleave", action="store_true")
     p.add_argument("--prefetch", type=int, default=0)
     p.add_argument("--no-cache", action="store_true")
+    # Optimisation 4: price the R2 PUT. Needs the R2 credentials, so it is
+    # off unless explicitly asked for.
+    p.add_argument("--upload-probe", action="store_true")
     return run(p.parse_args())
 
 
