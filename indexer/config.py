@@ -38,6 +38,11 @@ class Config:
         # people undetectable by face search. 1280 is the knee: 1600 costs more
         # CPU per photo for one extra face.
         self.det_size = int(os.environ.get("DET_SIZE", "2048"))
+        # How many photos may sit downloaded-but-unread ahead of the loop.
+        # Bounded because DISK is what caps a batch — a runner holds ~14 GB and a
+        # full-size photo is ~21 MB — and because there is nothing to gain from
+        # reading further ahead than the CPU can consume.
+        self.prefetch_depth = int(os.environ.get("PREFETCH_DEPTH", "3"))
         self.work_dir = os.environ.get("WORK_DIR", "/tmp/work")
         # Stop before GitHub does.
         #

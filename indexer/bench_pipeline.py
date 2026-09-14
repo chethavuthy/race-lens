@@ -38,7 +38,9 @@ import json
 import logging
 import os
 import platform
+import shutil
 import sys
+import tempfile
 import time
 
 import numpy as np
@@ -46,8 +48,9 @@ import numpy as np
 from .bibs import BibReader
 from .drive import DriveClient, QuotaExceeded
 from .faces import FaceEngine
-from .main import make_thumbnail
-from .photo_work import init_worker, process_one, work_photo
+from .main import decode_once, make_thumbnail
+from .photo_work import init_worker, process_frame, process_one, work_photo
+from .prefetch import Prefetcher
 from .timing import Stages
 
 log = logging.getLogger("bench")
@@ -170,7 +173,8 @@ def _assemble(results, thumbs: dict, names: dict, embeddings: list,
 
 def process_batch(local: list, engine, reader,
                   cfg_thumb_edge: int, cfg_thumb_quality: int,
-                  embeddings: list, stages: Stages, pool=None) -> list:
+                  embeddings: list, stages: Stages, pool=None,
+                  single_decode: bool = False) -> list:
     """One batch, in main.py's exact order.
 
     Two passes over the batch, and they decode the same files twice — that is
@@ -179,6 +183,33 @@ def process_batch(local: list, engine, reader,
     anything. Merging them was queued as optimisation #2; the measured cost of
     the second decode is what decides whether that is worth doing.
     """
+    if single_decode:
+        # ONE decode per photo: the thumbnail and the detector's frame come out
+        # of the same one. This is the variant under test — run it against the
+        # two-pass path below, in the same job on the same machine, and the
+        # difference is the cost of the second decode and nothing else.
+        thumbs: dict = {}
+        names: dict = {}
+        results = []
+        for img, path in local:
+            names[img.id] = img.name
+            try:
+                with stages.timed("thumbnail_s"):
+                    thumb, full_w, full_h, bgr = decode_once(
+                        path, cfg_thumb_edge, cfg_thumb_quality)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Decode failed for %s: %s", img.name, exc)
+                continue
+            thumbs[img.id] = (_sha1(thumb), full_w, full_h)
+            # A FRESH Stages, not the shared one. process_frame returns
+            # st.as_dict(), and _assemble merges that into the accumulator — so
+            # handing it the accumulator makes every photo re-merge the running
+            # totals into themselves. It compounds, and the first run of this
+            # path reported 1499s of thumbnail work inside a 310s benchmark.
+            results.append(process_frame(engine, reader, img.id, bgr))
+            del bgr
+        return _assemble(results, thumbs, names, embeddings, stages)
+
     # PASS 1 — thumbnail. Decodes every file once. Sequential in both modes:
     # this is the pass optimisation #4 is about, and mixing it into #1 would
     # leave neither measurable on its own.
@@ -210,6 +241,95 @@ def process_batch(local: list, engine, reader,
     return _assemble(results, thumbs, names, embeddings, stages)
 
 
+class UploadProbe:
+    """Prices the R2 thumbnail PUT, without publishing a single photograph.
+
+    Optimisation 4 overlaps the thumbnail upload with the next photo's work. Its
+    prize is therefore exactly the upload time, and this harness has never
+    measured that: it takes only GOOGLE_API_KEY, by design, so `upload_s` in
+    every report so far is not a small number but an absent one.
+
+    What is actually being timed is "how long does it take to PUT N bytes to
+    R2", and that does not need the bytes to be a real thumbnail. So the probe
+    sends RANDOM bytes of the same length as the thumbnail that was just made,
+    under a bench/ prefix, and deletes them afterwards. Same request, same
+    payload size, same round trip — and no race photo is written to a new
+    public URL to find it out.
+
+    Off unless asked for. A harness that writes to production by default is a
+    harness nobody dares run while a pass is in flight.
+    """
+
+    def __init__(self, uploader, prefix: str) -> None:
+        self.up = uploader
+        self.prefix = prefix
+        self.keys: list = []
+
+    def put_like(self, thumb: bytes, drive_file_id: str, stages: Stages) -> None:
+        key = f"{self.prefix}/{drive_file_id}.bin"
+        payload = os.urandom(len(thumb))
+        with stages.timed("upload_s"):
+            self.up.put_bytes(key, payload, "application/octet-stream")
+        self.keys.append(key)
+
+    def cleanup(self) -> int:
+        removed = 0
+        for key in self.keys:
+            try:
+                self.up.s3.delete_object(Bucket=self.up.cfg.r2_bucket, Key=key)
+                removed += 1
+            except Exception as exc:  # noqa: BLE001
+                # Reported rather than raised: a leftover object under bench/ is
+                # inert, and losing the measurement to a failed tidy-up would be
+                # the worse outcome.
+                log.warning("Could not delete probe object %s: %s", key, exc)
+        return removed
+
+
+def interleaved_batch(batch: list, download, engine, reader, thumb_edge: int,
+                      thumb_quality: int, embeddings: list, stages: Stages,
+                      prefetch_depth: int, probe=None) -> list:
+    """One batch the way the REAL pass runs it: fetch and read, interleaved.
+
+    The rest of this harness downloads everything up front, outside the clock,
+    which is right for measuring CPU work and useless for measuring anything
+    about downloading. Production does neither: it downloads a batch, reads that
+    batch, downloads the next. So optimisation 3 — overlapping the fetch with
+    the read — has no effect that the ordinary path could ever show, because
+    there is nothing left to overlap by the time it starts.
+
+    prefetch_depth 0 reproduces the turn-taking exactly. Anything higher runs
+    the downloader on its own thread, ONE request at a time, feeding this loop
+    as it works. Both shapes run in one job on one machine, so the difference
+    between them is the overlap and nothing else.
+    """
+    thumbs: dict = {}
+    names: dict = {}
+    results = []
+
+    if prefetch_depth > 0:
+        arriving = Prefetcher(download, depth=prefetch_depth).stream(batch)
+    else:
+        arriving = ((img, download(img)) for img in batch)
+
+    for img, path in arriving:
+        if path is None:
+            continue
+        names[img.id] = img.name
+        try:
+            with stages.timed("thumbnail_s"):
+                thumb, full_w, full_h, bgr = decode_once(path, thumb_edge, thumb_quality)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Decode failed for %s: %s", img.name, exc)
+            continue
+        thumbs[img.id] = (_sha1(thumb), full_w, full_h)
+        if probe is not None:
+            probe.put_like(thumb, img.id, stages)
+        results.append(process_frame(engine, reader, img.id, bgr))
+        del bgr
+    return _assemble(results, thumbs, names, embeddings, stages)
+
+
 def run(args: argparse.Namespace) -> int:
     api_key = os.environ.get("GOOGLE_API_KEY")
     if not api_key:
@@ -225,9 +345,20 @@ def run(args: argparse.Namespace) -> int:
     sample = pick_sample(images, args.sample)
     log.info("folder has %d images; benchmarking %d", len(images), len(sample))
 
-    local = fetch(drive, sample, args.cache, args.image_source, stages)
-    if not local:
-        raise SystemExit("Nothing downloaded")
+    # Interleaved mode downloads inside the clock, per batch, like the real
+    # pass. Everything else pre-fetches outside it, which is right for isolating
+    # CPU work and blind to anything about the network.
+    scratch = None
+    local = []
+    if not args.interleave:
+        local = fetch(drive, sample, args.cache, args.image_source, stages)
+        if not local:
+            raise SystemExit("Nothing downloaded")
+    elif args.no_cache:
+        # A FRESH directory per variant. Sharing one would let the second
+        # variant find the first variant's files already on disk and report a
+        # download cost of zero — which is exactly the number under test.
+        scratch = tempfile.mkdtemp(prefix=f"bench-{args.label}-")
 
     # Engines built BEFORE the clock starts. Model load is ~100 MB off disk and
     # a one-off per pass; including it would tax a 40-photo benchmark with a
@@ -252,19 +383,81 @@ def run(args: argparse.Namespace) -> int:
 
     embeddings: list = []
     photos: list = []
+
+    work_dir = scratch or args.cache
+    os.makedirs(work_dir, exist_ok=True)
+
+    def download(img):
+        dest = os.path.join(work_dir, f"{img.id}.{args.image_source}")
+        if not args.no_cache and os.path.exists(dest) and os.path.getsize(dest) > 0:
+            return dest
+        try:
+            with stages.timed("download_s"):
+                if args.image_source == "thumb":
+                    drive.download_thumb(img.id, dest)
+                else:
+                    drive.download(img.id, dest)
+            return dest
+        except QuotaExceeded:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Skipping %s (%s): %s", img.name, img.id, exc)
+            return None
+
+    probe = None
+    if args.upload_probe:
+        # R2 fields only. The full Config also demands INGEST_SECRET and
+        # API_BASE_URL, and this job has no business holding the key that writes
+        # to D1 just to time a PUT.
+        from .upload import Uploader as _Up
+
+        class _R2Only:
+            r2_account_id = os.environ.get("R2_ACCOUNT_ID", "")
+            r2_access_key_id = os.environ.get("R2_ACCESS_KEY_ID", "")
+            r2_secret_access_key = os.environ.get("R2_SECRET_ACCESS_KEY", "")
+            r2_bucket = os.environ.get("R2_BUCKET", "")
+            ingest_secret = ""          # never sent: the probe only PUTs and DELETEs
+            api_base_url = ""
+
+            @property
+            def r2_endpoint(self) -> str:
+                return f"https://{self.r2_account_id}.r2.cloudflarestorage.com"
+
+        cfg_r2 = _R2Only()
+        if not cfg_r2.r2_bucket:
+            raise SystemExit("--upload-probe needs the R2_* environment variables")
+        probe = UploadProbe(_Up(cfg_r2), f"bench/{os.environ.get('GITHUB_RUN_ID', 'local')}/{args.label}")
+        log.info("upload probe on: writing random payloads to %s/, deleted after", probe.prefix)
+
+    # Started before the first download in interleaved mode: the whole point is
+    # that the fetch is part of the pass.
     wall0 = time.perf_counter()
     try:
-        for i in range(0, len(local), args.batch_size):
-            batch = local[i : i + args.batch_size]
-            photos.extend(process_batch(batch, engine, reader, args.thumb_max_edge,
-                                        args.thumb_quality, embeddings, stages, pool))
-            log.info("batch %d done (%d photos) | %s",
-                     i // args.batch_size, len(batch), stages.summary())
+        if args.interleave:
+            for i in range(0, len(sample), args.batch_size):
+                batch = sample[i : i + args.batch_size]
+                photos.extend(interleaved_batch(
+                    batch, download, engine, reader, args.thumb_max_edge,
+                    args.thumb_quality, embeddings, stages, args.prefetch, probe))
+                log.info("batch %d done (%d photos) | %s",
+                         i // args.batch_size, len(batch), stages.summary())
+        else:
+            for i in range(0, len(local), args.batch_size):
+                batch = local[i : i + args.batch_size]
+                photos.extend(process_batch(batch, engine, reader, args.thumb_max_edge,
+                                            args.thumb_quality, embeddings, stages, pool,
+                                            args.single_decode))
+                log.info("batch %d done (%d photos) | %s",
+                         i // args.batch_size, len(batch), stages.summary())
     finally:
         if pool is not None:
             pool.close()
             pool.join()
     wall = time.perf_counter() - wall0
+    if probe is not None:
+        log.info("upload probe: deleted %d/%d objects", probe.cleanup(), len(probe.keys))
+    if scratch:
+        shutil.rmtree(scratch, ignore_errors=True)
 
     try:
         import onnxruntime
@@ -279,6 +472,11 @@ def run(args: argparse.Namespace) -> int:
             "det_size": args.det_size,
             "sample": len(local),
             "workers": args.workers,
+            "single_decode": bool(args.single_decode),
+            "interleave": bool(args.interleave),
+            "prefetch": args.prefetch,
+            "no_cache": bool(args.no_cache),
+            "upload_probe": bool(args.upload_probe),
             "batch_size": args.batch_size,
             "image_source": args.image_source,
             "python": platform.python_version(),
@@ -331,6 +529,16 @@ def main() -> int:
     # Accepted now, honoured by optimisation #1. Recorded in the report from the
     # start so a baseline and a parallel run are labelled distinguishably.
     p.add_argument("--workers", type=int, default=1)
+    # Optimisation #2, as a switch, so both shapes can run in one job.
+    p.add_argument("--single-decode", action="store_true")
+    # Optimisation 3. --interleave puts the download inside the pass, the way
+    # production runs it; --prefetch 0 keeps the turn-taking, higher overlaps.
+    p.add_argument("--interleave", action="store_true")
+    p.add_argument("--prefetch", type=int, default=0)
+    p.add_argument("--no-cache", action="store_true")
+    # Optimisation 4: price the R2 PUT. Needs the R2 credentials, so it is
+    # off unless explicitly asked for.
+    p.add_argument("--upload-probe", action="store_true")
     return run(p.parse_args())
 
 
