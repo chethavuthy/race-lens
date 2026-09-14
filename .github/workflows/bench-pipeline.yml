@@ -56,7 +56,7 @@ on:
           Required to measure optimisation 3 at all — with the default
           up-front fetch there is nothing left for the overlap to overlap.
         type: choice
-        options: [no, yes]
+        options: ["no", "yes"]
         default: 'no'
       a_prefetch:
         description: Variant A read-ahead depth (0 = today's turn-taking)
@@ -70,7 +70,7 @@ on:
           download measurement; each variant gets its OWN directory so the
           second cannot find the first's files and report a cost of zero.
         type: choice
-        options: [no, yes]
+        options: ["no", "yes"]
         default: 'no'
       image_source:
         description: Drive's resized copy, or the full original
