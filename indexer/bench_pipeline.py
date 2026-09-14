@@ -198,7 +198,12 @@ def process_batch(local: list, engine, reader,
                 log.warning("Decode failed for %s: %s", img.name, exc)
                 continue
             thumbs[img.id] = (_sha1(thumb), full_w, full_h)
-            results.append(process_frame(engine, reader, img.id, bgr, stages))
+            # A FRESH Stages, not the shared one. process_frame returns
+            # st.as_dict(), and _assemble merges that into the accumulator — so
+            # handing it the accumulator makes every photo re-merge the running
+            # totals into themselves. It compounds, and the first run of this
+            # path reported 1499s of thumbnail work inside a 310s benchmark.
+            results.append(process_frame(engine, reader, img.id, bgr))
             del bgr
         return _assemble(results, thumbs, names, embeddings, stages)
 
