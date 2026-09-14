@@ -38,7 +38,9 @@ import json
 import logging
 import os
 import platform
+import shutil
 import sys
+import tempfile
 import time
 
 import numpy as np
@@ -48,6 +50,7 @@ from .drive import DriveClient, QuotaExceeded
 from .faces import FaceEngine
 from .main import decode_once, make_thumbnail
 from .photo_work import init_worker, process_frame, process_one, work_photo
+from .prefetch import Prefetcher
 from .timing import Stages
 
 log = logging.getLogger("bench")
@@ -238,6 +241,48 @@ def process_batch(local: list, engine, reader,
     return _assemble(results, thumbs, names, embeddings, stages)
 
 
+def interleaved_batch(batch: list, download, engine, reader, thumb_edge: int,
+                      thumb_quality: int, embeddings: list, stages: Stages,
+                      prefetch_depth: int) -> list:
+    """One batch the way the REAL pass runs it: fetch and read, interleaved.
+
+    The rest of this harness downloads everything up front, outside the clock,
+    which is right for measuring CPU work and useless for measuring anything
+    about downloading. Production does neither: it downloads a batch, reads that
+    batch, downloads the next. So optimisation 3 — overlapping the fetch with
+    the read — has no effect that the ordinary path could ever show, because
+    there is nothing left to overlap by the time it starts.
+
+    prefetch_depth 0 reproduces the turn-taking exactly. Anything higher runs
+    the downloader on its own thread, ONE request at a time, feeding this loop
+    as it works. Both shapes run in one job on one machine, so the difference
+    between them is the overlap and nothing else.
+    """
+    thumbs: dict = {}
+    names: dict = {}
+    results = []
+
+    if prefetch_depth > 0:
+        arriving = Prefetcher(download, depth=prefetch_depth).stream(batch)
+    else:
+        arriving = ((img, download(img)) for img in batch)
+
+    for img, path in arriving:
+        if path is None:
+            continue
+        names[img.id] = img.name
+        try:
+            with stages.timed("thumbnail_s"):
+                thumb, full_w, full_h, bgr = decode_once(path, thumb_edge, thumb_quality)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Decode failed for %s: %s", img.name, exc)
+            continue
+        thumbs[img.id] = (_sha1(thumb), full_w, full_h)
+        results.append(process_frame(engine, reader, img.id, bgr))
+        del bgr
+    return _assemble(results, thumbs, names, embeddings, stages)
+
+
 def run(args: argparse.Namespace) -> int:
     api_key = os.environ.get("GOOGLE_API_KEY")
     if not api_key:
@@ -253,9 +298,20 @@ def run(args: argparse.Namespace) -> int:
     sample = pick_sample(images, args.sample)
     log.info("folder has %d images; benchmarking %d", len(images), len(sample))
 
-    local = fetch(drive, sample, args.cache, args.image_source, stages)
-    if not local:
-        raise SystemExit("Nothing downloaded")
+    # Interleaved mode downloads inside the clock, per batch, like the real
+    # pass. Everything else pre-fetches outside it, which is right for isolating
+    # CPU work and blind to anything about the network.
+    scratch = None
+    local = []
+    if not args.interleave:
+        local = fetch(drive, sample, args.cache, args.image_source, stages)
+        if not local:
+            raise SystemExit("Nothing downloaded")
+    elif args.no_cache:
+        # A FRESH directory per variant. Sharing one would let the second
+        # variant find the first variant's files already on disk and report a
+        # download cost of zero — which is exactly the number under test.
+        scratch = tempfile.mkdtemp(prefix=f"bench-{args.label}-")
 
     # Engines built BEFORE the clock starts. Model load is ~100 MB off disk and
     # a one-off per pass; including it would tax a 40-photo benchmark with a
@@ -280,20 +336,54 @@ def run(args: argparse.Namespace) -> int:
 
     embeddings: list = []
     photos: list = []
+
+    work_dir = scratch or args.cache
+    os.makedirs(work_dir, exist_ok=True)
+
+    def download(img):
+        dest = os.path.join(work_dir, f"{img.id}.{args.image_source}")
+        if not args.no_cache and os.path.exists(dest) and os.path.getsize(dest) > 0:
+            return dest
+        try:
+            with stages.timed("download_s"):
+                if args.image_source == "thumb":
+                    drive.download_thumb(img.id, dest)
+                else:
+                    drive.download(img.id, dest)
+            return dest
+        except QuotaExceeded:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Skipping %s (%s): %s", img.name, img.id, exc)
+            return None
+
+    # Started before the first download in interleaved mode: the whole point is
+    # that the fetch is part of the pass.
     wall0 = time.perf_counter()
     try:
-        for i in range(0, len(local), args.batch_size):
-            batch = local[i : i + args.batch_size]
-            photos.extend(process_batch(batch, engine, reader, args.thumb_max_edge,
-                                        args.thumb_quality, embeddings, stages, pool,
-                                        args.single_decode))
-            log.info("batch %d done (%d photos) | %s",
-                     i // args.batch_size, len(batch), stages.summary())
+        if args.interleave:
+            for i in range(0, len(sample), args.batch_size):
+                batch = sample[i : i + args.batch_size]
+                photos.extend(interleaved_batch(
+                    batch, download, engine, reader, args.thumb_max_edge,
+                    args.thumb_quality, embeddings, stages, args.prefetch))
+                log.info("batch %d done (%d photos) | %s",
+                         i // args.batch_size, len(batch), stages.summary())
+        else:
+            for i in range(0, len(local), args.batch_size):
+                batch = local[i : i + args.batch_size]
+                photos.extend(process_batch(batch, engine, reader, args.thumb_max_edge,
+                                            args.thumb_quality, embeddings, stages, pool,
+                                            args.single_decode))
+                log.info("batch %d done (%d photos) | %s",
+                         i // args.batch_size, len(batch), stages.summary())
     finally:
         if pool is not None:
             pool.close()
             pool.join()
     wall = time.perf_counter() - wall0
+    if scratch:
+        shutil.rmtree(scratch, ignore_errors=True)
 
     try:
         import onnxruntime
@@ -309,6 +399,9 @@ def run(args: argparse.Namespace) -> int:
             "sample": len(local),
             "workers": args.workers,
             "single_decode": bool(args.single_decode),
+            "interleave": bool(args.interleave),
+            "prefetch": args.prefetch,
+            "no_cache": bool(args.no_cache),
             "batch_size": args.batch_size,
             "image_source": args.image_source,
             "python": platform.python_version(),
@@ -363,6 +456,11 @@ def main() -> int:
     p.add_argument("--workers", type=int, default=1)
     # Optimisation #2, as a switch, so both shapes can run in one job.
     p.add_argument("--single-decode", action="store_true")
+    # Optimisation 3. --interleave puts the download inside the pass, the way
+    # production runs it; --prefetch 0 keeps the turn-taking, higher overlaps.
+    p.add_argument("--interleave", action="store_true")
+    p.add_argument("--prefetch", type=int, default=0)
+    p.add_argument("--no-cache", action="store_true")
     return run(p.parse_args())
 
 

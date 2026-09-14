@@ -50,6 +50,28 @@ on:
       single_decode:
         description: Which variants decode once (optimisation 2)? none / a / b / both
         default: none
+      interleave:
+        description: >
+          Download inside the pass, per batch, the way production runs it.
+          Required to measure optimisation 3 at all — with the default
+          up-front fetch there is nothing left for the overlap to overlap.
+        type: choice
+        options: [no, yes]
+        default: 'no'
+      a_prefetch:
+        description: Variant A read-ahead depth (0 = today's turn-taking)
+        default: '0'
+      b_prefetch:
+        description: Variant B read-ahead depth (0 = today's turn-taking)
+        default: '0'
+      no_cache:
+        description: >
+          Download for real instead of reusing the cached photos. Needed for a
+          download measurement; each variant gets its OWN directory so the
+          second cannot find the first's files and report a cost of zero.
+        type: choice
+        options: [no, yes]
+        default: 'no'
       image_source:
         description: Drive's resized copy, or the full original
         type: choice
@@ -121,6 +143,10 @@ jobs:
           B_WORKERS: ${{ inputs.b_workers }}
           B_THREADS: ${{ inputs.b_threads }}
           SINGLE_DECODE: ${{ inputs.single_decode }}
+          INTERLEAVE: ${{ inputs.interleave }}
+          A_PREFETCH: ${{ inputs.a_prefetch }}
+          B_PREFETCH: ${{ inputs.b_prefetch }}
+          NO_CACHE: ${{ inputs.no_cache }}
         run: |
           # Which CPU this run drew. Runners are not one machine type, and that
           # is the leading suspect for both the timing spread between runs and
@@ -132,12 +158,21 @@ jobs:
 
           run_variant() {
             local label="$1" workers="$2" threads="$3" which="$4"
-            local sd=""
+            local sd="" net=""
             case "$SINGLE_DECODE" in
               both) sd="--single-decode" ;;
               a) [ "$which" = a ] && sd="--single-decode" ;;
               b) [ "$which" = b ] && sd="--single-decode" ;;
             esac
+            if [ "$INTERLEAVE" = yes ]; then
+              local depth="$A_PREFETCH"
+              [ "$which" = b ] && depth="$B_PREFETCH"
+              # Validated rather than trusted: these reach a command line, and
+              # the note at the top of index-event.yml is about exactly this.
+              case "$depth" in ''|*[!0-9]*) echo "bad prefetch depth"; exit 1 ;; esac
+              net="--interleave --prefetch $depth"
+              [ "$NO_CACHE" = yes ] && net="$net --no-cache"
+            fi
             if [ -n "$threads" ]; then
               export OMP_NUM_THREADS="$threads" OPENBLAS_NUM_THREADS="$threads" \
                      MKL_NUM_THREADS="$threads"
@@ -153,7 +188,7 @@ jobs:
               --image-source  "$IMAGE_SOURCE" \
               --cache         /tmp/bench-cache \
               --out           "bench-$label.json" \
-              $sd
+              $sd $net
           }
 
           run_variant "$LABEL" "$WORKERS" "$THREADS" a
