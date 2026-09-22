@@ -224,6 +224,23 @@ class Uploader:
             log.warning("Could not fetch event config (%s); assuming bibs are enabled", exc)
             return {"bibs_enabled": True}
 
+    def source_config(self, source_id: str) -> dict:
+        """Per-source indexing settings.
+
+        Falls back to no template, which yields no origin links — the same state
+        as every album that has no origin. Guessing one instead would point
+        runners at posts that may not exist.
+        """
+        try:
+            res = self.session.get(
+                f"{self.cfg.api_base_url}/api/internal/sources/{source_id}/config",
+                timeout=60)
+            res.raise_for_status()
+            return res.json()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not fetch source config (%s); no origin links", exc)
+            return {"source_url_template": None}
+
     def put_bibs(self, event_id: str, bibs: list[dict],
                  replace_photos: list[str] | None = None) -> None:
         """Write bibs. `replace_photos` clears those photos' existing bibs first,

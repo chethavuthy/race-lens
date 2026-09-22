@@ -73,6 +73,10 @@ interface PhotoIn {
   width?: number | null;
   height?: number | null;
   taken_at?: string | null;
+  // The post this photo was mirrored from, already expanded by the runner from
+  // the source's template. Omitted by albums with no origin beyond Drive, and
+  // by a --bibs-only pass, which is why the upsert COALESCEs it.
+  source_url?: string | null;
 }
 
 /**
@@ -288,7 +292,7 @@ internalRoutes.post('/events/:id/photos', async (c) => {
     }
   }
 
-  // 7 bound params per row; stay well under SQLite's 999-variable ceiling.
+  // 10 bound params per row; stay well under SQLite's 999-variable ceiling.
   for (const part of chunk(photos, 100)) {
     await c.env.DB.batch(
       part.map((p) =>
@@ -307,17 +311,21 @@ internalRoutes.post('/events/:id/photos', async (c) => {
           // 0 only when this pass is going to rewrite them, so a --bibs-only pass
           // cannot mark an already-indexed album unfinished — which would send the
           // next resume back to Drive for every photo in it.
-          `INSERT INTO photos (id, event_id, source_id, drive_file_id, thumb_key, width, height, taken_at, faces_done)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)
+          `INSERT INTO photos (id, event_id, source_id, drive_file_id, thumb_key, width, height, taken_at, source_url, faces_done)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0)
            ON CONFLICT (event_id, drive_file_id) DO UPDATE SET
              thumb_key  = excluded.thumb_key,
              width      = COALESCE(excluded.width, width),
              height     = COALESCE(excluded.height, height),
              taken_at   = COALESCE(excluded.taken_at, taken_at),
-             faces_done = CASE WHEN ?9 = 1 THEN 0 ELSE faces_done END`,
+             -- COALESCE for the same reason as width: a --bibs-only pass sends
+             -- no source_url, and a bare assignment would blank every link on
+             -- the album the next time anyone re-read its numbers.
+             source_url = COALESCE(excluded.source_url, source_url),
+             faces_done = CASE WHEN ?10 = 1 THEN 0 ELSE faces_done END`,
         ).bind(newId(), eventId, source_id, p.drive_file_id, p.thumb_key,
                p.width ?? null, p.height ?? null, p.taken_at ?? null,
-               facesPending ? 1 : 0),
+               p.source_url ?? null, facesPending ? 1 : 0),
       ),
     );
   }
@@ -431,6 +439,26 @@ internalRoutes.get('/events/:id/config', async (c) => {
     bib_prefixes: row.bib_prefixes ?? '',
     bib_prefix_required: (row.bib_prefix_required ?? 0) === 1,
   });
+});
+
+/**
+ * Per-SOURCE indexing settings.
+ *
+ * Separate from /events/:id/config because the template belongs to the folder,
+ * not the race: one event can absorb albums from several photographers, and
+ * only some of them were mirrored from somewhere with a public post.
+ *
+ * Fetched rather than passed in the dispatch payload for the reason spelled out
+ * above /events/:id/config — a payload field is one a caller can forget, and a
+ * pass that forgot this one would blank every link it rebuilt.
+ */
+internalRoutes.get('/sources/:id/config', async (c) => {
+  const row = await c.env.DB
+    .prepare('SELECT source_url_template FROM sources WHERE id = ?')
+    .bind(c.req.param('id'))
+    .first<{ source_url_template: string | null }>();
+  if (!row) throw new HttpError(404, 'Source not found', 'no_source');
+  return c.json({ source_url_template: row.source_url_template ?? null });
 });
 
 internalRoutes.post('/events/:id/bibs', async (c) => {

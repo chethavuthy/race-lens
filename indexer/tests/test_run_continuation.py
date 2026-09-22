@@ -137,7 +137,7 @@ class FakeDrive:
 
 class FakeUploader:
     def __init__(self, indexed_event_wide, bibs_enabled=True, stop_after=None,
-                 source_photo_ids=None):
+                 source_photo_ids=None, source_url_template=None):
         self.stop_after = stop_after
         # What THIS link has indexed, which is what a prune compares against.
         # Deliberately separate from `indexed_event_wide`: that set spans every
@@ -161,9 +161,15 @@ class FakeUploader:
         self.completed: list[str] = []
         self.faces_pending_seen: list[bool] = []
         self.face_rows: list[dict] = []
+        # None is the ordinary case: a Drive album with no origin beyond Drive,
+        # which is what every test that says nothing about links should see.
+        self.source_url_template = source_url_template
 
     def event_config(self, _event_id):
         return {"bibs_enabled": self.bibs_enabled}
+
+    def source_config(self, _source_id):
+        return {"source_url_template": self.source_url_template}
 
     def progress(self, job_id, **fields):
         self.progress_calls.append(fields)
@@ -263,10 +269,11 @@ def wired(monkeypatch, tmp_path):
     """Patch run()'s collaborators, keeping numpy/Pillow real."""
     def _build(folder_images, indexed_event_wide, quota_after, bibs_enabled=True,
                deadline_min=10_000, stop_after=None, source_photo_ids=None,
-               prune_refuses=False):
+               prune_refuses=False, source_url_template=None):
         drive = FakeDrive(folder_images, quota_after)
         up = FakeUploader(indexed_event_wide, bibs_enabled=bibs_enabled,
-                          stop_after=stop_after, source_photo_ids=source_photo_ids)
+                          stop_after=stop_after, source_photo_ids=source_photo_ids,
+                          source_url_template=source_url_template)
         up.prune_refuses = prune_refuses
 
         cfg = types.SimpleNamespace(
@@ -886,3 +893,41 @@ def test_a_refused_shortcut_reaches_the_organizer(wired, monkeypatch):
     skipped = [e for e in logged if e["code"] == "shortcut_skipped"]
     assert len(skipped) == 1
     assert "Hideaway_08_Angust" in skipped[0]["message"]
+
+
+def test_a_mirrored_album_carries_a_link_back_to_each_post(wired):
+    """The template is expanded per photo, from that photo's own filename.
+
+    The link is rebuilt from the Drive FILENAME because nothing else about a
+    mirrored photo survives the trip into Drive — not the message id, not the
+    album it was posted in. A template that ignored the filename would give
+    every photo the same url, which is why expand() refuses one.
+    """
+    _, up = wired(_images("src2", 3), set(), quota_after=1000,
+                  source_url_template="https://t.me/grkpp/{stem}")
+
+    assert run_mod.run(_args()) == 0
+    assert up.photo_payloads, "no photos were sent"
+
+    got = {p["drive_file_id"]: p.get("source_url") for p in up.photo_payloads}
+    assert got == {
+        "src2-0": "https://t.me/grkpp/src2-0",
+        "src2-1": "https://t.me/grkpp/src2-1",
+        "src2-2": "https://t.me/grkpp/src2-2",
+    }, f"each photo must resolve to its OWN post, got {got}"
+
+
+def test_an_ordinary_drive_album_sends_no_link(wired):
+    """No template is the common case, and must stay null rather than guess.
+
+    Most albums are Drive folders with no public origin at all. Inventing a url
+    for them would put a dead link on every photo, and the UI shows the link
+    whenever it is present — so 'absent' has to mean absent.
+    """
+    _, up = wired(_images("src2", 2), set(), quota_after=1000)
+
+    assert run_mod.run(_args()) == 0
+    assert up.photo_payloads, "no photos were sent"
+    assert all(p.get("source_url") is None for p in up.photo_payloads), (
+        "an album with no origin must send source_url=None, not a fabricated link"
+    )

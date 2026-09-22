@@ -64,6 +64,7 @@ export function publicEvent(env: Env, e: EventRow) {
 export function publicPhoto(env: Env, p: {
   id: string; drive_file_id: string; thumb_key: string;
   width: number | null; height: number | null; taken_at: string | null;
+  source_url?: string | null;
 }) {
   return {
     id: p.id,
@@ -71,6 +72,12 @@ export function publicPhoto(env: Env, p: {
     // `uc?id=` is deprecated and now bounces through a confirm page for large
     // files. /file/d/<id>/view is the stable viewer link.
     original_url: `https://drive.google.com/file/d/${p.drive_file_id}/view`,
+    // Where the photo was published BEFORE we mirrored it, when the album has
+    // such an origin. Kept alongside original_url rather than replacing it:
+    // original_url always resolves, while this one is null for most albums —
+    // and when it is set it is the photographer's own page, which is the link
+    // a runner actually wants.
+    source_url: p.source_url ?? null,
     width: p.width,
     height: p.height,
     taken_at: p.taken_at,

@@ -62,6 +62,7 @@ export default function AdminEvent() {
   /** Same rule as nameDraft: undefined until typed, so the stored slug shows through. */
   const [slugDraft, setSlugDraft] = useState<string | undefined>(undefined);
   const [creditDraft, setCreditDraft] = useState<Record<string, string>>({});
+  const [originDraft, setOriginDraft] = useState<Record<string, string>>({});
   const [removing, setRemoving] = useState<{ id: string; purged: number } | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   /**
@@ -528,6 +529,38 @@ export default function AdminEvent() {
                   >
                     Save
                   </Button>
+                </div>
+
+                {/* For an album mirrored from somewhere public: how to rebuild a
+                    link to the post each photo came from. Expanded against the
+                    Drive FILENAME at index time, so it only reaches photos
+                    indexed after it is set — an album already indexed needs a
+                    re-index to gain links. Left empty by every ordinary Drive
+                    album, which is most of them. */}
+                <div className="flex w-full flex-col gap-1 sm:w-auto">
+                  <div className="flex w-full items-center gap-2 sm:w-auto">
+                    <Input
+                      value={originDraft[s.id] ?? s.source_url_template ?? ''}
+                      placeholder="Original post URL… e.g. https://t.me/channel/{n}"
+                      disabled={busy === `origin-${s.id}`}
+                      onChange={(e) => setOriginDraft({ ...originDraft, [s.id]: e.target.value })}
+                      className="h-8 w-full min-w-[12rem] text-sm sm:w-72"
+                    />
+                    <Button
+                      variant="outline" size="sm"
+                      disabled={busy === `origin-${s.id}` || originDraft[s.id] === undefined}
+                      onClick={() => run(`origin-${s.id}`, async () => {
+                        await api.admin.setSourceUrlTemplate(
+                          s.id, (originDraft[s.id] ?? '').trim());
+                        setOriginDraft((d) => { const { [s.id]: _drop, ...rest } = d; return rest; });
+                      }, 'Saved — photos indexed from now on link back to their post.')}
+                    >
+                      Save
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {'{n}'} is the filename without padding, {'{stem}'} keeps it, {'{name}'} is the whole filename.
+                  </p>
                 </div>
 
                 {/* Which size the NEXT round downloads. Operator only — the API

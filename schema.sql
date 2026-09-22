@@ -76,6 +76,15 @@ CREATE TABLE IF NOT EXISTS sources (
   -- next paste of the same link — or a queued continuation pass — re-indexing an
   -- album that was withdrawn. See migrations/004_sources_credit_removal.sql.
   removed_at      TEXT,
+  -- Turns a Drive filename into the post it was mirrored from, e.g.
+  -- 'https://t.me/grkpp/{n}'. NULL for an album with no origin beyond Drive,
+  -- which is most of them. Placeholders: {name} the filename, {stem} without
+  -- its extension, {n} the stem with leading zeros cut — see migration 015.
+  --
+  -- On the SOURCE rather than in the dispatch payload, because it must survive
+  -- re-indexing: a later pass started from a different button would otherwise
+  -- forget it and blank every link it rebuilt.
+  source_url_template TEXT,
   added_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sources_event ON sources(event_id);
@@ -111,6 +120,10 @@ CREATE TABLE IF NOT EXISTS photos (
   -- lands. On an existing database a default of 0 would mark every photo
   -- unfinished and trigger a full re-download.
   faces_done    INTEGER NOT NULL DEFAULT 1,
+  -- The post this photo was mirrored from, resolved once at index time from the
+  -- source's template. NULL when the album has no origin beyond Drive. Stored
+  -- rather than derived per request, so serving a photo never re-parses a name.
+  source_url    TEXT,
   -- Deliberately (event_id, drive_file_id) rather than a global unique on
   -- drive_file_id: the same Drive file can legitimately appear in two events
   -- (e.g. a combined 5k/10k album). Dedupe is per event, which is all the

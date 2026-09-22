@@ -957,7 +957,7 @@ adminRoutes.get('/events/:id/report', async (c) => {
 
   const { results: sources } = await c.env.DB.prepare(
     `SELECT s.id, s.drive_folder_id, s.drive_url, s.discovered, s.added_at, s.image_source,
-            s.credit_name, s.removed_at,
+            s.credit_name, s.removed_at, s.source_url_template,
             (SELECT COUNT(*) FROM photos p WHERE p.source_id = s.id) AS indexed
        FROM sources s WHERE s.event_id = ? ORDER BY s.added_at`,
   ).bind(eventId).all<any>();
@@ -1123,15 +1123,18 @@ adminRoutes.get('/events/:id/report', async (c) => {
  * Photos already indexed are NOT re-fetched — the setting applies to whatever
  * is still missing, so switching costs nothing already spent.
  *
- * Also where the photographer's byline is set. Both fields are optional and applied
- * independently: the image-size toggle and the credit box are two controls on the
- * same row, and sending one must not blank the other.
+ * Also where the photographer's byline is set, and where an album that was
+ * mirrored from somewhere public records how to rebuild a link back to the
+ * original post. Every field is optional and applied independently: they are
+ * separate controls on the same row, and sending one must not blank the others.
  */
 adminRoutes.patch('/sources/:id', async (c) => {
   const sourceId = c.req.param('id');
   await ownSource(c, sourceId);
-  const body = await c.req.json<{ image_source?: string; credit_name?: string | null }>()
-    .catch(() => ({}) as any);
+  const body = await c.req.json<{
+    image_source?: string; credit_name?: string | null;
+    source_url_template?: string | null;
+  }>().catch(() => ({}) as any);
 
   const sets: string[] = [];
   const binds: (string | null)[] = [];
@@ -1157,8 +1160,41 @@ adminRoutes.patch('/sources/:id', async (c) => {
     binds.push(name || null);
   }
 
+  if (body.source_url_template !== undefined) {
+    // An empty box means "this album has no origin beyond Drive" — the state of
+    // most albums — so it is stored as NULL rather than as ''.
+    const tpl = String(body.source_url_template ?? '').trim();
+    if (tpl) {
+      if (tpl.length > 300) {
+        throw new HttpError(400, 'A template is at most 300 characters', 'bad_template');
+      }
+      // http(s) only: the link is rendered as an anchor on the public event page,
+      // and a javascript: or data: template would put script authored here into
+      // every visitor's browser.
+      if (!/^https?:\/\//i.test(tpl)) {
+        throw new HttpError(400, 'A template must start with http:// or https://', 'bad_template');
+      }
+      // Without a placeholder every photo resolves to the SAME url, which reads
+      // as a per-photo link in the UI but is not one. Rejected here rather than
+      // silently dropped by the runner, so the organizer learns immediately.
+      if (!/\{(name|stem|n)\}/.test(tpl)) {
+        throw new HttpError(
+          400,
+          'A template needs a placeholder: {n}, {stem} or {name} — e.g. https://t.me/channel/{n}',
+          'bad_template',
+        );
+      }
+    }
+    sets.push('source_url_template = ?');
+    binds.push(tpl || null);
+  }
+
   if (!sets.length) {
-    throw new HttpError(400, 'Nothing to update — send image_source or credit_name', 'bad_request');
+    throw new HttpError(
+      400,
+      'Nothing to update — send image_source, credit_name or source_url_template',
+      'bad_request',
+    );
   }
 
   const r = await c.env.DB.prepare(
@@ -1346,7 +1382,7 @@ adminRoutes.get('/events/:id/photos', async (c) => {
     : '';
 
   const { results: photos } = await c.env.DB.prepare(
-    `SELECT p.id, p.drive_file_id, p.thumb_key, p.width, p.height
+    `SELECT p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.source_url
        FROM photos p WHERE p.event_id = ? AND p.id > ?
         ${source ? 'AND p.source_id = ?' : ''} ${where}
       ORDER BY p.id LIMIT ?`,
@@ -1485,7 +1521,7 @@ adminRoutes.get('/photos/:id', async (c) => {
   await ownPhoto(c, photoId);
 
   const p = await c.env.DB.prepare(
-    'SELECT id, drive_file_id, thumb_key, width, height FROM photos WHERE id = ?',
+    'SELECT id, drive_file_id, thumb_key, width, height, source_url FROM photos WHERE id = ?',
   ).bind(photoId).first<any>();
   if (!p) throw new HttpError(404, 'Photo not found', 'no_photo');
 

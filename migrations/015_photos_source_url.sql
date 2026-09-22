@@ -1,0 +1,40 @@
+-- Where a photo came from before it was a Drive file.
+--
+--     npx wrangler d1 execute race-lens --local  \
+--       --file=./migrations/015_photos_source_url.sql
+--     npx wrangler d1 execute race-lens --remote \
+--       --file=./migrations/015_photos_source_url.sql
+--
+-- publicPhoto already hands out an `original_url`, but that is the Drive viewer
+-- for OUR copy. When an album was mirrored from somewhere public — a Telegram
+-- channel, a photographer's gallery — the post it came from is the better
+-- "see the original": it is the photographer's own page, it carries their
+-- caption and context, and it keeps the credit where it belongs instead of
+-- pointing a runner at our storage.
+--
+-- Two columns, because the two facts have different lifetimes:
+--
+--   sources.source_url_template  belongs to the FOLDER and is set once by the
+--                                organizer. It survives every re-index, which a
+--                                dispatch-payload flag would not — a later pass
+--                                started from a different button would forget it
+--                                and quietly blank every link it rebuilt.
+--
+--   photos.source_url            is resolved per photo at index time and stored,
+--                                so serving a photo never has to re-derive it.
+--                                Nullable, and null for every album that has no
+--                                origin beyond Drive, which is most of them.
+--
+-- The template is expanded against the DRIVE FILENAME, the only per-photo
+-- identifier that survives the trip from the original host:
+--
+--   {name}  the filename as stored          016616.jpg
+--   {stem}  filename without its extension  016616
+--   {n}     {stem} with leading zeros cut    16616
+--
+-- so `https://t.me/grkpp/{n}` turns 016616.jpg into t.me/grkpp/16616. {n} is
+-- separate from {stem} because a zero-padded name sorts correctly in Drive but
+-- is NOT the id the origin uses — t.me/grkpp/016616 is not a valid post.
+
+ALTER TABLE photos  ADD COLUMN source_url TEXT;
+ALTER TABLE sources ADD COLUMN source_url_template TEXT;

@@ -46,6 +46,13 @@ export interface Photo {
   id: string;
   thumb_url: string | null;
   original_url: string;
+  /**
+   * Where this photo was published before we mirrored it, when its album has
+   * such an origin — a Telegram post, a photographer's gallery page. null for
+   * an ordinary Drive album, which is most of them, so every consumer must
+   * treat it as optional and fall back to original_url.
+   */
+  source_url: string | null;
   width: number | null;
   height: number | null;
   taken_at: string | null;
@@ -385,6 +392,17 @@ export const api = {
       }),
 
     /**
+     * How to rebuild a link to the post a mirrored photo came from, e.g.
+     * 'https://t.me/channel/{n}'. Expanded against each photo's Drive filename
+     * at index time, so a change only reaches photos indexed after it. Empty
+     * clears it.
+     */
+    setSourceUrlTemplate: (sourceId: string, template: string) =>
+      req<{ ok: true }>(`/api/admin/sources/${sourceId}`, {
+        ...json({ source_url_template: template }), method: 'PATCH',
+      }),
+
+    /**
      * One round of a link removal. Returns what is left to purge, because a large
      * album takes several calls — see removeSourceFully on the admin event page.
      */
@@ -507,7 +525,8 @@ export const api = {
         sources: { id: string; drive_folder_id: string; drive_url: string;
                    discovered: number; discovered_known: boolean; indexed: number;
                    missing: number; added_at: string; image_source: string;
-                   credit_name: string | null; removed_at: string | null }[];
+                   credit_name: string | null; removed_at: string | null;
+                   source_url_template: string | null }[];
         totals: { links: number; removed_links: number; found: number; found_known: boolean;
                   indexed: number; missing: number };
         jobs: { id: string; source_id: string | null; status: string; done: number; total: number;

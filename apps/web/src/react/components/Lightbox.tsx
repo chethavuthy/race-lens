@@ -17,7 +17,7 @@
  * Only transform and opacity are animated, so none of it touches layout or paint.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight, ExternalLink, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ExternalLink, Link2, X } from 'lucide-react';
 import { clockTime } from '@/lib/format';
 import type { Photo } from '@/lib/api';
 
@@ -108,6 +108,22 @@ export function Lightbox({
         <span className="tabular text-sm text-white/60">
           {index + 1} / {photos.length}
         </span>
+        {/* Only for an album mirrored from somewhere public. It sits BEFORE
+            "Full size" because when it exists it is the better destination: the
+            photographer's own post, with their caption and their credit, rather
+            than our Drive copy. Both are offered — the post can be edited or
+            deleted at the origin, while the mirror always resolves. */}
+        {photo.source_url && (
+          <a
+            href={photo.source_url}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-sm text-white/80
+                       hover:text-white focus-visible:ring-3 focus-visible:ring-ring focus-visible:outline-none"
+          >
+            <span className="hidden sm:inline">Original post</span> <Link2 className="size-4" />
+          </a>
+        )}
         <a
           href={photo.original_url}
           target="_blank"

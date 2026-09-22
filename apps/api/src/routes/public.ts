@@ -39,7 +39,7 @@ const NOT_REMOVED =
 publicRoutes.get('/events/:slug', async (c) => {
   const event = await getEventBySlug(c.env, c.req.param('slug'));
   const { results } = await c.env.DB.prepare(
-    `SELECT p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.taken_at
+    `SELECT p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.taken_at, p.source_url
        FROM photos p WHERE p.event_id = ? ${NOT_REMOVED} ORDER BY p.id LIMIT 60`,
   ).bind(event.id).all<any>();
 
@@ -69,7 +69,7 @@ publicRoutes.get('/events/:slug/photos', async (c) => {
   const cursor = c.req.query('cursor') ?? '';
   // Keyset pagination on the primary key — stable and index-only.
   const { results } = await c.env.DB.prepare(
-    `SELECT p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.taken_at
+    `SELECT p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.taken_at, p.source_url
        FROM photos p WHERE p.event_id = ? AND p.id > ? ${NOT_REMOVED} ORDER BY p.id LIMIT ?`,
   ).bind(event.id, cursor, limit).all<any>();
   return c.json({
@@ -93,7 +93,7 @@ publicRoutes.get('/events/:slug/bib/:bib', async (c) => {
   if (!bib) return c.json({ photos: [], matched: null });
   const digits = bibDigits(bib);
 
-  const select = `SELECT p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.taken_at,
+  const select = `SELECT p.id, p.drive_file_id, p.thumb_key, p.width, p.height, p.taken_at, p.source_url,
                          b.conf, b.bib, b.bib_raw
                     FROM bibs b JOIN photos p ON p.id = b.photo_id
                    WHERE b.event_id = ? ${NOT_REMOVED}`;

@@ -28,6 +28,7 @@ from PIL import Image, ImageOps
 from .bibs import DEFAULT_MIN_DIGITS, MAX_DIGITS, BibReader, parse_prefixes
 from .config import Config
 from .drive import DriveClient, DriveImage, QuotaExceeded
+from .source_url import expand as expand_source_url
 from .faces import FaceEngine, quantize
 from .photo_work import process_frame
 from .prefetch import Prefetcher
@@ -252,6 +253,9 @@ def run(args: argparse.Namespace) -> int:
     # numbers. Skipping it also avoids loading the OCR model entirely.
     event_cfg = up.event_config(args.event_id)
     read_bibs = bool(event_cfg.get("bibs_enabled", True))
+    # Where this folder's photos were published before we mirrored them.
+    # None for an ordinary Drive album, which is most of them.
+    url_template = up.source_config(args.source_id).get("source_url_template")
     # Shortest number that counts as a bib at this race. BibReader clamps it, so
     # a missing or nonsense value degrades to the default rather than to a
     # pattern that matches every number in the frame.
@@ -487,6 +491,10 @@ def run(args: argparse.Namespace) -> int:
                     {
                         "drive_file_id": img.id,
                         "thumb_key": thumb_key,
+                        # Resolved from the DRIVE FILENAME, the only per-photo
+                        # identifier that survives the trip from the origin.
+                        # None unless this source has a template.
+                        "source_url": expand_source_url(url_template, img.name),
                         # The decoded frame's size, NOT Drive's imageMediaMetadata.
                         #
                         # These are the denominator the client divides faces.bbox by to
